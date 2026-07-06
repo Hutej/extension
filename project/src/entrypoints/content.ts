@@ -1,32 +1,37 @@
 import { buildSemanticMap, serializeForAI, type SemanticMap, type SemanticNode } from '@/core/observe';
-import { applyPlan, removeStyles, removeAllStyles, injectStoredCSS, tagIsolateSiblings, type ApplyResult } from '@/core/apply';
+import { applyPlan, removeStyles, removeAllStyles, injectStoredCSS, tagIsolateSiblings, reapplyBehavior, teardownBehaviors, type ApplyResult } from '@/core/apply';
 import { type Plan } from '@/core/plan';
 import { loadSiteState, saveSiteState, reidentify, clearSiteState } from '@/core/persist';
+
+import { type PlanResult } from '@/core/reason';
 
 let lastMap: SemanticMap | null = null;
 let lastOutline = '';
 
-async function runTransform(intent: string): Promise<Plan> {
+async function runTransform(intent: string): Promise<PlanResult> {
   lastMap = buildSemanticMap();
-  lastOutline = serializeForAI(lastMap);
+  const { outline, truncated } = serializeForAI(lastMap);
+  lastOutline = outline;
   
-  return new Promise((resolve, reject) => {
-    browser.runtime.sendMessage(
+  if (truncated) {
+    console.log('[WebMorph] Outline was truncated to fit token budget.');
+  }
+  
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(
       { action: 'transform', intent, outline: lastOutline },
-      (response: any) => {
-        if (browser.runtime.lastError) {
-          return reject(browser.runtime.lastError);
+      (response) => {
+        if (chrome.runtime.lastError) {
+          resolve({ ok: false, kind: 'unknown', message: chrome.runtime.lastError.message || 'Error communicating with background' });
+        } else {
+          resolve(response as PlanResult);
         }
-        if (response.error) {
-          return reject(new Error(response.error));
-        }
-        resolve(response.plan);
       }
     );
   });
 }
 
-async function applyAndReset(plan: Plan | null, intent: string = ''): Promise<ApplyResult | null> {
+async function applyAndSave(plan: Plan | null, intent: string = ''): Promise<ApplyResult | null> {
   if (!plan) {
     removeStyles();
     return null;
@@ -43,10 +48,20 @@ async function applyAndReset(plan: Plan | null, intent: string = ''): Promise<Ap
   
   const result = applyPlan(plan, validIds, intent);
   
+  const origin = window.location.origin;
+  const state = await loadSiteState(origin);
+  
+  // Save CSS transform record if any CSS was produced
   if (result.transformRecord) {
-    const origin = window.location.origin;
-    const state = await loadSiteState(origin);
     state.transforms.push(result.transformRecord);
+  }
+  
+  // Save Tier 1 behavior records
+  for (const beh of result.behaviorRecords) {
+    state.behaviors.push(beh);
+  }
+  
+  if (result.transformRecord || result.behaviorRecords.length > 0) {
     state.enabled = true;
     await saveSiteState(origin, state);
   }
@@ -57,7 +72,7 @@ async function applyAndReset(plan: Plan | null, intent: string = ''): Promise<Ap
 async function toggleSiteState() {
   const origin = window.location.origin;
   const state = await loadSiteState(origin);
-  if (state.transforms.length === 0) return;
+  if (state.transforms.length === 0 && state.behaviors.length === 0) return;
   state.enabled = !state.enabled;
   await saveSiteState(origin, state);
   
@@ -71,10 +86,11 @@ async function toggleSiteState() {
 async function initPersistence() {
   const origin = window.location.origin;
   const state = await loadSiteState(origin);
-  if (state.enabled && state.transforms.length > 0) {
+  if (state.enabled && (state.transforms.length > 0 || state.behaviors.length > 0)) {
     const reidResults: any[] = [];
     let fullCss = '';
     
+    // Re-apply CSS transforms
     for (const transform of state.transforms) {
       if (transform.kind === 'hide' && transform.targetDescriptors) {
         transform.targetDescriptors.forEach((desc, i) => {
@@ -94,7 +110,15 @@ async function initPersistence() {
       fullCss += transform.css + '\n';
     }
     
-    injectStoredCSS(fullCss);
+    if (fullCss.trim()) {
+      injectStoredCSS(fullCss);
+    }
+    
+    // Re-apply Tier 1 behaviors
+    for (const behavior of state.behaviors) {
+      const result = reapplyBehavior(behavior);
+      reidResults.push({ kind: 'behavior', actionType: behavior.actionType, success: result.success });
+    }
     
     // Broadcast for tests
     window.postMessage({ type: 'WEBMORPH_REID_RESULTS', results: reidResults }, '*');
@@ -112,14 +136,17 @@ export default defineContentScript({
     window.addEventListener('message', async (e) => {
       if (e.data && e.data.type === 'WEBMORPH_TEST_RUN') {
         try {
-          const plan = await runTransform(e.data.intent);
-          const result = await applyAndReset(plan, e.data.intent);
-          window.postMessage({ type: 'WEBMORPH_TEST_RESULT', plan, result }, '*');
+          const res = await runTransform(e.data.intent);
+          if (res.ok) {
+            const result = await applyAndSave(res.plan, e.data.intent);
+            window.postMessage({ type: 'WEBMORPH_TEST_RESULT', plan: res.plan, result }, '*');
+          } else {
+            window.postMessage({ type: 'WEBMORPH_TEST_RESULT', error: JSON.stringify(res), kind: res.kind }, '*');
+          }
         } catch (err: any) {
           window.postMessage({ type: 'WEBMORPH_TEST_RESULT', error: err.message }, '*');
         }
       } else if (e.data && e.data.type === 'WEBMORPH_TEST_RESET') {
-        // Just clear the styles for testing reset
         removeStyles();
         window.postMessage({ type: 'WEBMORPH_TEST_RESET_DONE' }, '*');
       } else if (e.data && e.data.type === 'WEBMORPH_RESET_CLICKED') {
@@ -130,9 +157,10 @@ export default defineContentScript({
           window.postMessage({ type: 'WEBMORPH_TEST_REMOVE_ALL_DONE' }, '*');
         });
       } else if (e.data && e.data.type === 'WEBMORPH_TEST_GET_MAP') {
-        // Send a serializable version of the map
         const serializableRoots = lastMap ? JSON.parse(JSON.stringify(lastMap.roots)) : [];
         window.postMessage({ type: 'WEBMORPH_TEST_MAP', map: { roots: serializableRoots } }, '*');
+      } else if (e.data && e.data.type === 'WEBMORPH_TEST_INJECT_ERROR') {
+        chrome.runtime.sendMessage({ action: 'INJECT_ERROR', errors: e.data.errors }, () => {});
       }
     });
 
@@ -143,28 +171,31 @@ export default defineContentScript({
     });
 
     browser.runtime.onMessage.addListener(
-      (message: { action: string; intent?: string }, _sender, sendResponse) => {
+      (message: { action: string; intent?: string }, _sender) => {
         if (message.action === 'transform' && message.intent) {
-          runTransform(message.intent)
-            .then(async plan => {
-              const result = await applyAndReset(plan, message.intent!);
-              sendResponse({ ok: true, plan, result });
+          return runTransform(message.intent)
+            .then(async res => {
+              if (res.ok) {
+                const result = await applyAndSave(res.plan, message.intent!);
+                return { ok: true, plan: res.plan, result, count: result?.transformRecord?.targetDescriptors?.length || 0 };
+              } else {
+                return res;
+              }
             })
             .catch(err => {
-              sendResponse({ error: err.message });
+              return { ok: false, kind: 'unknown', message: err.message };
             });
-          return true; // async
         } else if (message.action === 'reset') {
-          applyAndReset(null);
-          sendResponse({ ok: true });
+          return applyAndSave(null).then(() => ({ ok: true }));
         } else if (message.action === 'toggle') {
-          toggleSiteState();
-          sendResponse({ ok: true });
+          return toggleSiteState().then(() => ({ ok: true }));
         } else if (message.action === 'remove_all') {
-          removeAllStyles();
-          sendResponse({ ok: true });
+          return clearSiteState(window.location.origin).then(() => {
+            removeAllStyles();
+            return { ok: true };
+          });
         }
-      },
+      }
     );
   },
 });

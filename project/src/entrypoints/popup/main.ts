@@ -47,16 +47,36 @@ transformBtn.addEventListener('click', async () => {
   transformBtn.disabled = true;
 
   try {
-    const res = await browser.tabs.sendMessage(tabId, { action: 'transform', intent });
-    if (res.error) {
-      statusEl.textContent = 'Error: ' + res.error;
-    } else {
-      const plan = res.plan;
-      statusEl.textContent = `Hidden: ${res.count} elements.\nReasoning: ${plan.reasoning}`;
-    }
+    chrome.tabs.sendMessage(tabId, { action: 'transform', intent }, (res) => {
+      if (chrome.runtime.lastError || !res) {
+        statusEl.textContent = 'Error communicating with page. Please refresh the page.';
+        transformBtn.disabled = false;
+        return;
+      }
+      
+      if (res.error) {
+        statusEl.textContent = 'Error: ' + res.error;
+      } else if (res.ok === false) {
+        const msgMap: Record<string, string> = {
+          'invalid_key': 'Invalid API key',
+          'rate_limited': 'Rate limited, try again',
+          'network': 'Network error',
+          'timeout': 'Request timed out',
+          'bad_output': "Couldn't produce a valid change"
+        };
+        statusEl.textContent = msgMap[res.kind] || res.message || 'Unknown error';
+      } else {
+        const plan = res.plan;
+        if (!plan || !plan.operations || plan.operations.length === 0) {
+          statusEl.textContent = 'Nothing to change for that request.';
+        } else {
+          statusEl.textContent = `Applied ${plan.operations.length} actions.\nReasoning: ${plan.reasoning}`;
+        }
+      }
+      transformBtn.disabled = false;
+    });
   } catch (err: any) {
     statusEl.textContent = 'Error communicating with page. Please refresh the page.';
-  } finally {
     transformBtn.disabled = false;
   }
 });
@@ -66,8 +86,13 @@ resetBtn.addEventListener('click', async () => {
   if (!tabId) return;
   
   try {
-    await browser.tabs.sendMessage(tabId, { action: 'reset' });
-    statusEl.textContent = 'Reset complete.';
+    chrome.tabs.sendMessage(tabId, { action: 'reset' }, () => {
+      if (chrome.runtime.lastError) {
+        statusEl.textContent = 'Reset failed: Please refresh the page.';
+      } else {
+        statusEl.textContent = 'Reset complete.';
+      }
+    });
   } catch (err: any) {
     statusEl.textContent = 'Reset failed: Please refresh the page.';
   }
@@ -106,7 +131,7 @@ toggleBtn.addEventListener('click', async () => {
   await saveSiteState(origin, state);
   updateSiteStatus();
   // Tell content script to toggle
-  browser.tabs.sendMessage(tab.id, { action: 'toggle' });
+  chrome.tabs.sendMessage(tab.id, { action: 'toggle' });
 });
 
 removeBtn.addEventListener('click', async () => {
@@ -117,7 +142,7 @@ removeBtn.addEventListener('click', async () => {
   await clearSiteState(origin);
   updateSiteStatus();
   // Tell content script to remove
-  browser.tabs.sendMessage(tab.id, { action: 'remove_all' });
+  chrome.tabs.sendMessage(tab.id, { action: 'remove_all' });
 });
 
 updateSiteStatus();

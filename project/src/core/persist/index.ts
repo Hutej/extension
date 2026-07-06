@@ -1,4 +1,5 @@
 import { getSemanticRole, getAccessibleName } from '../observe';
+import type { ActionSpec, InnerAction } from '../plan';
 
 export interface TargetDescriptor {
   tag: string;
@@ -8,6 +9,15 @@ export interface TargetDescriptor {
   ancestorChain: { tag: string; role: string }[];
   childElementCount: number;
   approxRect: { x: number; y: number; width: number; height: number };
+}
+
+export interface BehaviorRecord {
+  id: string;
+  intent: string;
+  actionType: string;
+  descriptor?: TargetDescriptor | null;
+  actionSpec: ActionSpec;
+  createdAt: number;
 }
 
 export interface TransformRecord {
@@ -23,6 +33,7 @@ export interface TransformRecord {
 export interface SiteState {
   enabled: boolean;
   transforms: TransformRecord[];
+  behaviors: BehaviorRecord[];
 }
 
 export function buildDescriptor(el: Element): TargetDescriptor {
@@ -109,9 +120,12 @@ export function reidentify(desc: TargetDescriptor): { el: Element, confidence: n
 export async function loadSiteState(origin: string): Promise<SiteState> {
   const result = await browser.storage.local.get([origin]);
   if (result[origin]) {
-    return result[origin] as SiteState;
+    const state = result[origin] as any;
+    // Migration: ensure behaviors array exists
+    if (!state.behaviors) state.behaviors = [];
+    return state as SiteState;
   }
-  return { enabled: true, transforms: [] };
+  return { enabled: true, transforms: [], behaviors: [] };
 }
 
 export async function saveSiteState(origin: string, state: SiteState): Promise<void> {

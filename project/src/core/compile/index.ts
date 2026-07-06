@@ -3,7 +3,7 @@
  * EMPTY: typed interface only, implementation in a later step.
  */
 
-import type { TransformPlan } from '../plan';
+import type { Plan } from '../plan';
 
 /** Compiled CSS output ready for injection. */
 export interface CompiledStyles {
@@ -13,5 +13,5 @@ export interface CompiledStyles {
 
 /** Compiler contract — not implemented yet. */
 export interface Compiler {
-  compile(plan: TransformPlan): CompiledStyles;
+  compile(plan: Plan): CompiledStyles;
 }

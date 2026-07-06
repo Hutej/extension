@@ -468,7 +468,7 @@ export function getAccessibleName(el: Element): string {
   if (!name) name = el.getAttribute('aria-label') || '';
   if (!name && el.tagName === 'IMG') name = el.getAttribute('alt') || '';
   if (!name) name = el.getAttribute('title') || '';
-  if (!name && el.tagName === 'INPUT') name = (el as HTMLInputElement).placeholder || el.getAttribute('placeholder') || '';
+  if (!name && 'placeholder' in el) name = (el as HTMLInputElement).placeholder || el.getAttribute('placeholder') || '';
   if (!name) {
     let directText = '';
     for (let i = 0; i < el.childNodes.length; i++) {
@@ -629,14 +629,17 @@ export function buildSemanticMap(): SemanticMap {
   };
 }
 
-export function serializeForAI(map: SemanticMap): string {
+export function serializeForAI(map: SemanticMap, maxTokens: number = 8000): { outline: string, truncated: boolean } {
   const vpArea = window.innerWidth * window.innerHeight;
-  let lines: string[] = [];
+  const maxChars = maxTokens * 4; // approx 4 chars per token
+  let lines: { node: SemanticNode, depth: number, line: string, score: number, keep: boolean }[] = [];
 
-  function printNode(n: SemanticNode, depth: number) {
-    const indent = '  '.repeat(depth);
+  const LANDMARKS = new Set(['main', 'navigation', 'banner', 'contentinfo', 'form', 'region']);
+  const INTERACTIVE = new Set(['button', 'link', 'textbox', 'combobox', 'searchbox', 'spinbutton', 'slider']);
+
+  function collectNodes(n: SemanticNode, depth: number) {
     const type = n.role || n.tag;
-    let line = `${indent}${type}`;
+    let line = `${'  '.repeat(depth)}${type}`;
     if (n.name) {
       if (n.inferredName) line += ` "${n.name}" (inferred)`;
       else line += ` "${n.name}"`;
@@ -654,16 +657,47 @@ export function serializeForAI(map: SemanticMap): string {
       line += ` ${flags.join(' ')}`;
     }
     
-    lines.push(line);
+    let score = 0;
+    if (LANDMARKS.has(type)) score += 100;
+    if (INTERACTIVE.has(type)) score += 100;
+    if (n.name) score += 50;
+    if (n.inViewport) score += 20;
+    score -= depth; // penalize deep nodes
+
+    lines.push({ node: n, depth, line, score, keep: true });
+    
     for (const c of n.children) {
-      printNode(c, depth + 1);
+      collectNodes(c, depth + 1);
     }
   }
 
   for (const r of map.roots) {
-    printNode(r, 0);
+    collectNodes(r, 0);
   }
-  return lines.join('\n');
+
+  // Calculate current length
+  let totalChars = lines.reduce((sum, l) => sum + l.line.length + 1, 0);
+  let truncated = false;
+
+  if (totalChars > maxChars) {
+    truncated = true;
+    // Sort by score ascending (lowest priority first)
+    const sorted = [...lines].sort((a, b) => a.score - b.score);
+    for (const item of sorted) {
+      if (totalChars <= maxChars) break;
+      // Do not truncate essential nodes if possible, but if we have to, we have to.
+      // But rules say: keep landmarks + interactive + named nodes.
+      // If score >= 50, it's one of those. We try to only drop score < 50.
+      if (item.score >= 50 && totalChars <= maxChars + 2000) {
+        continue; // Give a little leeway for essential nodes
+      }
+      item.keep = false;
+      totalChars -= (item.line.length + 1);
+    }
+  }
+
+  const finalLines = lines.filter(l => l.keep).map(l => l.line);
+  return { outline: finalLines.join('\\n'), truncated };
 }
 
 export function findPrimaryContentNode(): Element | null {
