@@ -13,14 +13,13 @@ export interface InnerAction {
 }
 
 export interface Operation {
-  op: 'hide' | 'act';
+  op: 'hide' | 'isolate' | 'act';
   targetId?: string;
+  keepId?: string;
   action?: ActionSpec;
 }
 
 export interface Plan {
-  mode: 'isolate' | 'edit';
-  keepId: string | null;
   operations: Operation[];
   reasoning: string;
 }

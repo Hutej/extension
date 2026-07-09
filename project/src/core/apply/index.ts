@@ -19,12 +19,12 @@ export interface ApplyResult {
   dropped: string[];
   expanded: boolean;
   primaryContentId: string | null;
-  transformRecord?: TransformRecord;
+  transformRecords: TransformRecord[];
   behaviorRecords: BehaviorRecord[];
   actionResults: ActionResult[];
 }
 
-export interface ActionResult {
+interface ActionResult {
   type: string;
   success: boolean;
   reason?: string;
@@ -54,11 +54,32 @@ export function applyPlan(plan: Plan, validIds: Set<string>, intent: string): Ap
   const transformId = `tf_${Date.now()}_${transformCounter++}`;
   const targetDescriptors: TargetDescriptor[] = [];
   let keepDescriptor: TargetDescriptor | null = null;
+  const transformRecords: TransformRecord[] = [];
 
-  if (plan.mode === 'isolate') {
-    if (plan.keepId && validIds.has(plan.keepId)) {
-      let keepEl = document.querySelector(`[data-wm-id="${plan.keepId}"]`);
-      if (keepEl) {
+  for (const op of plan.operations) {
+    try {
+      if (op.op === 'hide' && op.targetId) {
+        if (!validIds.has(op.targetId)) continue;
+        const targetEl = document.querySelector(`[data-wm-id="${op.targetId}"]`);
+        if (!targetEl) continue;
+        if (targetEl.tagName === 'BODY' || targetEl.tagName === 'HTML' || targetEl.hasAttribute('data-webmorph-ui') || targetEl.closest('[data-webmorph-ui]')) {
+          dropped.push(op.targetId);
+          continue;
+        }
+        if (primaryEl && (targetEl === primaryEl || targetEl.contains(primaryEl))) {
+          dropped.push(op.targetId);
+          continue;
+        }
+        targetDescriptors.push(buildDescriptor(targetEl));
+        const targetClass = `${transformId}_${count}`;
+        targetEl.setAttribute('data-wm-target', targetClass);
+        css += `[data-wm-target="${targetClass}"] { display: none !important; }\n`;
+        count++;
+      } else if (op.op === 'isolate' && op.keepId) {
+        if (!validIds.has(op.keepId)) continue;
+        let keepEl = document.querySelector(`[data-wm-id="${op.keepId}"]`);
+        if (!keepEl) continue;
+
         if (primaryEl && !keepEl.contains(primaryEl)) {
           let p = keepEl.parentElement;
           while (p && !p.contains(primaryEl)) {
@@ -74,10 +95,10 @@ export function applyPlan(plan: Plan, validIds: Set<string>, intent: string): Ap
 
         let current: Element | null = keepEl;
         while (current && current !== document.body && current !== document.documentElement) {
-          const parent = current.parentElement;
-          if (parent) {
-            for (let i = 0; i < parent.children.length; i++) {
-              const child = parent.children[i];
+          const parentEl: HTMLElement | null = current.parentElement;
+          if (parentEl) {
+            for (let i = 0; i < parentEl.children.length; i++) {
+              const child = parentEl.children[i];
               if (child !== current && child.tagName !== 'SCRIPT' && child.tagName !== 'STYLE' && child.tagName !== 'LINK') {
                 if (child.hasAttribute('data-webmorph-ui') || child.closest('[data-webmorph-ui]')) {
                   continue;
@@ -89,52 +110,44 @@ export function applyPlan(plan: Plan, validIds: Set<string>, intent: string): Ap
               }
             }
           }
-          current = parent;
+          current = parentEl;
+        }
+
+        transformRecords.push({
+          id: transformId,
+          intent,
+          kind: 'isolate',
+          keepDescriptor,
+          css: '', // will be filled below with final css
+          createdAt: Date.now()
+        });
+      } else if (op.op === 'act' && op.action) {
+        const targetId = op.action.targetId || op.action.do?.targetId;
+        const targetEl = targetId ? document.querySelector(`[data-wm-id="${targetId}"]`) : null;
+        const descriptor = targetEl ? buildDescriptor(targetEl) : null;
+        let result: ActionResult;
+        if (op.action.type === 'addShortcut') {
+          result = execAddShortcut(op.action.key, op.action.do, validIds, descriptor);
+        } else {
+          result = executeAction(op.action, validIds);
+          actionResults.push(result);
+        }
+        // Persist Tier 1 actions
+        if (result.success && TIER1_TYPES.has(op.action.type)) {
+          behaviorRecords.push({
+            id: `bh_${Date.now()}_${transformCounter++}`,
+            intent,
+            actionType: op.action.type,
+            descriptor: targetEl ? buildDescriptor(targetEl) : null,
+            actionSpec: op.action,
+            createdAt: Date.now()
+          });
         }
       }
-    }
-  } else if (plan.mode === 'edit') {
-    for (const op of plan.operations) {
-      try {
-        if (op.op === 'hide' && op.targetId) {
-          if (!validIds.has(op.targetId)) continue;
-          const targetEl = document.querySelector(`[data-wm-id="${op.targetId}"]`);
-          if (!targetEl) continue;
-          if (targetEl.tagName === 'BODY' || targetEl.tagName === 'HTML' || targetEl.hasAttribute('data-webmorph-ui') || targetEl.closest('[data-webmorph-ui]')) {
-            dropped.push(op.targetId);
-            continue;
-          }
-          if (primaryEl && (targetEl === primaryEl || targetEl.contains(primaryEl))) {
-            dropped.push(op.targetId);
-            continue;
-          }
-          targetDescriptors.push(buildDescriptor(targetEl));
-          const targetClass = `${transformId}_${count}`;
-          targetEl.setAttribute('data-wm-target', targetClass);
-          css += `[data-wm-target="${targetClass}"] { display: none !important; }\n`;
-          count++;
-        } else if (op.op === 'act' && op.action) {
-          const result = executeAction(op.action, validIds);
-          actionResults.push(result);
-          // Persist Tier 1 actions
-          if (result.success && TIER1_TYPES.has(op.action.type)) {
-            const targetId = op.action.targetId || op.action.do?.targetId;
-            const targetEl = targetId ? document.querySelector(`[data-wm-id="${targetId}"]`) : null;
-            behaviorRecords.push({
-              id: `bh_${Date.now()}_${transformCounter++}`,
-              intent,
-              actionType: op.action.type,
-              descriptor: targetEl ? buildDescriptor(targetEl) : null,
-              actionSpec: op.action,
-              createdAt: Date.now()
-            });
-          }
-        }
-      } catch (e: any) {
-        logDebug(`Operation ${op.op} failed: ${e.message}`);
-        if (op.op === 'act' && op.action) {
-          actionResults.push({ type: op.action.type, success: false, reason: e.message });
-        }
+    } catch (e: any) {
+      logDebug(`Operation ${op.op} failed: ${e.message}`);
+      if (op.op === 'act' && op.action) {
+        actionResults.push({ type: op.action.type, success: false, reason: e.message });
       }
     }
   }
@@ -148,21 +161,30 @@ export function applyPlan(plan: Plan, validIds: Set<string>, intent: string): Ap
 
   ensureEscapeUI();
 
-  const record: TransformRecord = {
-    id: transformId,
-    intent,
-    kind: plan.mode === 'isolate' ? 'isolate' : 'hide',
-    keepDescriptor,
-    targetDescriptors,
-    css,
-    createdAt: Date.now()
-  };
+  // Update isolate record with final CSS
+  for (const rec of transformRecords) {
+    if (rec.kind === 'isolate') {
+      rec.css = css;
+    }
+  }
 
-  return { count, dropped, expanded, primaryContentId: primaryId, transformRecord: css ? record : undefined, behaviorRecords, actionResults };
+  // Create hide transform record if needed
+  if (css && targetDescriptors.length > 0 && !transformRecords.some(r => r.kind === 'isolate')) {
+    transformRecords.push({
+      id: transformId,
+      intent,
+      kind: 'hide',
+      targetDescriptors,
+      css,
+      createdAt: Date.now()
+    });
+  }
+
+  return { count, dropped, expanded, primaryContentId: primaryId, transformRecords, behaviorRecords, actionResults };
 }
 
 // ── Behavior engine ────────────────────────────────────────────────
-function executeAction(action: ActionSpec, validIds: Set<string>): ActionResult {
+function executeAction(action: ActionSpec, validIds: Set<string>, descriptor?: TargetDescriptor | null): ActionResult {
   if (!ALLOWED_ACTION_TYPES.has(action.type)) {
     return { type: action.type, success: false, reason: `Unknown action type: ${action.type}` };
   }
@@ -180,7 +202,7 @@ function executeAction(action: ActionSpec, validIds: Set<string>): ActionResult 
     case 'autoLoadMore':
       return execAutoLoadMore(action.targetId, action.maxClicks, validIds);
     case 'addShortcut':
-      return execAddShortcut(action.key, action.do, validIds);
+      return execAddShortcut(action.key, action.do, validIds, descriptor || null);
     default:
       return { type: action.type, success: false, reason: 'Unhandled action type' };
   }
@@ -231,48 +253,51 @@ function execScrollToTarget(targetId: string | undefined, validIds: Set<string>)
   return { type: 'scrollToTarget', success: true };
 }
 
-function execClickTarget(targetId: string | undefined, validIds: Set<string>): ActionResult {
-  if (!targetId || !validIds.has(targetId)) {
-    return { type: 'clickTarget', success: false, reason: 'Invalid targetId' };
-  }
-  const el = document.querySelector(`[data-wm-id="${targetId}"]`);
-  if (!el) return { type: 'clickTarget', success: false, reason: 'Element not found' };
-
-  // SAFETY GUARD: refuse submit controls, password/payment forms, cross-origin nav
-  const htmlEl = el as HTMLElement;
-  // Check submit control
+function checkInteractionSafety(el: Element): string | null {
   if (el.tagName === 'BUTTON' && (el as HTMLButtonElement).type === 'submit') {
-    return { type: 'clickTarget', success: false, reason: 'Refused: submit button' };
+    return 'Refused: submit button';
   }
   if (el.tagName === 'INPUT' && (el as HTMLInputElement).type === 'submit') {
-    return { type: 'clickTarget', success: false, reason: 'Refused: submit input' };
+    return 'Refused: submit input';
   }
-  // Check if inside a form with password/payment inputs
   const form = el.closest('form');
   if (form) {
-    const hasPassword = form.querySelector('input[type="password"]');
-    const hasPayment = form.querySelector('input[autocomplete*="cc-"], input[name*="card"], input[name*="payment"]');
-    if (hasPassword) {
-      return { type: 'clickTarget', success: false, reason: 'Refused: form contains password input' };
+    if (form.querySelector('input[type="password"]')) {
+      return 'Refused: form contains password input';
     }
-    if (hasPayment) {
-      return { type: 'clickTarget', success: false, reason: 'Refused: form contains payment input' };
+    if (form.querySelector('input[autocomplete*="cc-"], input[name*="card"], input[name*="payment"]')) {
+      return 'Refused: form contains payment input';
     }
   }
-  // Check cross-origin anchor
   if (el.tagName === 'A') {
     const href = (el as HTMLAnchorElement).href;
     try {
       const linkOrigin = new URL(href, window.location.href).origin;
       if (linkOrigin !== window.location.origin) {
-        return { type: 'clickTarget', success: false, reason: 'Refused: cross-origin navigation' };
+        return 'Refused: cross-origin navigation';
       }
     } catch {
       // Invalid URL, skip
     }
   }
+  return null;
+}
 
-  htmlEl.click();
+function execClickTarget(targetId: string | undefined, validIds: Set<string>): ActionResult {
+  if (!targetId || !validIds.has(targetId)) {
+    return { type: 'clickTarget', success: false, reason: 'Invalid targetId' };
+  }
+  const el = document.querySelector(`[data-wm-id="${targetId}"]`);
+  if (!el) {
+    return { type: 'clickTarget', success: false, reason: 'Element not found' };
+  }
+
+  const error = checkInteractionSafety(el);
+  if (error) {
+    return { type: 'clickTarget', success: false, reason: error };
+  }
+
+  (el as HTMLElement).click();
   return { type: 'clickTarget', success: true };
 }
 
@@ -322,6 +347,11 @@ function execAutoLoadMore(targetId: string | undefined, maxClicks: number | unde
     while (clicks < cap && !signal.aborted) {
       const el = document.querySelector(`[data-wm-id="${targetId}"]`);
       if (!el || getComputedStyle(el).display === 'none' || getComputedStyle(el).visibility === 'hidden') break;
+      const error = checkInteractionSafety(el);
+      if (error) {
+        window.postMessage({ type: 'WEBMORPH_AUTOLOAD_ABORT', reason: error }, '*');
+        break;
+      }
       (el as HTMLElement).click();
       clicks++;
       await new Promise(r => setTimeout(r, 800));
@@ -332,7 +362,7 @@ function execAutoLoadMore(targetId: string | undefined, maxClicks: number | unde
   return { type: 'autoLoadMore', success: true, reason: `Started with cap=${cap}` };
 }
 
-function execAddShortcut(key: string | undefined, innerAction: InnerAction | undefined, validIds: Set<string>): ActionResult {
+function execAddShortcut(key: string | undefined, innerAction: InnerAction | undefined, validIds: Set<string>, descriptor: TargetDescriptor | null): ActionResult {
   if (!key || !innerAction) {
     return { type: 'addShortcut', success: false, reason: 'Missing key or action' };
   }
@@ -360,7 +390,15 @@ function execAddShortcut(key: string | undefined, innerAction: InnerAction | und
     e.preventDefault();
 
     // Re-identify target at trigger time via reidentify or direct lookup
-    const targetEl = document.querySelector(`[data-wm-id="${innerAction.targetId}"]`);
+    let targetEl: Element | null = null;
+    if (descriptor) {
+      const match = reidentify(descriptor);
+      if (match) targetEl = match.el;
+    }
+    if (!targetEl) {
+      targetEl = document.querySelector(`[data-wm-id="${innerAction.targetId}"]`);
+    }
+    
     if (!targetEl) return;
 
     if (innerAction.type === 'clickTarget') {
@@ -383,21 +421,13 @@ export function reapplyBehavior(behavior: BehaviorRecord): ActionResult {
   }
   if (behavior.actionType === 'addShortcut' && behavior.actionSpec.key && behavior.actionSpec.do) {
     // Re-resolve target via reidentify if descriptor available
-    let targetId = behavior.actionSpec.do.targetId;
-    if (behavior.descriptor) {
-      const match = reidentify(behavior.descriptor);
-      if (match) {
-        const wmId = match.el.getAttribute('data-wm-id');
-        if (wmId) targetId = wmId;
-      }
-    }
-    const innerAction: InnerAction = { type: behavior.actionSpec.do.type, targetId };
+    const innerAction = behavior.actionSpec.do;
     const allIds = new Set<string>();
     document.querySelectorAll('[data-wm-id]').forEach(el => {
       const id = el.getAttribute('data-wm-id');
       if (id) allIds.add(id);
     });
-    return execAddShortcut(behavior.actionSpec.key, innerAction, allIds);
+    return execAddShortcut(behavior.actionSpec.key, innerAction, allIds, behavior.descriptor || null);
   }
   return { type: behavior.actionType, success: false, reason: 'Unknown behavior type for re-apply' };
 }
@@ -468,10 +498,10 @@ export function tagIsolateSiblings(keepEl: Element, transformId: string): void {
   let count = 0;
   let current: Element | null = keepEl;
   while (current && current !== document.body && current !== document.documentElement) {
-    const parent = current.parentElement;
-    if (parent) {
-      for (let i = 0; i < parent.children.length; i++) {
-        const child = parent.children[i];
+    const parentEl: HTMLElement | null = current.parentElement;
+    if (parentEl) {
+      for (let i = 0; i < parentEl.children.length; i++) {
+        const child = parentEl.children[i];
         if (child !== current && child.tagName !== 'SCRIPT' && child.tagName !== 'STYLE' && child.tagName !== 'LINK') {
           if (child.hasAttribute('data-webmorph-ui') || child.closest('[data-webmorph-ui]')) {
             continue;
@@ -482,6 +512,6 @@ export function tagIsolateSiblings(keepEl: Element, transformId: string): void {
         }
       }
     }
-    current = parent;
+    current = parentEl;
   }
 }

@@ -1,5 +1,5 @@
 import { getSemanticRole, getAccessibleName } from '../observe';
-import type { ActionSpec, InnerAction } from '../plan';
+import type { ActionSpec } from '../plan';
 
 export interface TargetDescriptor {
   tag: string;
@@ -85,16 +85,16 @@ export function reidentify(desc: TargetDescriptor): { el: Element, confidence: n
     if (textContent.substring(0, 60) === desc.textFingerprint) score += 20;
     
     // Ancestor chain similarity
-    let p = el.parentElement;
+    let pEl = el.parentElement;
     let matchCount = 0;
     let totalAnc = desc.ancestorChain.length;
     let ancIndex = 0;
-    while (p && p !== document.documentElement && ancIndex < totalAnc) {
+    while (pEl && pEl !== document.documentElement && ancIndex < totalAnc) {
       const ancDesc = desc.ancestorChain[ancIndex];
-      if (p.tagName.toLowerCase() === ancDesc.tag && (getSemanticRole(p) || '') === ancDesc.role) {
+      if (pEl.tagName.toLowerCase() === ancDesc.tag && (getSemanticRole(pEl) || '') === ancDesc.role) {
         matchCount++;
       }
-      p = p.parentElement;
+      pEl = pEl.parentElement;
       ancIndex++;
     }
     score += totalAnc > 0 ? (matchCount / totalAnc) * 20 : 20;

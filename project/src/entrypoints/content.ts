@@ -51,9 +51,11 @@ async function applyAndSave(plan: Plan | null, intent: string = ''): Promise<App
   const origin = window.location.origin;
   const state = await loadSiteState(origin);
   
-  // Save CSS transform record if any CSS was produced
-  if (result.transformRecord) {
-    state.transforms.push(result.transformRecord);
+  // Save CSS transform records if any CSS was produced
+  if (result.transformRecords.length > 0) {
+    for (const rec of result.transformRecords) {
+      state.transforms.push(rec);
+    }
   }
   
   // Save Tier 1 behavior records
@@ -61,7 +63,7 @@ async function applyAndSave(plan: Plan | null, intent: string = ''): Promise<App
     state.behaviors.push(beh);
   }
   
-  if (result.transformRecord || result.behaviorRecords.length > 0) {
+  if (result.transformRecords.length > 0 || result.behaviorRecords.length > 0) {
     state.enabled = true;
     await saveSiteState(origin, state);
   }
@@ -132,37 +134,46 @@ export default defineContentScript({
   main() {
     initPersistence();
 
-    // Expose for Playwright test via postMessage bridge
     window.addEventListener('message', async (e) => {
-      if (e.data && e.data.type === 'WEBMORPH_TEST_RUN') {
-        try {
-          const res = await runTransform(e.data.intent);
-          if (res.ok) {
-            const result = await applyAndSave(res.plan, e.data.intent);
-            window.postMessage({ type: 'WEBMORPH_TEST_RESULT', plan: res.plan, result }, '*');
-          } else {
-            window.postMessage({ type: 'WEBMORPH_TEST_RESULT', error: JSON.stringify(res), kind: res.kind }, '*');
-          }
-        } catch (err: any) {
-          window.postMessage({ type: 'WEBMORPH_TEST_RESULT', error: err.message }, '*');
-        }
-      } else if (e.data && e.data.type === 'WEBMORPH_TEST_RESET') {
-        removeStyles();
-        window.postMessage({ type: 'WEBMORPH_TEST_RESET_DONE' }, '*');
-      } else if (e.data && e.data.type === 'WEBMORPH_RESET_CLICKED') {
+      if (e.data && e.data.type === 'WEBMORPH_RESET_CLICKED') {
         toggleSiteState();
-      } else if (e.data && e.data.type === 'WEBMORPH_TEST_REMOVE_ALL') {
-        clearSiteState(window.location.origin).then(() => {
-          removeAllStyles();
-          window.postMessage({ type: 'WEBMORPH_TEST_REMOVE_ALL_DONE' }, '*');
-        });
-      } else if (e.data && e.data.type === 'WEBMORPH_TEST_GET_MAP') {
-        const serializableRoots = lastMap ? JSON.parse(JSON.stringify(lastMap.roots)) : [];
-        window.postMessage({ type: 'WEBMORPH_TEST_MAP', map: { roots: serializableRoots } }, '*');
-      } else if (e.data && e.data.type === 'WEBMORPH_TEST_INJECT_ERROR') {
-        chrome.runtime.sendMessage({ action: 'INJECT_ERROR', errors: e.data.errors }, () => {});
       }
     });
+
+    if (import.meta.env.DEV) {
+      window.addEventListener('message', async (e) => {
+        if (e.data && e.data.type === 'WEBMORPH_TEST_RUN') {
+          try {
+            const res = await runTransform(e.data.intent);
+            if (res.ok) {
+              const result = await applyAndSave(res.plan, e.data.intent);
+              window.postMessage({ type: 'WEBMORPH_TEST_RESULT', plan: res.plan, result }, '*');
+            } else {
+              window.postMessage({ type: 'WEBMORPH_TEST_RESULT', error: JSON.stringify(res), kind: res.kind }, '*');
+            }
+          } catch (err: any) {
+            window.postMessage({ type: 'WEBMORPH_TEST_RESULT', error: err.message }, '*');
+          }
+        } else if (e.data && e.data.type === 'WEBMORPH_TEST_RESET') {
+          removeStyles();
+          window.postMessage({ type: 'WEBMORPH_TEST_RESET_DONE' }, '*');
+        } else if (e.data && e.data.type === 'WEBMORPH_TEST_REMOVE_ALL') {
+          clearSiteState(window.location.origin).then(() => {
+            removeAllStyles();
+            window.postMessage({ type: 'WEBMORPH_TEST_REMOVE_ALL_DONE' }, '*');
+          });
+        } else if (e.data && e.data.type === 'WEBMORPH_TEST_GET_MAP') {
+          const serializableRoots = lastMap ? JSON.parse(JSON.stringify(lastMap.roots)) : [];
+          window.postMessage({ type: 'WEBMORPH_TEST_MAP', map: { roots: serializableRoots } }, '*');
+        } else if (e.data && e.data.type === 'WEBMORPH_TEST_INJECT_ERROR') {
+          chrome.runtime.sendMessage({ action: 'INJECT_ERROR', errors: e.data.errors }, () => {});
+        } else if (e.data && e.data.type === 'WEBMORPH_CLEAR_KEY') {
+          chrome.storage.local.remove('openai_api_key');
+        } else if (e.data && e.data.type === 'WEBMORPH_SET_KEY') {
+          chrome.storage.local.set({ openai_api_key: e.data.key });
+        }
+      });
+    }
 
     window.addEventListener('keydown', (e) => {
       if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'r') {
@@ -177,7 +188,8 @@ export default defineContentScript({
             .then(async res => {
               if (res.ok) {
                 const result = await applyAndSave(res.plan, message.intent!);
-                return { ok: true, plan: res.plan, result, count: result?.transformRecord?.targetDescriptors?.length || 0 };
+                const totalTargetDesc = result?.transformRecords?.reduce((acc, r) => acc + (r.targetDescriptors?.length || 0), 0) || 0;
+                return { ok: true, plan: res.plan, result, count: totalTargetDesc };
               } else {
                 return res;
               }

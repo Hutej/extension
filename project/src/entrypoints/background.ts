@@ -2,14 +2,18 @@ import { requestPlan, setTestInjectedError } from '@/core/reason';
 
 export default defineBackground(() => {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
-    if (message.action === 'INJECT_ERROR') {
+    if (import.meta.env.DEV && message.action === 'INJECT_ERROR') {
       setTestInjectedError(message.errors);
       sendResponse({ ok: true });
       return false; // synchronous
     }
     if (message.action === 'transform') {
-      chrome.storage.local.get(['openai_api_key'], async (result) => {
-        const apiKey = result.openai_api_key || 'test_key';
+      chrome.storage.local.get(['openai_api_key'], async (result: any) => {
+        const apiKey = result.openai_api_key as string;
+        if (!apiKey) {
+          sendResponse({ ok: false, kind: 'invalid_key', message: 'No API key set' });
+          return;
+        }
         
         try {
           const planResult = await requestPlan({

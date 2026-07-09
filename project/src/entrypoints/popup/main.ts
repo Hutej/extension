@@ -13,8 +13,8 @@ const toggleBtn = document.getElementById('toggleBtn') as HTMLButtonElement;
 const removeBtn = document.getElementById('removeBtn') as HTMLButtonElement;
 
 // Load API key
-browser.storage.local.get(['openai_api_key']).then(res => {
-  if (res.openai_api_key) apiKeyEl.value = res.openai_api_key;
+browser.storage.local.get(['openai_api_key']).then((res: any) => {
+  if (res.openai_api_key) apiKeyEl.value = res.openai_api_key as string;
 });
 
 settingsToggle.addEventListener('click', () => {

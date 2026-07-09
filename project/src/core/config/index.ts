@@ -1,7 +1,7 @@
 export const AI_CONFIG = {
-  model: 'gpt-4o',
+  model: 'gpt-5.2',
   max_tokens: 1500, // safety net
-  temperature: 0,
+  temperature: 0.1,
   timeoutMs: 30000,
   maxRetries: 3,
   baseBackoffMs: 1000,
@@ -9,7 +9,7 @@ export const AI_CONFIG = {
   maxOutlineTokens: 8000, // estimate for token budget
 };
 
-export const DEBUG = false;
+const DEBUG = false;
 
 export function logDebug(...args: any[]) {
   if (DEBUG) {
