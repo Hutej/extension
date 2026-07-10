@@ -30,10 +30,19 @@ export interface TransformRecord {
   createdAt: number;
 }
 
+export interface ThemeRecord {
+  id: string;
+  intent: string;
+  sanitizedCss: string;
+  reasoning: string;
+  createdAt: number;
+}
+
 export interface SiteState {
   enabled: boolean;
   transforms: TransformRecord[];
   behaviors: BehaviorRecord[];
+  theme?: ThemeRecord | null;
 }
 
 export function buildDescriptor(el: Element): TargetDescriptor {

@@ -1,11 +1,19 @@
 /**
- * Observe layer — Semantic Map builder.
+ * Observe layer — Semantic Map builder + Design Context extractor.
  * Synchronous, single-frame, read-only DOM scan.
  * Tree-based, role/name/accessibility oriented.
  */
 
+import { AI_CONFIG } from '../config';
+
 const IGNORED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'SVG', 'BR', 'HR', 'WBR', 'LINK', 'META', 'TEMPLATE', 'SLOT']);
 const STYLE_ELEMENT_ID = 'webmorph-styles';
+
+/** Roles that get stamped as data-wm-role on DOM nodes */
+const STAMPABLE_ROLES = new Set([
+  'navigation', 'main', 'banner', 'contentinfo', 'complementary', 'region',
+  'form', 'button', 'link', 'heading', 'list', 'article'
+]);
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -34,6 +42,16 @@ export interface SemanticMap {
   builtInMs: number;
   nodeCount: number;
   roots: SemanticNode[];
+}
+
+export interface DesignContext {
+  backgrounds: string[];
+  textColors: string[];
+  accentColors: string[];
+  fontFamilies: string[];
+  baseFontSize: string;
+  borderRadii: string[];
+  spacingRhythm: string[];
 }
 
 // ── Implicit semantic role map ─────────────────────────────────────
@@ -121,15 +139,18 @@ export function buildSemanticMap(): SemanticMap {
   let totalNodes = 0;
 
   function walk(el: HTMLElement, depth: number): SemanticNode[] {
-    if (depth > 20) return [];
+    if (depth > 20 || totalNodes >= AI_CONFIG.maxObserveNodes) return [];
+    if (performance.now() - t0 > AI_CONFIG.maxObserveTimeMs) return [];
+
     const tag = el.tagName.toUpperCase();
     if (IGNORED_TAGS.has(tag) || el.id === STYLE_ELEMENT_ID || el.id === 'webmorph-debug-overlay') return [];
 
-    const cs = getComputedStyle(el);
-    if (cs.display === 'none' || cs.visibility === 'hidden' || cs.opacity === '0') return [];
-
     const rect = el.getBoundingClientRect();
     const w = Math.round(rect.width), h = Math.round(rect.height), area = w * h;
+    
+    // Roughly hidden checks (avoids slow getComputedStyle)
+    if (area === 0 && tag !== 'svg') return [];
+
     const inViewport = !(rect.x + w <= 0 || rect.y + h <= 0 || rect.x >= window.innerWidth || rect.y >= window.innerHeight);
 
     const role = getSemanticRole(el);
@@ -156,7 +177,7 @@ export function buildSemanticMap(): SemanticMap {
     }
 
     const isLandmark = role && ['banner', 'contentinfo', 'main', 'complementary', 'navigation', 'region'].includes(role);
-    if (!isLandmark && (area === 0 || (cs.overflow === 'hidden' && (w < 2 || h < 2)))) {
+    if (!isLandmark && area === 0) {
       return children; // reparent
     }
 
@@ -221,6 +242,12 @@ export function buildSemanticMap(): SemanticMap {
 
     const id = `wm-${smIdx++}`;
     el.setAttribute('data-wm-id', id);
+
+    // TASK 1: Stamp data-wm-role on nodes that have a stampable role
+    if (role && STAMPABLE_ROLES.has(role)) {
+      el.setAttribute('data-wm-role', role);
+    }
+
     totalNodes++;
 
     return [{
@@ -316,7 +343,113 @@ export function serializeForAI(map: SemanticMap, maxTokens: number = 8000): { ou
   }
 
   const finalLines = lines.filter(l => l.keep).map(l => l.line);
-  return { outline: finalLines.join('\\n'), truncated };
+  return { outline: finalLines.join('\n'), truncated };
+}
+
+// ── Theme Context ──────────────────────────────────────────────────
+
+export function serializeThemeContext(map: SemanticMap): string {
+  const roles = new Map<string, number>();
+  
+  function countNodes(n: SemanticNode) {
+    if (n.role) roles.set(n.role, (roles.get(n.role) || 0) + 1);
+    n.children.forEach(countNodes);
+  }
+  
+  map.roots.forEach(countNodes);
+  
+  const roleStr = Array.from(roles.entries())
+    .sort((a, b) => b[1] - a[1])
+    .map(([r, c]) => `${c}x ${r}`)
+    .join(', ');
+  
+  return `Role Breakdown: ${roleStr || 'None'}`;
+}
+
+// ── Extract Design Context ─────────────────────────────────────────
+
+export function extractDesignContext(): DesignContext {
+  const backgrounds = new Set<string>();
+  const textColors = new Set<string>();
+  const accentColors = new Set<string>();
+  const fontFamilies = new Set<string>();
+  const borderRadii = new Set<string>();
+  const margins = new Set<string>();
+  let baseFontSize = '16px';
+
+  // Sample body
+  const bodyCs = getComputedStyle(document.body);
+  backgrounds.add(bodyCs.backgroundColor);
+  textColors.add(bodyCs.color);
+  baseFontSize = bodyCs.fontSize;
+  if (bodyCs.fontFamily) fontFamilies.add(bodyCs.fontFamily.split(',')[0].trim().replace(/['"]/g, ''));
+
+  // Sample :root / html
+  const htmlCs = getComputedStyle(document.documentElement);
+  backgrounds.add(htmlCs.backgroundColor);
+
+  // Sample representative nodes for design signals
+  const selectors = ['main', 'nav', 'header', 'footer', 'aside', 'article', 'section', 'h1', 'h2', 'h3', 'p', 'a', 'button', 'input'];
+  for (const sel of selectors) {
+    const el = document.querySelector(sel);
+    if (!el) continue;
+    const cs = getComputedStyle(el);
+
+    const bg = cs.backgroundColor;
+    if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
+      backgrounds.add(bg);
+    }
+
+    textColors.add(cs.color);
+
+    if (cs.fontFamily) {
+      fontFamilies.add(cs.fontFamily.split(',')[0].trim().replace(/['"]/g, ''));
+    }
+
+    const br = cs.borderRadius;
+    if (br && br !== '0px') {
+      borderRadii.add(br);
+    }
+
+    // Links and buttons often carry accent colors
+    if (sel === 'a' || sel === 'button') {
+      if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent') {
+        accentColors.add(bg);
+      }
+      accentColors.add(cs.color);
+    }
+
+    // Spacing rhythm from margins/padding
+    const mt = cs.marginTop;
+    if (mt && mt !== '0px') margins.add(mt);
+    const mb = cs.marginBottom;
+    if (mb && mb !== '0px') margins.add(mb);
+    const pt = cs.paddingTop;
+    if (pt && pt !== '0px') margins.add(pt);
+  }
+
+  return {
+    backgrounds: [...backgrounds].slice(0, 5),
+    textColors: [...textColors].slice(0, 5),
+    accentColors: [...accentColors].slice(0, 3),
+    fontFamilies: [...fontFamilies].slice(0, 3),
+    baseFontSize,
+    borderRadii: [...borderRadii].slice(0, 3),
+    spacingRhythm: [...margins].slice(0, 5),
+  };
+}
+
+export function serializeDesignContext(ctx: DesignContext): string {
+  const lines = [
+    `Backgrounds: ${ctx.backgrounds.join(', ')}`,
+    `Text colors: ${ctx.textColors.join(', ')}`,
+    `Accent colors: ${ctx.accentColors.join(', ') || 'none detected'}`,
+    `Font families: ${ctx.fontFamilies.join(', ')}`,
+    `Base font size: ${ctx.baseFontSize}`,
+    `Border radii: ${ctx.borderRadii.join(', ') || 'none'}`,
+    `Spacing rhythm: ${ctx.spacingRhythm.join(', ') || 'default'}`,
+  ];
+  return lines.join('\n');
 }
 
 // ── Primary content detection ──────────────────────────────────────

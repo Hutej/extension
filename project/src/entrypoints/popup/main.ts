@@ -29,6 +29,10 @@ saveKeyBtn.addEventListener('click', () => {
 });
 
 async function getCurrentTabId(): Promise<number | undefined> {
+  const urlParams = new URLSearchParams(window.location.search);
+  if (urlParams.has('tabId')) {
+    return parseInt(urlParams.get('tabId')!, 10);
+  }
   const tabs = await browser.tabs.query({ active: true, currentWindow: true });
   return tabs[0]?.id;
 }
@@ -41,7 +45,10 @@ transformBtn.addEventListener('click', async () => {
   }
   
   const tabId = await getCurrentTabId();
-  if (!tabId) return;
+  if (!tabId) {
+    statusEl.textContent = 'Error: Cannot determine active tab.';
+    return;
+  }
 
   statusEl.textContent = 'Thinking...';
   transformBtn.disabled = true;
@@ -66,11 +73,17 @@ transformBtn.addEventListener('click', async () => {
         };
         statusEl.textContent = msgMap[res.kind] || res.message || 'Unknown error';
       } else {
-        const plan = res.plan;
-        if (!plan || !plan.operations || plan.operations.length === 0) {
-          statusEl.textContent = 'Nothing to change for that request.';
+        if (res.kind === 'theme') {
+          statusEl.textContent = `Theme applied!\nReasoning: ${res.result?.reasoning || ''}`;
+          updateSiteStatus();
         } else {
-          statusEl.textContent = `Applied ${plan.operations.length} actions.\nReasoning: ${plan.reasoning}`;
+          const plan = res.plan;
+          if (!plan || !plan.operations || plan.operations.length === 0) {
+            statusEl.textContent = 'Nothing to change for that request.';
+          } else {
+            statusEl.textContent = `Applied ${plan.operations.length} actions.\nReasoning: ${plan.reasoning}`;
+            updateSiteStatus();
+          }
         }
       }
       transformBtn.disabled = false;
@@ -99,8 +112,13 @@ resetBtn.addEventListener('click', async () => {
 });
 
 async function updateSiteStatus() {
-  const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs[0];
+  const tabId = await getCurrentTabId();
+  if (!tabId) {
+    statusText.textContent = 'Not a valid site.';
+    return;
+  }
+  const tab = await browser.tabs.get(tabId);
+  
   if (!tab || !tab.url || !tab.url.startsWith('http')) {
     statusText.textContent = 'Not a valid site.';
     return;
@@ -109,12 +127,17 @@ async function updateSiteStatus() {
   const origin = url.origin;
   const state = await loadSiteState(origin);
   
-  if (state.transforms.length === 0) {
+  const hasSaved = state.transforms.length > 0 || state.behaviors.length > 0 || !!state.theme;
+  
+  if (!hasSaved) {
     statusText.textContent = `No saved transforms.`;
     toggleBtn.disabled = true;
     removeBtn.disabled = true;
   } else {
-    statusText.textContent = `${state.transforms.length} transform(s) saved.\nStatus: ${state.enabled ? 'ON' : 'OFF'}`;
+    let count = state.transforms.length + state.behaviors.length;
+    let label = count > 0 ? `${count} transform(s) saved.` : '';
+    if (state.theme) label += (label ? ' ' : '') + 'Theme saved.';
+    statusText.textContent = `${label}\nStatus: ${state.enabled ? 'ON' : 'OFF'}`;
     toggleBtn.disabled = false;
     toggleBtn.textContent = state.enabled ? 'Turn Off' : 'Turn On';
     removeBtn.disabled = false;
@@ -122,8 +145,9 @@ async function updateSiteStatus() {
 }
 
 toggleBtn.addEventListener('click', async () => {
-  const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs[0];
+  const tabId = await getCurrentTabId();
+  if (!tabId) return;
+  const tab = await browser.tabs.get(tabId);
   if (!tab || !tab.url || !tab.id) return;
   const origin = new URL(tab.url).origin;
   const state = await loadSiteState(origin);
@@ -135,8 +159,9 @@ toggleBtn.addEventListener('click', async () => {
 });
 
 removeBtn.addEventListener('click', async () => {
-  const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-  const tab = tabs[0];
+  const tabId = await getCurrentTabId();
+  if (!tabId) return;
+  const tab = await browser.tabs.get(tabId);
   if (!tab || !tab.url || !tab.id) return;
   const origin = new URL(tab.url).origin;
   await clearSiteState(origin);
