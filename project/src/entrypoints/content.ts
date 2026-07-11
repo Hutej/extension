@@ -1,479 +1,193 @@
-import { buildSemanticMap, serializeForAI, extractDesignContext, serializeDesignContext, serializeThemeContext, type SemanticMap, type SemanticNode } from '@/core/observe';
-import { applyPlan, removeStyles, removeAllStyles, injectStoredCSS, tagIsolateSiblings, reapplyBehavior, teardownBehaviors, type ApplyResult } from '@/core/apply';
-import { type Plan } from '@/core/plan';
-import { loadSiteState, saveSiteState, reidentify, clearSiteState, type ThemeRecord } from '@/core/persist';
+/**
+ * content — the Phase-1 pipeline orchestrator, running in the page.
+ *
+ *   perceive -> (background: reason -> DesignSpec) -> compile -> apply CSS
+ *            -> verify(before) -> repair loop (recompile / re-reason / keepBest)
+ *            -> persist
+ *
+ * DOM-move execution is DEFERRED: the compiler plans moves but this loop applies
+ * CSS only. On success/failure it sets a real marker on <html> so the test
+ * harness (and any tooling) can wait on the true applied signal.
+ */
+
+import { perceive, serializePerception, clearHandles, captureLayoutFingerprint } from '@/core/perceive';
+import { compileSpec, type CompileOptions } from '@/core/compile';
 import { sanitizeCss } from '@/core/sanitize';
-import { verifyTheme, type VerifyResult } from '@/core/verify';
-import { MAX_THEME_REGEN_ATTEMPTS, logDebug } from '@/core/config';
+import { verifyStyle, type VerifyResult } from '@/core/verify';
+import { planRepair, bestNonBroken, type Attempt } from '@/core/repair';
+import { applyStyle, removeStyle, startDefense, ensureEscapeUI, removeEscapeUI } from '@/core/execute';
+import { loadSiteState, saveSiteState, clearSiteState } from '@/core/persist';
+import { MAX_REPAIR_ATTEMPTS, logDebug } from '@/core/config';
+import type { DesignSpec } from '@/core/spec';
 
-import { type PlanResult, type ThemeResult } from '@/core/reason';
+interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?: string; }
 
-import { AI_CONFIG } from '@/core/config';
-
-const STYLE_ELEMENT_ID = 'webmorph-styles';
-
-let lastMap: SemanticMap | null = null;
-let lastOutline = '';
-let styleObserver: MutationObserver | null = null;
-
-// ── Existing Plan-based transform flow ─────────────────────────────
-
-async function runTransform(intent: string, timings?: Record<string, number>): Promise<PlanResult> {
-  const tObserve = performance.now();
-  lastMap = buildSemanticMap();
-  const serialized = serializeForAI(lastMap, AI_CONFIG.maxOutlineTokens);
-  lastOutline = serialized.outline;
-  if (timings) timings.observe = performance.now() - tObserve;
-  
-  if (serialized.truncated) {
-    console.log('[WebMorph] Outline was truncated to fit token budget.');
-  }
-  
-  return new Promise((resolve) => {
-    const tGen = performance.now();
-    chrome.runtime.sendMessage(
-      { action: 'transform', intent, outline: lastOutline },
-      (response) => {
-        if (timings) timings.generate = performance.now() - tGen;
-        if (chrome.runtime.lastError) {
-          resolve({ ok: false, kind: 'unknown', message: chrome.runtime.lastError.message || 'Error communicating with background' });
-        } else {
-          resolve(response as PlanResult);
-        }
-      }
-    );
-  });
-}
-
-// ── NEW: Theme-based re-skin flow ──────────────────────────────────
-
-async function runTheme(intent: string, timings?: Record<string, number>): Promise<ThemeResult> {
-  const tObserve = performance.now();
-  lastMap = buildSemanticMap();
-  const outlineStr = serializeThemeContext(lastMap);
-  const designCtx = extractDesignContext();
-  const designContextStr = serializeDesignContext(designCtx);
-  if (timings) timings.observe = performance.now() - tObserve;
-  
-  return new Promise((resolve) => {
-    const tGen = performance.now();
-    chrome.runtime.sendMessage(
-      { action: 'theme', intent, designContext: designContextStr, outline: outlineStr },
-      (response) => {
-        if (timings) timings.generate = performance.now() - tGen;
-        if (chrome.runtime.lastError) {
-          resolve({ ok: false, kind: 'unknown', message: chrome.runtime.lastError.message || 'Error communicating with background' });
-        } else {
-          resolve(response as ThemeResult);
-        }
-      }
-    );
-  });
-}
-
-// ── Apply theme CSS with sanitization + verification ───────────────
-
-function injectThemeCss(sanitizedCss: string): void {
-  // Remove any existing theme/style element first
-  const existing = document.getElementById(STYLE_ELEMENT_ID);
-  if (existing) existing.remove();
-
-  const style = document.createElement('style');
-  style.id = STYLE_ELEMENT_ID;
-  style.setAttribute('data-webmorph-ui', 'theme');
-  style.textContent = sanitizedCss;
-  document.head.appendChild(style);
-}
-
-function removeThemeCss(): void {
-  const el = document.getElementById(STYLE_ELEMENT_ID);
-  if (el) el.remove();
-  stopStyleObserver();
-}
-
-interface ThemeApplyResult {
+export interface TransformOutcome {
   ok: boolean;
-  sanitizedCss: string;
-  stripReport: { strippedCount: number; stripped: string[] };
-  verify: VerifyResult;
-  reasoning: string;
-  usage?: any;
+  message?: string;
+  reasoning?: string;
+  spec?: DesignSpec;
+  verify?: VerifyResult;
+  perceiveMs?: number;
+  clusters?: number;
+  changeScore?: number;
+  accentFraction?: number;
 }
 
-async function applyTheme(intent: string, regenAttempt: number = 0, timings?: Record<string, number>): Promise<ThemeApplyResult> {
-  const res = await runTheme(intent, timings);
-  
-  if (!res.ok) {
-    return {
-      ok: false,
-      sanitizedCss: '',
-      stripReport: { strippedCount: 0, stripped: [] },
-      verify: { passed: false, checks: { notBlank: false, noOverflow: false, contrastOk: false }, details: [(res as any).message || 'Theme request failed'] },
-      reasoning: '',
-      usage: undefined,
-    };
-  }
+const APPLIED = 'webmorphApplied';
+const FAILED = 'webmorphFailed';
 
-  const bundle = res.bundle;
-  const rawCss = bundle.themeCss || '';
-  
-  const tSanitize = performance.now();
-  const { css: sanitizedCss, report: stripReport } = sanitizeCss(rawCss);
-  if (timings) timings.sanitize = performance.now() - tSanitize;
-  
-  if (stripReport.strippedCount > 0) {
-    logDebug('[applyTheme] Sanitizer strip report:', stripReport);
-  }
+function markApplied(id: string): void {
+  delete document.documentElement.dataset[FAILED];
+  document.documentElement.dataset[APPLIED] = id;
+}
+function markFailed(msg: string): void {
+  delete document.documentElement.dataset[APPLIED];
+  document.documentElement.dataset[FAILED] = msg.slice(0, 80);
+}
 
-  // Inject the sanitized CSS
-  const tApply = performance.now();
-  injectThemeCss(sanitizedCss);
-  if (timings) timings.apply = performance.now() - tApply;
+// ── Core Phase-1 run ───────────────────────────────────────────────
 
-  // Verify the result
-  const tVerify = performance.now();
-  const verify = verifyTheme();
-  if (timings) timings.verify = performance.now() - tVerify;
-  
-  if (!verify.passed) {
-    logDebug('[applyTheme] Verify FAILED:', verify.details);
-    // Rollback
-    removeThemeCss();
+async function runStyle(intent: string): Promise<TransformOutcome> {
+  delete document.documentElement.dataset[APPLIED];
+  delete document.documentElement.dataset[FAILED];
 
-    // Optionally try ONE regen
-    if (regenAttempt < MAX_THEME_REGEN_ATTEMPTS) {
-      logDebug('[applyTheme] Attempting regen...');
-      return applyTheme(intent, regenAttempt + 1);
+  clearHandles();
+  const perception = perceive();
+  const serialized = serializePerception(perception);
+  const before = captureLayoutFingerprint();
+  logDebug(`perceived ${perception.nodeCount} nodes -> ${perception.clusters.length} clusters (${perception.builtInMs}ms)`);
+
+  let specRes = await askForSpec(intent, serialized);
+  if (!specRes.ok || !specRes.spec) { markFailed(specRes.message || 'engine failed'); return { ok: false, message: specRes.message || 'Design engine failed.' }; }
+  let spec = specRes.spec;
+
+  let options: CompileOptions = {};
+  const attempts: Attempt[] = [];
+  let lastVerify: VerifyResult | null = null;
+  let reReasonsDone = 0;
+
+  for (let iter = 0; iter < 10; iter++) { // deterministic escalation is monotonic; cap is a safety net
+    const compiled = compileSpec(spec, perception, options);
+    const sanitized = sanitizeCss(compiled.css).css;
+    if (!sanitized.trim()) { removeStyle(); markFailed('no styles'); return { ok: false, message: 'Produced no applicable styles.', spec, reasoning: spec.reasoning }; }
+
+    applyStyle(sanitized); // CSS only — planned moves (compiled.ops) are NOT executed this slice
+    const verify = verifyStyle(before);
+    lastVerify = verify;
+    const notBroken = verify.checks.notBlank && verify.checks.noOverflow && verify.checks.noOverlap && verify.checks.contrastOk;
+    attempts.push({ spec, css: sanitized, notBroken, changeScore: verify.changeScore });
+    logDebug(`iter ${iter}: rules=${compiled.rulesEmitted} checks=${JSON.stringify(verify.checks)} change=${verify.changeScore.toFixed(3)} accent=${verify.accentFraction.toFixed(3)} framed=${verify.framedFraction.toFixed(3)}`);
+
+    if (verify.passed) break;
+
+    const decision = planRepair(verify, options, reReasonsDone);
+    logDebug(`repair -> ${decision.action}: ${decision.reason}`);
+
+    if (decision.action === 'rollback') { removeStyle(); markFailed('content blanked'); return failVerify(spec, verify); }
+
+    if (decision.action === 'keepBest') {
+      const best = bestNonBroken(attempts);
+      if (!best) { removeStyle(); markFailed('nothing non-broken'); return failVerify(spec, verify); }
+      applyStyle(best.css);
+      spec = best.spec;
+      break; // keep the best non-broken attempt (a flat result is KEPT, not reverted)
     }
 
-    return {
-      ok: false,
-      sanitizedCss,
-      stripReport,
-      verify,
-      reasoning: bundle.reasoning || '',
-      usage: res.usage,
-    };
+    if (decision.action === 'reReason') {
+      reReasonsDone++;
+      const re = await askForSpec(intent, serialized, decision.critique);
+      if (re.ok && re.spec) { spec = re.spec; options = {}; continue; }
+      const best = bestNonBroken(attempts);
+      if (best) { applyStyle(best.css); spec = best.spec; break; }
+      removeStyle(); markFailed('revision failed'); return failVerify(spec, verify);
+    }
+
+    options = decision.options; // recompile (deterministic escalation)
   }
 
-  // Persist the theme
+  // Persist + defend + mark applied.
   const origin = window.location.origin;
   const state = await loadSiteState(origin);
-  const themeRecord: ThemeRecord = {
-    id: `theme_${Date.now()}`,
-    intent,
-    sanitizedCss,
-    reasoning: bundle.reasoning || '',
-    createdAt: Date.now(),
-  };
-  state.theme = themeRecord;
+  const id = `style_${Date.now()}`;
+  const appliedCss = sanitizeCss(compileSpec(spec, perception, {}).css).css;
   state.enabled = true;
+  state.style = { id, intent, spec, css: appliedCss || (attempts[attempts.length - 1]?.css ?? ''), reasoning: spec.reasoning, createdAt: Date.now() };
   await saveSiteState(origin, state);
 
-  // Start defending the style element
-  startStyleObserver(sanitizedCss);
-
-  // Ensure escape UI
-  ensureEscapeUI();
+  startDefense(state.style.css);
+  ensureEscapeUI(toggleSiteState);
+  markApplied(id);
 
   return {
-    ok: true,
-    sanitizedCss,
-    stripReport,
-    verify,
-    reasoning: bundle.reasoning || '',
-    usage: res.usage,
+    ok: true, reasoning: spec.reasoning, spec, verify: lastVerify || undefined,
+    perceiveMs: perception.builtInMs, clusters: perception.clusters.length,
+    changeScore: lastVerify?.changeScore, accentFraction: lastVerify?.accentFraction,
   };
 }
 
-// ── MutationObserver: defend the <style> element ───────────────────
+function failVerify(spec: DesignSpec, verify: VerifyResult): TransformOutcome {
+  return { ok: false, message: 'Result failed checks: ' + verify.details.slice(0, 3).join('; '), spec, reasoning: spec.reasoning, verify };
+}
 
-function startStyleObserver(sanitizedCss: string): void {
-  stopStyleObserver();
-
-  styleObserver = new MutationObserver((mutations) => {
-    for (const mutation of mutations) {
-      for (let i = 0; i < mutation.removedNodes.length; i++) {
-        const node = mutation.removedNodes[i];
-        if (node instanceof HTMLElement && node.id === STYLE_ELEMENT_ID) {
-          logDebug('[StyleObserver] Theme style removed by framework, re-inserting');
-          injectThemeCss(sanitizedCss);
-          return;
-        }
-      }
-    }
+function askForSpec(intent: string, perception: string, critique?: string): Promise<SpecResponse> {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ action: 'styleSpec', intent, perception, critique }, (response) => {
+      if (chrome.runtime.lastError || !response) resolve({ ok: false, message: chrome.runtime.lastError?.message || 'No response from design engine.' });
+      else resolve(response as SpecResponse);
+    });
   });
-
-  styleObserver.observe(document.head, { childList: true });
 }
 
-function stopStyleObserver(): void {
-  if (styleObserver) {
-    styleObserver.disconnect();
-    styleObserver = null;
-  }
+// ── Persistence / toggle ───────────────────────────────────────────
+
+async function reapplyStored(): Promise<boolean> {
+  const state = await loadSiteState(window.location.origin);
+  if (!state.enabled || !state.style?.css) return false;
+  // Re-run perceive so the stable hash handles get re-stamped, then inject stored CSS.
+  clearHandles();
+  perceive();
+  applyStyle(state.style.css);
+  startDefense(state.style.css);
+  ensureEscapeUI(toggleSiteState);
+  markApplied(state.style.id);
+  return true;
 }
 
-// ── Escape UI ──────────────────────────────────────────────────────
-
-const ESCAPE_UI_ID = 'webmorph-escape-ui';
-
-function ensureEscapeUI(): void {
-  if (document.getElementById(ESCAPE_UI_ID)) return;
-  const btn = document.createElement('button');
-  btn.id = ESCAPE_UI_ID;
-  btn.setAttribute('data-webmorph-ui', 'true');
-  btn.textContent = 'WebMorph: Toggle On/Off';
-  btn.style.cssText = 'position: fixed; top: 10px; right: 10px; z-index: 2147483647; pointer-events: auto; padding: 12px 24px; background: #e74c3c; color: white; border: none; border-radius: 8px; font-weight: bold; cursor: pointer; box-shadow: 0 4px 6px rgba(0,0,0,0.3); font-family: sans-serif;';
-  btn.onclick = () => {
-    toggleSiteState();
-  };
-  document.documentElement.appendChild(btn);
-}
-
-// ── Plan apply + save (existing path) ──────────────────────────────
-
-async function applyAndSave(plan: Plan | null, intent: string = ''): Promise<ApplyResult | null> {
-  if (!plan) {
-    removeStyles();
-    return null;
-  }
-  
-  const validIds = new Set<string>();
-  if (lastMap) {
-    function collect(n: SemanticNode) {
-      validIds.add(n.id);
-      n.children.forEach(collect);
-    }
-    lastMap.roots.forEach(collect);
-  }
-  
-  const result = applyPlan(plan, validIds, intent);
-  
+async function toggleSiteState(): Promise<void> {
   const origin = window.location.origin;
   const state = await loadSiteState(origin);
-  
-  // Save CSS transform records if any CSS was produced
-  if (result.transformRecords.length > 0) {
-    for (const rec of result.transformRecords) {
-      state.transforms.push(rec);
-    }
-  }
-  
-  // Save Tier 1 behavior records
-  for (const beh of result.behaviorRecords) {
-    state.behaviors.push(beh);
-  }
-  
-  if (result.transformRecords.length > 0 || result.behaviorRecords.length > 0) {
-    state.enabled = true;
-    await saveSiteState(origin, state);
-  }
-  
-  return result;
-}
-
-// ── Toggle / persistence ───────────────────────────────────────────
-
-async function toggleSiteState() {
-  const origin = window.location.origin;
-  const state = await loadSiteState(origin);
-  if (state.transforms.length === 0 && state.behaviors.length === 0 && !state.theme) return;
+  if (!state.style) return;
   state.enabled = !state.enabled;
   await saveSiteState(origin, state);
-  
-  if (state.enabled) {
-    initPersistence();
-  } else {
-    removeStyles();
-    removeThemeCss();
-    stopStyleObserver();
-    const esc = document.getElementById(ESCAPE_UI_ID);
-    if (esc) esc.remove();
-  }
+  if (state.enabled) await reapplyStored();
+  else { removeStyle(); removeEscapeUI(); delete document.documentElement.dataset[APPLIED]; }
 }
 
-async function initPersistence() {
-  const origin = window.location.origin;
-  const state = await loadSiteState(origin);
-  if (state.enabled && (state.transforms.length > 0 || state.behaviors.length > 0 || state.theme)) {
-    const reidResults: any[] = [];
-    let fullCss = '';
-    
-    // Re-apply CSS transforms (hide/isolate)
-    for (const transform of state.transforms) {
-      if (transform.kind === 'hide' && transform.targetDescriptors) {
-        transform.targetDescriptors.forEach((desc, i) => {
-          const match = reidentify(desc);
-          reidResults.push({ kind: 'hide', desc, matched: !!match, confidence: match?.confidence });
-          if (match) {
-            match.el.setAttribute('data-wm-target', `${transform.id}_${i}`);
-          }
-        });
-      } else if (transform.kind === 'isolate' && transform.keepDescriptor) {
-        const match = reidentify(transform.keepDescriptor);
-        reidResults.push({ kind: 'isolate', desc: transform.keepDescriptor, matched: !!match, confidence: match?.confidence });
-        if (match) {
-           tagIsolateSiblings(match.el, transform.id);
-        }
-      }
-      fullCss += transform.css + '\n';
-    }
-    
-    if (fullCss.trim()) {
-      injectStoredCSS(fullCss);
-    }
-
-    // Re-apply persisted theme
-    if (state.theme && state.theme.sanitizedCss) {
-      injectThemeCss(state.theme.sanitizedCss);
-      startStyleObserver(state.theme.sanitizedCss);
-      ensureEscapeUI();
-      reidResults.push({ kind: 'theme', intent: state.theme.intent, applied: true });
-    }
-    
-    // Re-apply Tier 1 behaviors
-    for (const behavior of state.behaviors) {
-      const result = reapplyBehavior(behavior);
-      reidResults.push({ kind: 'behavior', actionType: behavior.actionType, success: result.success });
-    }
-    
-    // Broadcast for tests
-    window.postMessage({ type: 'WEBMORPH_REID_RESULTS', results: reidResults }, '*');
-    (window as any).__webmorphReidResults = reidResults;
-  }
+async function removeAll(): Promise<void> {
+  removeStyle(); removeEscapeUI();
+  delete document.documentElement.dataset[APPLIED];
+  await clearSiteState(window.location.origin);
 }
 
-// ── Content script entry ───────────────────────────────────────────
+// ── Entry ──────────────────────────────────────────────────────────
 
 export default defineContentScript({
   matches: ['<all_urls>'],
+  runAt: 'document_idle',
 
   main() {
-    initPersistence();
-
-    window.addEventListener('message', async (e) => {
-      if (e.data && e.data.type === 'WEBMORPH_RESET_CLICKED') {
-        toggleSiteState();
-      }
-    });
-
-    if (import.meta.env.DEV) {
-      window.addEventListener('message', async (e) => {
-        if (e.data && e.data.type === 'WEBMORPH_TEST_RUN') {
-          try {
-            const res = await runTransform(e.data.intent);
-            if (res.ok) {
-              const result = await applyAndSave(res.plan, e.data.intent);
-              window.postMessage({ type: 'WEBMORPH_TEST_RESULT', plan: res.plan, result }, '*');
-            } else {
-              window.postMessage({ type: 'WEBMORPH_TEST_RESULT', error: JSON.stringify(res), kind: res.kind }, '*');
-            }
-          } catch (err: any) {
-            window.postMessage({ type: 'WEBMORPH_TEST_RESULT', error: err.message }, '*');
-          }
-        } else if (e.data && e.data.type === 'WEBMORPH_TEST_THEME') {
-          try {
-            const result = await applyTheme(e.data.intent);
-            window.postMessage({ type: 'WEBMORPH_TEST_THEME_RESULT', result }, '*');
-          } catch (err: any) {
-            window.postMessage({ type: 'WEBMORPH_TEST_THEME_RESULT', error: err.message }, '*');
-          }
-        } else if (e.data && e.data.type === 'WEBMORPH_TEST_RESET') {
-          removeStyles();
-          removeThemeCss();
-          stopStyleObserver();
-          window.postMessage({ type: 'WEBMORPH_TEST_RESET_DONE' }, '*');
-        } else if (e.data && e.data.type === 'WEBMORPH_TEST_REMOVE_ALL') {
-          clearSiteState(window.location.origin).then(() => {
-            removeAllStyles();
-            removeThemeCss();
-            stopStyleObserver();
-            const esc = document.getElementById(ESCAPE_UI_ID);
-            if (esc) esc.remove();
-            window.postMessage({ type: 'WEBMORPH_TEST_REMOVE_ALL_DONE' }, '*');
-          });
-        } else if (e.data && e.data.type === 'WEBMORPH_TEST_GET_MAP') {
-          const serializableRoots = lastMap ? JSON.parse(JSON.stringify(lastMap.roots)) : [];
-          window.postMessage({ type: 'WEBMORPH_TEST_MAP', map: { roots: serializableRoots } }, '*');
-        } else if (e.data && e.data.type === 'WEBMORPH_TEST_GET_DESIGN_CONTEXT') {
-          const ctx = extractDesignContext();
-          const serialized = serializeDesignContext(ctx);
-          window.postMessage({ type: 'WEBMORPH_TEST_DESIGN_CONTEXT', context: ctx, serialized }, '*');
-        } else if (e.data && e.data.type === 'WEBMORPH_TEST_INJECT_ERROR') {
-          chrome.runtime.sendMessage({ action: 'INJECT_ERROR', errors: e.data.errors }, () => {});
-        } else if (e.data && e.data.type === 'WEBMORPH_CLEAR_KEY') {
-          chrome.storage.local.remove('openai_api_key');
-        } else if (e.data && e.data.type === 'WEBMORPH_SET_KEY') {
-          chrome.storage.local.set({ openai_api_key: e.data.key });
-        }
-      });
-    }
+    reapplyStored();
 
     window.addEventListener('keydown', (e) => {
-      if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'r') {
-        toggleSiteState();
-      }
+      if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'r') toggleSiteState();
     });
 
-    browser.runtime.onMessage.addListener(
-      (message: { action: string; intent?: string }, _sender) => {
-        if (message.action === 'transform' && message.intent) {
-          const intent = message.intent;
-          const tStart = performance.now();
-          const timings: Record<string, number> = {};
-
-          return new Promise((resolve) => {
-            const tClassifyStart = performance.now();
-            chrome.runtime.sendMessage({ action: 'classify', intent }, (classRes) => {
-              timings.classify = performance.now() - tClassifyStart;
-              if (chrome.runtime.lastError || !classRes) {
-                resolve({ ok: false, kind: 'unknown', message: 'Error classifying intent.' });
-                return;
-              }
-              
-              if (classRes.classification === 'theme') {
-                const tThemeStart = performance.now();
-                applyTheme(intent, 0, timings)
-                  .then(result => {
-                    timings.total = performance.now() - tStart;
-                    console.log('Theme Transform Timings (ms):', JSON.stringify(timings));
-                    resolve({ ok: result.ok, kind: 'theme', result });
-                  })
-                  .catch(err => resolve({ ok: false, kind: 'unknown', message: err.message }));
-              } else {
-                const tPlanStart = performance.now();
-                runTransform(intent, timings)
-                  .then(async res => {
-                    if (res.ok) {
-                      const tApplyStart = performance.now();
-                      const result = await applyAndSave(res.plan, intent);
-                      timings.apply = performance.now() - tApplyStart;
-                      const totalTargetDesc = result?.transformRecords?.reduce((acc, r) => acc + (r.targetDescriptors?.length || 0), 0) || 0;
-                      timings.total = performance.now() - tStart;
-                      console.log('Plan Transform Timings (ms):', JSON.stringify(timings));
-                      resolve({ ok: true, plan: res.plan, result, count: totalTargetDesc, kind: 'plan' });
-                    } else {
-                      resolve(res);
-                    }
-                  })
-                  .catch(err => resolve({ ok: false, kind: 'unknown', message: err.message }));
-              }
-            });
-          });
-        } else if (message.action === 'reset') {
-          return applyAndSave(null).then(() => ({ ok: true }));
-        } else if (message.action === 'toggle') {
-          return toggleSiteState().then(() => ({ ok: true }));
-        } else if (message.action === 'remove_all') {
-          return clearSiteState(window.location.origin).then(() => {
-            removeAllStyles();
-            removeThemeCss();
-            stopStyleObserver();
-            return { ok: true };
-          });
-        }
-      }
-    );
+    browser.runtime.onMessage.addListener((message: { action: string; intent?: string }) => {
+      if (message.action === 'transform' && message.intent) return runStyle(message.intent);
+      if (message.action === 'toggle') return toggleSiteState().then(() => ({ ok: true }));
+      if (message.action === 'remove_all') return removeAll().then(() => ({ ok: true }));
+      return undefined;
+    });
   },
 });

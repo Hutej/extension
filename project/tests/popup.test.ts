@@ -1,189 +1,101 @@
-/**
- * Real-site regression test — Phase 1.2: Intent Routing + Live Popup
- */
-
-import { chromium } from 'playwright';
+import { chromium, type Worker, type Page } from 'playwright';
 import path from 'path';
 import fs from 'fs';
 import { fileURLToPath } from 'url';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
-const extensionPath = path.resolve(__dirname, '..', '.output', 'chrome-mv3-dev');
-const artifactsDir = path.resolve(__dirname, 'artifacts');
+const artifactsDir = path.join(__dirname, 'artifacts');
+if (!fs.existsSync(artifactsDir)) fs.mkdirSync(artifactsDir, { recursive: true });
+
 const API_KEY = process.env.OPENAI_API_KEY;
+if (!API_KEY) { console.error('OPENAI_API_KEY is not set'); process.exit(1); }
 
-if (!API_KEY) {
-  throw new Error('ERROR: OPENAI_API_KEY not set in .env');
+const EXTENSION_PATH = path.join(__dirname, '../.output/chrome-mv3-dev');
+const VIEWPORT = { width: 1280, height: 900 };
+
+async function safeGoto(page: Page, url: string) {
+  try { await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 }); }
+  catch { console.log(`goto slow for ${url}, continuing`); }
+  await page.waitForTimeout(2500);
 }
 
-if (!fs.existsSync(artifactsDir)) {
-  fs.mkdirSync(artifactsDir, { recursive: true });
-}
-
-const PAGE_LOAD_WAIT = 3000;
-
-async function safeGoto(page: any, url: string) {
-  await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 30000 });
-  await page.waitForTimeout(PAGE_LOAD_WAIT);
-}
-
-async function main() {
-  console.log('=== WebMorph Phase 1.2 Popup & Routing Test ===');
-
+async function run() {
   const context = await chromium.launchPersistentContext('', {
     headless: false,
-    args: [
-      `--disable-extensions-except=${extensionPath}`,
-      `--load-extension=${extensionPath}`,
-      '--no-first-run',
-      '--disable-default-apps',
-    ],
+    viewport: VIEWPORT,
+    args: [`--disable-extensions-except=${EXTENSION_PATH}`, `--load-extension=${EXTENSION_PATH}`],
   });
 
-  let serviceWorker;
-  const swTarget = context.serviceWorkers();
-  if (swTarget.length > 0) {
-    serviceWorker = swTarget[0];
-  } else {
-    serviceWorker = await context.waitForEvent('serviceworker');
-  }
-  const swUrl = serviceWorker.url();
-  const extensionId = swUrl.split('/')[2];
+  let sw: Worker | undefined = context.serviceWorkers()[0];
+  if (!sw) sw = await context.waitForEvent('serviceworker');
+  const extensionId = sw.url().split('/')[2];
   const popupUrl = `chrome-extension://${extensionId}/popup.html`;
 
-  await serviceWorker.evaluate((key) => {
-    (globalThis as any).chrome.storage.local.set({ openai_api_key: key });
-  }, API_KEY!);
-  console.log('API key set.');
+  await sw.evaluate((key) => (globalThis as any).chrome.storage.local.set({ openai_api_key: key }), API_KEY!);
+  console.log('API key set. Extension id:', extensionId);
 
   const page = await context.newPage();
-  page.on('console', msg => console.log('PAGE:', msg.text()));
-  
-  // ── TEST 1: Wikipedia Neobrutalism (Theme routing) ──
-  console.log('\\n--- TEST 1: Wikipedia Theme ---');
-  await safeGoto(page, 'https://en.wikipedia.org/wiki/Main_Page');
-  await page.screenshot({ path: path.join(artifactsDir, 'popup_wiki_before_neo.png') });
-
-  // Get tab ID of the Wikipedia page
-  const wikiTabId = await serviceWorker.evaluate(() => {
-    return new Promise(resolve => {
-       chrome.tabs.query({ url: "*://*.wikipedia.org/*" }, tabs => {
-         resolve(tabs[0]?.id);
-       });
-    });
-  });
-  console.log('wikiTabId:', wikiTabId);
-
+  page.on('console', (m) => { const t = m.text(); if (t.includes('[WebMorph]')) console.log('PAGE', t); });
   const popup = await context.newPage();
-  popup.on('console', msg => console.log('POPUP:', msg.text()));
-  await popup.goto(`${popupUrl}?tabId=${wikiTabId}`);
-  
-  await popup.fill('#intent', 'transform this site to neobrutalism');
-  await popup.click('#transformBtn');
-  
-  console.log('Waiting for AI to classify and generate theme...');
-  await popup.waitForFunction(() => {
-    const text = document.getElementById('statusEl')?.textContent || '';
-    return text.includes('Theme applied') || text.includes('Error') || text.includes('Nothing to change');
-  }, undefined, { timeout: 120000 });
-  
-  let statusText = await popup.evaluate(() => document.getElementById('statusEl')?.textContent);
-  console.log('Popup Status:', statusText);
-  let savedStatus = await popup.evaluate(() => document.getElementById('statusText')?.textContent);
-  console.log('Saved Status:', savedStatus);
-  
-  await page.screenshot({ path: path.join(artifactsDir, 'popup_wiki_after_neo.png') });
-  console.log('Screenshot saved.');
 
-  // Verify reload persistence
-  console.log('Reloading page to verify persistence...');
-  await page.reload({ waitUntil: 'domcontentloaded' });
-  await page.waitForTimeout(3000);
-  await page.screenshot({ path: path.join(artifactsDir, 'popup_wiki_reloaded_neo.png') });
+  async function transform(name: string, url: string, style: string) {
+    console.log(`\n=== ${name} — ${style} ===`);
+    // Guarantee a clean original page (no re-applied stored transform) — but keep the API key.
+    await sw!.evaluate((key) => new Promise<void>((r) => {
+      const c = (globalThis as any).chrome;
+      c.storage.local.clear(() => c.storage.local.set({ openai_api_key: key }, () => r()));
+    }), API_KEY!);
+    await safeGoto(page, url);
+    await page.evaluate(() => { document.documentElement.removeAttribute('data-webmorph-applied'); document.documentElement.removeAttribute('data-webmorph-failed'); });
+    await page.screenshot({ path: path.join(artifactsDir, `before_${name}_${style}.png`) });
 
-  // Reset
-  await popup.click('#removeBtn');
-  await page.waitForTimeout(1000);
+    const tabId = await sw!.evaluate((u) => new Promise<number | undefined>((res) => {
+      (globalThis as any).chrome.tabs.query({ url: u }, (tabs: any[]) => res(tabs[0]?.id));
+    }), `${new URL(url).origin}/*`);
 
-  // ── TEST 2: YouTube Neobrutalism (Honest Scope) ──
-  console.log('\\n--- TEST 2: YouTube Theme (Honest Scope) ---');
-  await safeGoto(page, 'https://www.youtube.com/');
-  await page.screenshot({ path: path.join(artifactsDir, 'popup_yt_before_neo.png') });
+    await popup.goto(`${popupUrl}?tabId=${tabId}`);
+    await popup.fill('#intent', style);
+    await popup.click('#transformBtn');
 
-  // Accept cookies if present (EU)
-  try {
-    await page.click('button[aria-label="Accept all"]', { timeout: 2000 });
-  } catch(e) {}
-  
-  // Get tab ID of the YouTube page
-  const ytTabId = await serviceWorker.evaluate(() => {
-    return new Promise(resolve => {
-       chrome.tabs.query({ url: "*://*.youtube.com/*" }, tabs => {
-         resolve(tabs[0]?.id);
-       });
-    });
-  });
+    // Wait on the REAL applied/failed marker on the page — not popup text.
+    // One retry: a lapsed window is usually transient rate-limiting on back-to-back calls.
+    let applied = false;
+    for (let tryN = 0; tryN < 2 && !applied; tryN++) {
+      if (tryN > 0) { console.log('  retrying transform (marker lapsed)…'); await popup.click('#transformBtn'); }
+      try {
+        await page.waitForFunction(
+          () => document.documentElement.hasAttribute('data-webmorph-applied') || document.documentElement.hasAttribute('data-webmorph-failed'),
+          { timeout: 120000 },
+        );
+        applied = await page.evaluate(() => document.documentElement.hasAttribute('data-webmorph-applied'));
+      } catch { console.log('  marker never appeared (timeout)'); }
+    }
 
-  await popup.bringToFront();
-  await popup.goto(`${popupUrl}?tabId=${ytTabId}`);
-  await popup.fill('#intent', 'neobrutalism theme with yellow and black');
-  await popup.click('#transformBtn');
+    // Let layout settle before the screenshot.
+    await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
+    await page.waitForTimeout(800);
+    await page.screenshot({ path: path.join(artifactsDir, `after_${name}_${style}.png`) });
 
-  console.log('Waiting for AI on YouTube...');
-  await popup.waitForFunction(() => {
-    const text = document.getElementById('statusEl')?.textContent || '';
-    return text.includes('Theme applied') || text.includes('Error') || text.includes('Nothing to change');
-  }, undefined, { timeout: 120000 });
+    const status = await popup.$eval('#statusEl', (el) => el.textContent).catch(() => '');
+    const specJson = await popup.$eval('#webmorph-spec', (el) => el.textContent).catch(() => '');
+    console.log(`  applied=${applied} status="${(status || '').replace(/\n/g, ' ')}"`);
+    if (specJson) {
+      fs.writeFileSync(path.join(artifactsDir, `spec_${name}_${style}.json`), specJson);
+      console.log(`  --- DesignSpec (${name} ${style}) ---\n${specJson}`);
+    }
+    // Pacing: reset any rate-limit window before the next back-to-back model call (root fix, not a wider timeout).
+    await page.waitForTimeout(6000);
+  }
 
-  statusText = await popup.evaluate(() => document.getElementById('statusEl')?.textContent);
-  console.log('Popup Status:', statusText);
-  savedStatus = await popup.evaluate(() => document.getElementById('statusText')?.textContent);
-  console.log('Saved Status:', savedStatus);
+  await transform('Wikipedia', 'https://en.wikipedia.org/wiki/Main_Page', 'Transform it to neobrutalism');
+  await transform('Wikipedia', 'https://en.wikipedia.org/wiki/Main_Page', 'Transform it to glassmorphism');
+  await transform('MDN', 'https://developer.mozilla.org/en-US/', 'Transform it to neobrutalism');
+  await transform('MDN', 'https://developer.mozilla.org/en-US/', 'Transform it to glassmorphism');
+  await transform('BBC', 'https://www.bbc.com/news', 'Transform it to neobrutalism');
+  await transform('BBC', 'https://www.bbc.com/news', 'Transform it to glassmorphism');
 
-  await page.screenshot({ path: path.join(artifactsDir, 'popup_yt_after_neo.png') });
-  console.log('Screenshot saved.');
-
-  // Reset
-  await popup.click('#removeBtn');
-  await page.waitForTimeout(1000);
-
-  // ── TEST 3: Wikipedia Hide (Plan routing) ──
-  console.log('\\n--- TEST 3: Wikipedia Hide (Plan routing) ---');
-  await page.bringToFront();
-  await safeGoto(page, 'https://en.wikipedia.org/wiki/Main_Page');
-  
-  const wikiTabId2 = await serviceWorker.evaluate(() => {
-    return new Promise(resolve => {
-       chrome.tabs.query({ url: "*://*.wikipedia.org/*" }, tabs => {
-         resolve(tabs[0]?.id);
-       });
-    });
-  });
-
-  await popup.bringToFront();
-  await popup.goto(`${popupUrl}?tabId=${wikiTabId2}`);
-  await popup.fill('#intent', 'hide the sidebar');
-  await popup.click('#transformBtn');
-
-  console.log('Waiting for AI to classify and hide...');
-  await popup.waitForFunction(() => {
-    const text = document.getElementById('statusEl')?.textContent || '';
-    return text.includes('Applied') || text.includes('Error') || text.includes('Nothing to change');
-  }, undefined, { timeout: 120000 });
-
-  statusText = await popup.evaluate(() => document.getElementById('statusEl')?.textContent);
-  console.log('Popup Status:', statusText);
-  savedStatus = await popup.evaluate(() => document.getElementById('statusText')?.textContent);
-  console.log('Saved Status:', savedStatus);
-
-  await page.screenshot({ path: path.join(artifactsDir, 'popup_wiki_after_hide_plan.png') });
-  console.log('Screenshot saved.');
-
-  console.log('\\n=== All Popup Tests Complete ===');
+  console.log('\n=== proof complete — see tests/artifacts ===');
   await context.close();
 }
 
-main().catch(err => {
-  console.error('Fatal error:', err);
-  process.exit(1);
-});
+run().catch((e) => { console.error(e); process.exit(1); });

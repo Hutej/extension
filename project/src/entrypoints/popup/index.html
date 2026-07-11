@@ -4,43 +4,40 @@
     <meta charset="UTF-8" />
     <title>WebMorph</title>
     <style>
-      body { width: 320px; font-family: sans-serif; margin: 0; padding: 12px; }
-      textarea { width: 100%; height: 60px; box-sizing: border-box; margin-bottom: 8px; }
-      button { padding: 6px 12px; cursor: pointer; }
+      body { width: 340px; font-family: system-ui, sans-serif; margin: 0; padding: 14px; }
+      h3 { margin: 0 0 10px; }
+      textarea { width: 100%; height: 70px; box-sizing: border-box; margin-bottom: 8px; font: inherit; padding: 6px; }
+      button { padding: 7px 12px; cursor: pointer; }
       .row { display: flex; gap: 8px; margin-bottom: 8px; }
-      .status { font-size: 12px; color: #555; white-space: pre-wrap; margin-bottom: 8px; }
-      .settings-toggle { cursor: pointer; color: blue; text-decoration: underline; font-size: 12px; display: block; margin-bottom: 4px; }
-      .settings { display: none; margin-bottom: 8px; padding: 8px; border: 1px solid #ccc; background: #f9f9f9; }
+      .status { font-size: 12px; color: #444; white-space: pre-wrap; margin-bottom: 8px; }
+      .muted { color: #777; }
+      .settings-toggle { cursor: pointer; color: #2563eb; font-size: 12px; display: inline-block; margin-bottom: 6px; }
+      .settings { display: none; margin-bottom: 8px; padding: 8px; border: 1px solid #ddd; background: #fafafa; }
       .settings.open { display: block; }
       .settings input { width: 100%; box-sizing: border-box; }
+      #webmorph-spec { display: none; }
     </style>
   </head>
   <body>
     <h3>WebMorph</h3>
-    <span class="settings-toggle" id="settingsToggle">Settings (API Key)</span>
+    <span class="settings-toggle" id="settingsToggle">Settings (API key)</span>
     <div class="settings" id="settingsArea">
-      <label for="apiKey">OpenAI API Key:</label>
+      <label for="apiKey">OpenAI API key</label>
       <input type="password" id="apiKey" />
-      <button id="saveKeyBtn" style="margin-top: 4px; width: 100%">Save</button>
+      <button id="saveKeyBtn" style="margin-top: 6px; width: 100%">Save</button>
     </div>
 
-    <textarea id="intent" placeholder="What do you want to hide?"></textarea>
+    <textarea id="intent" placeholder="Describe the look you want (e.g. neobrutalism, glassmorphism, dark editorial)"></textarea>
     <div class="row">
       <button id="transformBtn">Transform</button>
-      <button id="resetBtn">Reset</button>
-    </div>
-    
-    <hr />
-    <div id="siteStatus">
-      <div class="status" id="statusText">Checking site...</div>
-      <div class="row">
-        <button id="toggleBtn" disabled>On / Off</button>
-        <button id="removeBtn" disabled>Remove All</button>
-      </div>
+      <button id="toggleBtn" disabled>On / Off</button>
+      <button id="removeBtn" disabled>Remove</button>
     </div>
 
     <div class="status" id="statusEl">Ready</div>
-    
+    <div class="status muted" id="siteStatus"></div>
+    <pre id="webmorph-spec"></pre>
+
     <script type="module" src="./main.ts"></script>
   </body>
 </html>

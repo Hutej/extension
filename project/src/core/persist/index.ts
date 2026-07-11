@@ -1,140 +1,38 @@
-import { getSemanticRole, getAccessibleName } from '../observe';
-import type { ActionSpec } from '../plan';
+/**
+ * core/persist — save a site's transform, re-identify, re-apply on reload.
+ *
+ * Phase 1 stores the compiled CSS AND the spec. On reload we re-run perceive()
+ * (which re-stamps the SAME cluster handles, because handles are hashes of the
+ * elements' stable visual signatures) and inject the stored CSS — so the
+ * transform survives navigation without a fresh model call.
+ *
+ * SiteState is intentionally extensible: Phase 2+ add an `ops` log beside `style`.
+ */
 
-export interface TargetDescriptor {
-  tag: string;
-  role: string;
-  accessibleName: string;
-  textFingerprint: string;
-  ancestorChain: { tag: string; role: string }[];
-  childElementCount: number;
-  approxRect: { x: number; y: number; width: number; height: number };
-}
+import type { StyleSpec } from '../spec';
 
-export interface BehaviorRecord {
+export interface StyleRecord {
   id: string;
   intent: string;
-  actionType: string;
-  descriptor?: TargetDescriptor | null;
-  actionSpec: ActionSpec;
-  createdAt: number;
-}
-
-export interface TransformRecord {
-  id: string;
-  intent: string;
-  kind: 'isolate' | 'hide';
-  keepDescriptor?: TargetDescriptor | null;
-  targetDescriptors?: TargetDescriptor[];
+  spec: StyleSpec;
   css: string;
-  createdAt: number;
-}
-
-export interface ThemeRecord {
-  id: string;
-  intent: string;
-  sanitizedCss: string;
   reasoning: string;
   createdAt: number;
 }
 
 export interface SiteState {
   enabled: boolean;
-  transforms: TransformRecord[];
-  behaviors: BehaviorRecord[];
-  theme?: ThemeRecord | null;
+  style?: StyleRecord | null;
+  // ops?: OpRecord[]  // reserved for Phase 2+ (structure/augment/act)
 }
 
-export function buildDescriptor(el: Element): TargetDescriptor {
-  const textContent = (el.textContent || '').replace(/\s+/g, ' ').trim();
-  const textFingerprint = textContent.substring(0, 60);
-  
-  const ancestorChain: { tag: string, role: string }[] = [];
-  let p = el.parentElement;
-  while (p && p !== document.documentElement) {
-    ancestorChain.push({
-      tag: p.tagName.toLowerCase(),
-      role: getSemanticRole(p) || ''
-    });
-    p = p.parentElement;
-  }
-
-  const rect = el.getBoundingClientRect();
-  return {
-    tag: el.tagName.toLowerCase(),
-    role: getSemanticRole(el) || '',
-    accessibleName: getAccessibleName(el),
-    textFingerprint,
-    ancestorChain,
-    childElementCount: el.childElementCount,
-    approxRect: { x: Math.round(rect.x), y: Math.round(rect.y), width: Math.round(rect.width), height: Math.round(rect.height) }
-  };
-}
-
-export function reidentify(desc: TargetDescriptor): { el: Element, confidence: number } | null {
-  const candidates = document.querySelectorAll(desc.tag);
-  let bestEl: Element | null = null;
-  let bestScore = -1;
-  
-  for (let i = 0; i < candidates.length; i++) {
-    const el = candidates[i];
-    if (el.hasAttribute('data-webmorph-ui') || el.closest('[data-webmorph-ui]')) continue;
-
-    let score = 0;
-    
-    // Role + Name
-    const role = getSemanticRole(el) || '';
-    const name = getAccessibleName(el);
-    if (role === desc.role) score += 20;
-    if (name && name === desc.accessibleName) score += 30;
-    else if (!name && !desc.accessibleName) score += 10;
-    
-    // Text fingerprint
-    const textContent = (el.textContent || '').replace(/\s+/g, ' ').trim();
-    if (textContent.substring(0, 60) === desc.textFingerprint) score += 20;
-    
-    // Ancestor chain similarity
-    let pEl = el.parentElement;
-    let matchCount = 0;
-    let totalAnc = desc.ancestorChain.length;
-    let ancIndex = 0;
-    while (pEl && pEl !== document.documentElement && ancIndex < totalAnc) {
-      const ancDesc = desc.ancestorChain[ancIndex];
-      if (pEl.tagName.toLowerCase() === ancDesc.tag && (getSemanticRole(pEl) || '') === ancDesc.role) {
-        matchCount++;
-      }
-      pEl = pEl.parentElement;
-      ancIndex++;
-    }
-    score += totalAnc > 0 ? (matchCount / totalAnc) * 20 : 20;
-    
-    // Tiebreakers
-    if (el.childElementCount === desc.childElementCount) score += 5;
-    
-    const rect = el.getBoundingClientRect();
-    if (Math.abs(rect.x - desc.approxRect.x) < 50 && Math.abs(rect.y - desc.approxRect.y) < 50) score += 5;
-    if (Math.abs(rect.width - desc.approxRect.width) < 50 && Math.abs(rect.height - desc.approxRect.height) < 50) score += 5;
-    
-    if (score > bestScore) {
-      bestScore = score;
-      bestEl = el;
-    }
-  }
-  
-  const confidence = Math.min(100, Math.round((bestScore / 100) * 100));
-  if (bestEl && confidence > 40) return { el: bestEl, confidence };
-  return null;
-}
+const DEFAULT_STATE: SiteState = { enabled: true, style: null };
 
 export async function loadSiteState(origin: string): Promise<SiteState> {
   const result = await browser.storage.local.get([origin]);
-  if (result[origin]) {
-    const state = result[origin] as any;
-    // Migration: ensure behaviors array exists
-    if (!state.behaviors) state.behaviors = [];
-    return state as SiteState;
-  }
-  return { enabled: true, transforms: [], behaviors: [] };
+  const stored = result[origin] as SiteState | undefined;
+  if (stored) return { ...DEFAULT_STATE, ...stored };
+  return { ...DEFAULT_STATE };
 }
 
 export async function saveSiteState(origin: string, state: SiteState): Promise<void> {
@@ -143,4 +41,8 @@ export async function saveSiteState(origin: string, state: SiteState): Promise<v
 
 export async function clearSiteState(origin: string): Promise<void> {
   await browser.storage.local.remove([origin]);
+}
+
+export function hasTransform(state: SiteState): boolean {
+  return !!state.style;
 }

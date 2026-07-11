@@ -8,7 +8,8 @@
     "build": "wxt build",
     "compile": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types tests/sanitizer.test.ts"
+    "test": "node --experimental-strip-types tests/compile.test.ts",
+    "test:e2e": "node --experimental-strip-types --env-file=.env tests/popup.test.ts"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.2",
