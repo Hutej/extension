@@ -148,13 +148,12 @@ async function run() {
         const ruleCount = parsed.rules?.length ?? 0;
         const layoutCount = parsed.rules?.filter((r: any) => r.layout && Object.keys(r.layout).length).length ?? 0;
         const hideCount = parsed.rules?.filter((r: any) => r.hide === true).length ?? 0;
-        const keepCount = parsed.rules?.filter((r: any) => r.keep === true).length ?? 0;
         const compCount = parsed.composition?.length ?? 0;
         const paletteMode = parsed.paletteMode ?? '(default)';
         const canvasBg = parsed.canvas?.background ?? '(none)';
         const maxW = parsed.canvasLayout?.maxWidth ?? '(none)';
         console.log(`  reasoning: ${parsed.reasoning || '(none)'}`);
-        console.log(`  paletteMode: ${paletteMode} | composition: ${compCount} | rules: ${ruleCount} total, ${layoutCount} with layout, ${hideCount} hides, ${keepCount} keeps | canvas.bg: ${canvasBg} | maxWidth: ${maxW}`);
+        console.log(`  paletteMode: ${paletteMode} | composition: ${compCount} | rules: ${ruleCount} total, ${layoutCount} with layout, ${hideCount} hides | canvas.bg: ${canvasBg} | maxWidth: ${maxW}`);
       }
     }
 

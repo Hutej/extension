@@ -35,6 +35,9 @@ export interface BuildOptions {
    *  clamped to fit it, just like the layout bag (Fix 1: oversized type set via
    *  "styles" used to escape the clamp). */
   containerWidthPx?: number;
+  /** CSS variable map from perception (--name → resolved rgb). Used to resolve
+   *  var() backgrounds for contrast lock computation. */
+  varMap?: Record<string, string>;
 }
 
 export interface BuildResult {
@@ -71,14 +74,21 @@ export function buildDeclarations(input: StyleDecls, opts: BuildOptions): BuildR
 
   // Contrast Lock — a background must never ship without a readable text color.
   if (setsBackground && (!hasExplicitColor || opts.forceContrast)) {
-    const parsed = parseColor(bgValue);
+    let parsed = parseColor(bgValue);
+    // Resolve var() against the perception's CSS variable map for contrast computation.
+    // The CSS output keeps the original var() value — the browser resolves it at render.
+    if (!parsed && opts.varMap && bgValue.includes('var(')) {
+      const resolved = resolveVar(bgValue, opts.varMap);
+      if (resolved) parsed = parseColor(resolved);
+    }
     const text = parsed ? pickReadableText(parsed) : (opts.defaultText || '');
     if (text && (opts.forceContrast || !hasExplicitColor)) out.set('color', text);
   } else if (opts.forceContrast && hasExplicitColor && opts.contrastBg) {
-    // No background on this rule, but it sets a text color: under forceContrast,
-    // make that color readable against the canvas backdrop (rule-level companion
-    // to compile's body-level floor — together they cover uncovered + covered text).
-    const parsed = parseColor(opts.contrastBg);
+    let parsed = parseColor(opts.contrastBg);
+    if (!parsed && opts.varMap && opts.contrastBg.includes('var(')) {
+      const resolved = resolveVar(opts.contrastBg, opts.varMap);
+      if (resolved) parsed = parseColor(resolved);
+    }
     if (parsed) out.set('color', pickReadableText(parsed));
   }
 
@@ -93,4 +103,13 @@ export function buildDeclarations(input: StyleDecls, opts: BuildOptions): BuildR
 
   const decls = Array.from(out.entries()).map(([p, v]) => `${p}: ${v} !important;`);
   return { decls, dropped };
+}
+
+/** Resolve var(--name) references in a CSS value using the perception's variable map. */
+function resolveVar(value: string, varMap: Record<string, string>): string {
+  return value.replace(/var\(\s*(--[\w-]+)\s*(?:,\s*([^)]+))?\)/g, (_, name, fallback) => {
+    if (varMap[name]) return varMap[name];
+    if (fallback) return fallback.trim();
+    return '';
+  });
 }

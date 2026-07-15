@@ -59,7 +59,7 @@ function perception(clusters: Cluster[], canvasBg = 'rgb(255,255,255)', regions:
       { target: 'nonexistent', styles: { background: '#123456' } },
     ],
   };
-  const { css, ops, invalidTargets } = compileSpec(spec, p);
+  const { css, invalidTargets } = compileSpec(spec, p);
   assert.ok(css.includes('!important'), 'paint: !important');
   assert.ok(css.includes('background:') && !/background-color\s*:/.test(css), 'paint: background shorthand only');
   assert.ok(css.includes('color: #111111'), 'paint: contrast lock adds readable text');
@@ -70,7 +70,6 @@ function perception(clusters: Cluster[], canvasBg = 'rgb(255,255,255)', regions:
   assert.ok(css.includes('appearance: none'), 'paint: appearance:none on native control');
   assert.deepStrictEqual(invalidTargets, ['nonexistent'], 'paint: bogus target reported');
   assert.ok(css.includes(':hover') && css.includes('transform:') && css.includes('transition:'), 'paint: hover + transition');
-  assert.deepStrictEqual(ops, [], 'paint-only spec plans no moves');
 }
 
 // ─────────────────────────────── layout (new guarantees) ───────────────────────────────
@@ -99,36 +98,16 @@ function perception(clusters: Cluster[], canvasBg = 'rgb(255,255,255)', regions:
   assert.ok(r.css.includes('box-sizing: border-box'), 'layout: box-sizing coupled to width');
 }
 
-// ─────────────────────────────── moves planning ───────────────────────────────
-{
-  const shared = cluster({ handle: 'cA', selector: '[data-wm-c="cA"]', layout: layout({ constraintOwnerHandle: 'own1' }) });
-  const shared2 = cluster({ handle: 'cB', selector: '[data-wm-c="cB"]', layout: layout({ constraintOwnerHandle: 'own1' }) });
-  const x = cluster({ handle: 'cX', selector: '[data-wm-c="cX"]', layout: layout({ constraintOwnerHandle: 'ownX' }) });
-  const y = cluster({ handle: 'cY', selector: '[data-wm-c="cY"]', layout: layout({ constraintOwnerHandle: 'ownY' }) });
-  const p = perception([shared, shared2, x, y]);
-
-  const r = compileSpec({
-    reasoning: '', rules: [],
-    moves: [
-      { target: 'cA', into: 'cB', reason: 'same owner -> CSS order preferred' },   // dropped
-      { target: 'cX', into: 'cY', reason: 'cross-owner relocation' },              // survives
-      { target: 'cA', into: 'ghost', reason: 'bad dest' },                         // dropped (unknown handle)
-    ],
-  }, p);
-  assert.deepStrictEqual(r.ops, [{ target: 'cX', into: 'cY', position: 'append' }], 'moves: same-owner + invalid dropped, cross-owner planned');
-}
-
 // ─────────────────────────────── validateSpec robustness ───────────────────────────────
-for (const junk of [null, undefined, 42, 'x', [], { rules: 'nope' }, { rules: [{}, { target: 5 }, { target: 'ok' }] }, { rules: [], moves: [{ target: 'a' }] }]) {
+for (const junk of [null, undefined, 42, 'x', [], { rules: 'nope' }, { rules: [{}, { target: 5 }, { target: 'ok' }] }, { rules: [] }]) {
   const res = validateSpec(junk);
   assert.ok(typeof res.ok === 'boolean', 'validateSpec never throws, returns ok flag');
 }
 assert.strictEqual(validateSpec({ rules: [{}, { target: 't', styles: { color: 'red' } }] }).ok, true, 'validateSpec keeps a usable rule');
 assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects empty');
 {
-  const v = validateSpec({ reasoning: 'x', rules: [{ target: 'c1', layout: { maxWidth: '700px' }, styles: { color: '#111' } }], moves: [{ target: 'c1', into: 'c2' }] });
-  assert.ok(v.ok && v.spec, 'validateSpec accepts layout + moves');
-  assert.strictEqual(v.spec!.moves![0].position, 'append', 'move position defaults to append');
+  const v = validateSpec({ reasoning: 'x', rules: [{ target: 'c1', layout: { maxWidth: '700px' }, styles: { color: '#111' } }] });
+  assert.ok(v.ok && v.spec, 'validateSpec accepts layout + styles');
 }
 
 // ─────────────────────────────── repair: forceContrast ───────────────────────────────
@@ -393,34 +372,34 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 }
 
 // ─────────────────────────────── Mech 1: completeness contract ───────────────────────────────
-// Every retained cluster must be accounted for: restyled, hidden, or explicitly kept.
+// Every retained cluster must be accounted for: restyled or hidden.
+// (keep was removed — base-coat handles unaccounted clusters as a safety net.)
 {
   const handles = new Set(['c1', 'c2', 'c3']);
 
-  // All three accounted (styles + hide + keep) -> ok
+  // All three accounted (styles + hide) -> ok. c3 unaccounted -> base-coat territory.
+  const partial = checkCompleteness(
+    { reasoning: '', rules: [
+      { target: 'c1', styles: { color: 'red' } },
+      { target: 'c2', hide: true },
+    ] },
+    handles,
+  );
+  assert.ok(!partial.ok, 'completeness: c3 unaccounted -> not ok');
+  assert.strictEqual(partial.unaccounted.length, 1, 'completeness: one unaccounted handle');
+  assert.ok(partial.unaccounted.includes('c3'), 'completeness: unaccounted handle named');
+
+  // All accounted -> ok
   const complete = checkCompleteness(
     { reasoning: '', rules: [
       { target: 'c1', styles: { color: 'red' } },
       { target: 'c2', hide: true },
-      { target: 'c3', keep: true },
+      { target: 'c3', styles: { background: '#333' } },
     ] },
     handles,
   );
-  assert.ok(complete.ok, 'completeness: styles + hide + keep all accounted');
+  assert.ok(complete.ok, 'completeness: all accounted -> ok');
   assert.strictEqual(complete.unaccounted.length, 0, 'completeness: no unaccounted handles');
-
-  // c2 and c3 unaccounted -> not ok, names them
-  const incomplete = checkCompleteness(
-    { reasoning: '', rules: [{ target: 'c1', styles: { color: 'red' } }] },
-    handles,
-  );
-  assert.ok(!incomplete.ok, 'completeness: c2+c3 unaccounted -> not ok');
-  assert.ok(incomplete.unaccounted.includes('c2') && incomplete.unaccounted.includes('c3'), 'completeness: unaccounted handles named');
-
-  // validateSpec parses keep:true
-  const v = validateSpec({ rules: [{ target: 'cx', keep: true }] });
-  assert.ok(v.ok && v.spec, 'completeness: keep-only rule accepted by validateSpec');
-  assert.strictEqual(v.spec!.rules[0].keep, true, 'completeness: keep:true stored on rule');
 
   // validateSpec parses paletteMode
   const v2 = validateSpec({ reasoning: 'x', paletteMode: 'vivid', rules: [{ target: 'cx', styles: { color: 'red' } }] });
@@ -648,4 +627,4 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   assert.strictEqual(r3.baseCoatCount, 0, 'baseCoat: addressed header NOT base-coated (model handled it)');
 }
 
-console.log('compile.test OK — all guarantees hold: paint + layout + moves + validation + opaque-wrapper + hide-channel + forceContrast-floor + accent-trim + viewport-safe + targeted-clamp + container-font + targeted-contrast + completeness + luminance-coverage + word-break + palette-mode + columnCount-clamp + grid-normalization + composition + base-coat');
+console.log('compile.test OK — all guarantees hold: paint + layout + validation + opaque-wrapper + hide-channel + forceContrast-floor + accent-trim + viewport-safe + targeted-clamp + container-font + targeted-contrast + completeness + luminance-coverage + word-break + palette-mode + columnCount-clamp + grid-normalization + composition + base-coat');

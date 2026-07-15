@@ -4,10 +4,11 @@
  * OPEN-ENDED (any tokens/values) but STRUCTURED (validated shape, real handles).
  * The compiler — not the AI — decides which declarations are safe to emit.
  *
- * This slice expands the DSL from paint-only into a design system: per-rule
- * `layout` + page-level `canvasLayout` decl bags, plus an optional `moves[]`
- * relocation contract (planned/validated now; execution deferred to a later slice).
- * Backward compatible: legacy paint-only specs still validate and compile.
+ * Round 7: removed `keep` (was a loophole that codified partial redesigns —
+ * the model could "keep" any cluster it didn't want to redesign and completeness
+ * passed while the cluster stayed original). Removed `moves` (dead feature —
+ * validated and planned but never executed). The base-coat harmonizer now
+ * covers unaccounted clusters as a safety net.
  */
 
 /** Free-form declaration bag: spec-key -> value. Compiler drops unknown/unsafe keys. */
@@ -23,19 +24,6 @@ export interface DesignRule {
   focusVisible?: StyleDecls;
   /** Remove this cluster from the page (compiled to display:none; guarded + reversible). */
   hide?: boolean;
-  /** Declare that this cluster's original design deliberately serves the aesthetic
-   *  — it is accounted for but NOT restyled or hidden. Rare; must be justifiable.
-   *  The compiler emits nothing for a keep-only rule; it exists so the completeness
-   *  contract can distinguish "I examined this and kept it" from "I forgot it." */
-  keep?: boolean;
-}
-
-/** A reversible relocation the compiler could not express as pure CSS. Planned only this slice. */
-export interface MoveOp {
-  target: string;             // cluster handle to move
-  into: string;               // destination cluster handle
-  position?: 'append' | 'prepend';
-  reason: string;             // why CSS could not do it (stated intent)
 }
 
 export interface DesignSpec {
@@ -56,7 +44,6 @@ export interface DesignSpec {
    *  same laws pipeline. */
   composition?: DesignRule[];
   rules: DesignRule[];
-  moves?: MoveOp[];
 }
 
 // Backward-compatible aliases so persist/content keep compiling.
@@ -95,20 +82,7 @@ export function validateSpec(raw: unknown): ValidateResult {
     if (hover) rule.hover = hover;
     if (focusVisible) rule.focusVisible = focusVisible;
     if (ri.hide === true) rule.hide = true;
-    if (ri.keep === true) rule.keep = true;
-    if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide || rule.keep) rules.push(rule);
-  }
-
-  const moves: MoveOp[] = [];
-  if (Array.isArray(r.moves)) {
-    for (const item of r.moves as unknown[]) {
-      if (!item || typeof item !== 'object') continue;
-      const mi = item as Record<string, unknown>;
-      if (typeof mi.target !== 'string' || !mi.target) continue;
-      if (typeof mi.into !== 'string' || !mi.into) continue;
-      const position = mi.position === 'prepend' ? 'prepend' : 'append';
-      moves.push({ target: mi.target, into: mi.into, position, reason: typeof mi.reason === 'string' ? mi.reason : '' });
-    }
+    if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide) rules.push(rule);
   }
 
   const spec: DesignSpec = {
@@ -129,8 +103,7 @@ export function validateSpec(raw: unknown): ValidateResult {
       if (styles) rule.styles = styles;
       if (layout) rule.layout = layout;
       if (ri.hide === true) rule.hide = true;
-      if (ri.keep === true) rule.keep = true;
-      if (rule.styles || rule.layout || rule.hide || rule.keep) compRules.push(rule);
+      if (rule.styles || rule.layout || rule.hide) compRules.push(rule);
     }
     if (compRules.length) spec.composition = compRules;
   }
@@ -140,10 +113,9 @@ export function validateSpec(raw: unknown): ValidateResult {
   if (variables) spec.variables = variables;
   if (canvas) spec.canvas = canvas;
   if (canvasLayout) spec.canvasLayout = canvasLayout;
-  if (moves.length) spec.moves = moves;
 
-  if (rules.length === 0 && !spec.canvas && !spec.canvasLayout && !spec.variables && moves.length === 0) {
-    return { ok: false, error: 'spec produced no usable rules, canvas, variables, or moves' };
+  if (rules.length === 0 && !spec.canvas && !spec.canvasLayout && !spec.variables) {
+    return { ok: false, error: 'spec produced no usable rules, canvas, or variables' };
   }
   return { ok: true, spec };
 }
@@ -161,22 +133,22 @@ function asDecls(v: unknown): StyleDecls | undefined {
 }
 
 /**
- * Completeness contract (Mechanism 1). Every retained cluster handle must be
- * accounted for: restyled (styles/layout/hover/focusVisible), hidden, or
- * explicitly kept. Returns the handles the spec left unaccounted — the caller
- * routes the single reReason budget with a critique that names them. Pure: takes
- * the handle set as data so it's unit-testable and callable before apply.
+ * Completeness contract. Every retained cluster handle must be accounted for:
+ * restyled (styles/layout/hover/focusVisible) or hidden. Unaccounted clusters
+ * are left for the base-coat harmonizer (compile step 3e) — they get a safety-
+ * net repaint if they clash with the canvas. Returns the handles the spec left
+ * unaccounted. Pure: takes the handle set as data so it's unit-testable.
  */
 export function checkCompleteness(spec: DesignSpec, handles: Set<string>): { ok: boolean; unaccounted: string[] } {
   const accounted = new Set<string>();
   for (const rule of spec.rules) {
-    if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide || rule.keep) {
+    if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide) {
       accounted.add(rule.target);
     }
   }
   if (spec.composition) {
     for (const rule of spec.composition) {
-      if (rule.styles || rule.layout || rule.hide || rule.keep) accounted.add(rule.target);
+      if (rule.styles || rule.layout || rule.hide) accounted.add(rule.target);
     }
   }
   const unaccounted = [...handles].filter((h) => !accounted.has(h));

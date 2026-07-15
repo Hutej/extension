@@ -1,5 +1,5 @@
 /**
- * core/compile — DesignSpec -> concrete, safe CSS (+ planned moves). Pure.
+ * core/compile — DesignSpec -> concrete, safe CSS. Pure.
  *
  * Enforces the safety laws as a pipeline stage:
  *   - only targets handles that exist in the live perception (or "canvas")
@@ -7,8 +7,8 @@
  *   - paints the canvas, then each discovered component
  *   - per rule, co-emits PAINT (capabilities/style) and LAYOUT (capabilities/structure)
  *     into the same selector block
- *   - validates + plans `moves[]` but does NOT execute them (deferred slice):
- *     execution seam lives in core/execute; content applies CSS only.
+ *   - base-coat harmonizer: ALL unaccounted clashing clusters get a safety-net
+ *     repaint derived from the canvas (not just ≤12 skeleton regions)
  */
 
 import type { DesignSpec, StyleDecls, LayoutDecls } from '../spec';
@@ -17,12 +17,6 @@ import { buildDeclarations } from '../capabilities/style/index.ts';
 import { buildLayoutDeclarations } from '../capabilities/structure/index.ts';
 import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, NARROWING_KEYS, luminanceCompatible } from '../laws/index.ts';
 import { parseColor, colorfulness, pickReadableText } from '../../shared/color.ts';
-
-export interface PlannedMove {
-  target: string;
-  into: string;
-  position: 'append' | 'prepend';
-}
 
 export interface CompileOptions {
   forceContrast?: boolean;
@@ -42,11 +36,10 @@ const ACCENT_STRIP_KEYS = ['background', 'backgroundColor', 'backgroundImage', '
 
 export interface CompileResult {
   css: string;
-  ops: PlannedMove[];          // planned only this slice (execution deferred)
   rulesEmitted: number;
   invalidTargets: string[];
   droppedProps: string[];
-  baseCoatCount: number;       // regions base-coated by the harmonizer (Fix 4)
+  baseCoatCount: number;       // clusters base-coated by the harmonizer
 }
 
 const PADDING_KEYS = ['padding', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'];
@@ -87,7 +80,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
     const decls: string[] = [];
     if (spec.canvas) {
       const styles = opts.dropPadding ? stripKeys(spec.canvas, PADDING_KEYS) : spec.canvas;
-      const r = buildDeclarations(styles, { mode: 'base', defaultText: canvasText, forceContrast: opts.forceContrast, contrastBg: canvasBg, containerWidthPx: perception.viewport.w });
+      const r = buildDeclarations(styles, { mode: 'base', defaultText: canvasText, forceContrast: opts.forceContrast, contrastBg: canvasBg, containerWidthPx: perception.viewport.w, varMap: perception.cssVarMap });
       droppedProps.push(...r.dropped);
       decls.push(...r.decls);
     }
@@ -138,7 +131,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       }
       const decls: string[] = [];
       if (rule.styles) {
-        const r = buildDeclarations(rule.styles, { mode: 'base', defaultText: canvasText, forceContrast: opts.forceContrast, contrastBg: canvasBg, containerWidthPx: cluster.rect.w });
+        const r = buildDeclarations(rule.styles, { mode: 'base', defaultText: canvasText, forceContrast: opts.forceContrast, contrastBg: canvasBg, containerWidthPx: cluster.rect.w, varMap: perception.cssVarMap });
         droppedProps.push(...r.dropped);
         decls.push(...r.decls);
       }
@@ -200,6 +193,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
         forceContrast: opts.forceContrast,
         contrastBg: canvasBg,
         containerWidthPx: cluster?.rect.w,
+        varMap: perception.cssVarMap,
       });
       droppedProps.push(...r.dropped);
       decls.push(...r.decls);
@@ -292,48 +286,41 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
     }
   }
 
-  // 3e) Base-coat harmonizer (Fix 4). After all model rules, for each skeleton
-  // region not addressed (rule/hide/keep/composition) AND not luminance-compatible
-  // with the canvas, emit a quiet neutral repaint derived from the spec's palette.
-  // No accents, no drama — a base coat, not a design. Model rules always win
-  // specificity (they're earlier in the cascade). This kills white strips on
-  // dark canvases where the model simply didn't target that region.
+  // 3e) Base-coat harmonizer. After all model rules, for each cluster NOT
+  // addressed (rule/hide/composition) AND not luminance-compatible with the
+  // canvas, emit a safety-net repaint. All clashing unaccounted clusters get
+  // the same base tone + readable text, grouped into ONE CSS rule for efficiency.
+  // No border/shadow/radius stripping — preserve original character. Model rules
+  // are earlier in the cascade so they win source-order. This kills white strips
+  // on dark canvases where the model didn't target that cluster.
   if (spec.canvas?.background && !opts.dropLayout) {
     const addressed = new Set<string>();
     for (const rule of spec.rules) {
-      if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide || rule.keep) addressed.add(rule.target);
+      if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide) addressed.add(rule.target);
     }
     if (spec.composition) {
       for (const rule of spec.composition) {
-        if (rule.styles || rule.layout || rule.hide || rule.keep) addressed.add(rule.target);
+        if (rule.styles || rule.layout || rule.hide) addressed.add(rule.target);
       }
     }
     const baseTone = deriveBaseTone(canvasBg);
     const baseText = pickReadableText(parseColor(baseTone) ?? [255, 255, 255, 1]);
-    for (const region of perception.skeleton.regions) {
-      if (addressed.has(region.handle)) continue;
-      const cl = byHandle.get(region.handle);
-      if (!cl) continue;
-      if (luminanceCompatible(cl.style.background, canvasBg)) continue;
-      blocks.push(`${cl.selector} {\n  background: ${baseTone} !important;\n  color: ${baseText} !important;\n  border: none !important;\n}`);
+    const coatSelectors: string[] = [];
+    for (const cl of perception.clusters) {
+      if (addressed.has(cl.handle)) continue;
+      if (!cl.hasSolidBg) continue;               // transparent — shows canvas, no clash
+      if (cl.rect.w < 24 || cl.rect.h < 24) continue;  // too small to read as a "strip"
+      if (luminanceCompatible(cl.style.background, canvasBg)) continue;  // blends with canvas
+      coatSelectors.push(cl.selector);
       baseCoatCount++;
+    }
+    if (coatSelectors.length) {
+      blocks.push(`${coatSelectors.join(',\n')} {\n  background: ${baseTone} !important;\n  color: ${baseText} !important;\n}`);
       rulesEmitted++;
     }
   }
 
-  // 4) Plan moves — validate handles, prefer CSS (drop same-owner reorders), keep survivors.
-  const ops: PlannedMove[] = [];
-  if (spec.moves) {
-    for (const m of spec.moves) {
-      if (!perception.handles.has(m.target) || !perception.handles.has(m.into)) continue;
-      const a = byHandle.get(m.target)?.layout?.constraintOwnerHandle;
-      const b = byHandle.get(m.into)?.layout?.constraintOwnerHandle;
-      if (a && b && a === b) continue; // CSS `order` on that owner can express this — drop the DOM move
-      ops.push({ target: m.target, into: m.into, position: m.position ?? 'append' });
-    }
-  }
-
-  return { css: blocks.join('\n\n'), ops, rulesEmitted, invalidTargets, droppedProps, baseCoatCount };
+  return { css: blocks.join('\n\n'), rulesEmitted, invalidTargets, droppedProps, baseCoatCount };
 }
 
 function indent(decls: string[]): string { return decls.map((d) => '  ' + d).join('\n'); }

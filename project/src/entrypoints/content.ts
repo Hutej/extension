@@ -107,7 +107,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     const sanitized = sanitizeCss(compiled.css).css;
     if (!sanitized.trim()) { removeStyle(); markFailed('no styles'); return { ok: false, message: 'Produced no applicable styles.', spec, reasoning: spec.reasoning }; }
 
-    applyStyle(sanitized); // CSS only — planned moves (compiled.ops) are NOT executed this slice
+    applyStyle(sanitized);
     // Wait one rAF tick: !important injection via appendChild needs a layout pass before
     // getComputedStyle (used by verify's contrast + fingerprint) reflects the new values.
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
