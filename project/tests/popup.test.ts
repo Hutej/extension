@@ -158,6 +158,12 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
   };
 
   const page = await context.newPage();
+  // Capture WebMorph console logs for debugging.
+  const wmLogs: string[] = [];
+  page.on('console', (msg) => {
+    const txt = msg.text();
+    if (txt.includes('[WebMorph]')) wmLogs.push(txt);
+  });
   try {
     await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
     await page.waitForTimeout(2000);
@@ -170,12 +176,15 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
     }
 
     // Fill intent in popup and click Transform.
+    // Bring the page to front so the popup's active-tab query finds THIS tab.
+    await page.bringToFront();
     const intentEl = await popup.$('#intent');
     if (!intentEl) { console.log(`  popup missing intent field`); return result; }
     await intentEl.fill('');
     await intentEl.fill(site.prompt);
 
-    // Clear markers.
+    // Clear previous result + markers.
+    await popup.$eval('#webmorph-result', (el) => { el.textContent = ''; }).catch(() => {});
     await page.evaluate(() => {
       document.documentElement.removeAttribute('data-webmorph-applied');
       document.documentElement.removeAttribute('data-webmorph-failed');
@@ -197,6 +206,10 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
       );
       markerSeen = true;
       result.applied = await page.evaluate(() => document.documentElement.hasAttribute('data-webmorph-applied'));
+      if (!result.applied) {
+        const failMsg = await page.evaluate(() => document.documentElement.getAttribute('data-webmorph-failed') || '(unknown)');
+        console.log(`  FAILED: ${failMsg}`);
+      }
     } catch {
       result.timedOut = true;
       console.log(`  marker never appeared (timeout)`);
@@ -239,6 +252,12 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
     // from the repair log. For now, we infer from checks: if noOverflow is true after
     // a repair cycle, dropLayout may have fired. The content script logs this.
     result.dropLayout = false; // will be refined with console log parsing
+
+    // Log WebMorph console output for debugging failures.
+    if (wmLogs.length) {
+      const relevant = wmLogs.filter((l) => l.includes('PAID') || l.includes('repair') || l.includes('FAILED') || l.includes('INCOMPLETE') || l.includes('dropLayout') || l.includes('rollback') || l.includes('keepBest') || l.includes('iter 0'));
+      if (relevant.length) console.log(`  logs: ${relevant.slice(0, 5).join(' | ')}`);
+    }
 
   } catch (err) {
     console.log(`  error: ${(err as Error).message}`);

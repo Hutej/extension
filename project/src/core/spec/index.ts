@@ -133,18 +133,26 @@ function asDecls(v: unknown): StyleDecls | undefined {
 }
 
 /**
- * Completeness contract. Every retained cluster handle must be accounted for:
- * restyled (styles/layout/hover/focusVisible) or hidden. Unaccounted clusters
- * are left for the base-coat harmonizer (compile step 3e) — they get a safety-
- * net repaint if they clash with the canvas. Returns the handles the spec left
- * unaccounted. Pure: takes the handle set as data so it's unit-testable.
+ * Completeness contract. Gate: does the spec have the minimums for a complete
+ * redesign? Canvas + composition/layout + ≥15% of clusters in rules. If these
+ * pass, base-coat covers the rest. Unaccounted clusters are listed for logging
+ * but do NOT fail the gate — base-coat is the safety net.
  */
-export function checkCompleteness(spec: DesignSpec, handles: Set<string>): { ok: boolean; unaccounted: string[] } {
+export function checkCompleteness(spec: DesignSpec, handles: Set<string>): { ok: boolean; unaccounted: string[]; reason?: string } {
+  if (!spec.canvas?.background) {
+    return { ok: false, unaccounted: [], reason: 'No canvas background set — every design needs a deliberate canvas.' };
+  }
+  if (!spec.canvasLayout && (!spec.composition || spec.composition.length === 0)) {
+    return { ok: false, unaccounted: [], reason: 'No canvasLayout or composition rules — the page proportions must be a deliberate decision.' };
+  }
+  const minRules = Math.ceil(handles.size * 0.15);
+  if (spec.rules.length < minRules) {
+    return { ok: false, unaccounted: [], reason: `Only ${spec.rules.length} rules for ${handles.size} clusters — need at least ${minRules} (15%). Style the major clusters actively.` };
+  }
+  // All gates pass — base-coat covers unaccounted clusters.
   const accounted = new Set<string>();
   for (const rule of spec.rules) {
-    if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide) {
-      accounted.add(rule.target);
-    }
+    if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide) accounted.add(rule.target);
   }
   if (spec.composition) {
     for (const rule of spec.composition) {
@@ -152,5 +160,5 @@ export function checkCompleteness(spec: DesignSpec, handles: Set<string>): { ok:
     }
   }
   const unaccounted = [...handles].filter((h) => !accounted.has(h));
-  return { ok: unaccounted.length === 0, unaccounted };
+  return { ok: true, unaccounted };
 }

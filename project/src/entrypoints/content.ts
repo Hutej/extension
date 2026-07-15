@@ -83,20 +83,20 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   {
     const comp = checkCompleteness(spec, perception.handles);
     if (!comp.ok) {
-      logDebug(`INCOMPLETE SPEC — ${comp.unaccounted.length}/${perception.handles.size} clusters unaccounted: ${comp.unaccounted.slice(0, 16).join(', ')}`);
+      logDebug(`INCOMPLETE SPEC — ${comp.reason}`);
       if (reReasonsDone < MAX_REPAIR_ATTEMPTS) {
         reReasonsDone++;
-        logDebug('PAID SECOND CALL — first-call prompt failed to account for all clusters');
-        const critique = `Your spec left ${comp.unaccounted.length} cluster(s) unaccounted: ${comp.unaccounted.slice(0, 24).join(', ')}. EVERY cluster handle in the COMPONENTS list MUST appear in your rules — restyle it (styles/layout) or hide it ("hide": true). Unaccounted clusters will be base-coated as a safety net, but you must actively design the major clusters.`;
+        logDebug('PAID SECOND CALL — completeness gate failed');
+        const critique = comp.reason + ' Unaccounted clusters will be base-coated as a safety net, but you must actively design the major clusters.';
         const re = await askForSpec(intent, serialized, critique);
         if (re.ok && re.spec) {
           spec = re.spec;
           const comp2 = checkCompleteness(spec, perception.handles);
-          logDebug(`revised spec: ${comp2.ok ? 'complete' : `${comp2.unaccounted.length} still unaccounted — proceeding to verify`}`);
+          logDebug(`revised spec: ${comp2.ok ? 'complete' : comp2.reason ?? 'still incomplete — proceeding to verify'}`);
         }
       }
     } else {
-      logDebug(`completeness OK — all ${perception.handles.size} clusters accounted for`);
+      logDebug(`completeness OK — ${perception.handles.size} clusters, ${comp.unaccounted.length} base-coated`);
     }
   }
 

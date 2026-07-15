@@ -98,6 +98,13 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       const readable = parsed ? pickReadableText(parsed) : canvasText;
       if (readable) decls.push(`color: ${readable} !important;`);
     }
+    // ponytail: overflow-x hidden is a safety net for non-clustered elements with
+    // fixed widths that the compiler can't clamp. The model should design within the
+    // viewport, but this prevents a horizontal scrollbar from ruining an otherwise
+    // good design. Only added when a canvas is set (a redesign is in progress).
+    if (spec.canvas?.background) {
+      decls.push('overflow-x: hidden !important;');
+    }
     if (decls.length) { blocks.push(`html, body {\n${indent(decls)}\n}`); rulesEmitted++; }
 
     // Opaque-wrapper neutralization: when a deliberate canvas background is set,
@@ -348,7 +355,7 @@ function planAccentKeep(spec: DesignSpec, byHandle: Map<string, Cluster>, percep
     const cl = byHandle.get(rule.target);
     if (!cl) continue;
     const area = Math.min(cl.rect.w * cl.rect.h, vpArea) * Math.max(1, cl.count);
-    accents.push({ handle: rule.target, prominence: cl.prominence, area, repeated: cl.count > 1 });
+    accents.push({ handle: rule.target, prominence: cl.prominence, area, repeated: cl.count > 3 });
   }
   const keep = new Set(accents.map((a) => a.handle));
   if (accents.length <= 1) return keep;

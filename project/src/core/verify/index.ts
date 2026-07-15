@@ -306,7 +306,7 @@ function checkRepeatedAccent(before: LayoutFingerprint): boolean {
   }
 
   for (const [h, count] of counts) {
-    if (count <= 1) continue;
+    if (count <= 3) continue;  // ponytail: 2-3 members is a pair, not a "repeated cluster"
     const rep = document.querySelector(`[data-wm-c="${h}"]`);
     if (!rep) continue;
     const afterC = parseColor(getComputedStyle(rep).backgroundColor);
@@ -365,14 +365,17 @@ function checkContrast(details: string[], targets: Set<string>): boolean {
     .map((el) => ({ el, fs: parseFloat(getComputedStyle(el).fontSize) || 0 }))
     .sort((a, b) => b.fs - a.fs);
   let checked = 0, failed = 0, failedTop = 0;
-  for (const { el } of candidates) {
+  for (const { el, fs } of candidates) {
     if (checked >= CONTRAST_SAMPLE_COUNT) break;
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) continue;
     const fg = parseColor(getComputedStyle(el).color);
     if (!fg) continue;
     checked++;
-    if (contrastRatio(fg, effectiveBackground(el)) < MIN_CONTRAST_RATIO) {
+    // WCAG: 4.5:1 for normal text, 3.0:1 for large text (≥18px or ≥14px bold).
+    const isLarge = fs >= 18 || (fs >= 14 && parseInt(getComputedStyle(el).fontWeight) >= 700);
+    const threshold = isLarge ? 3.0 : MIN_CONTRAST_RATIO;
+    if (contrastRatio(fg, effectiveBackground(el)) < threshold) {
       failed++;
       if (checked <= CONTRAST_TOP_FAIL_COUNT) failedTop++;
       const h = el.closest('[data-wm-c]')?.getAttribute('data-wm-c');

@@ -372,34 +372,30 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 }
 
 // ─────────────────────────────── Mech 1: completeness contract ───────────────────────────────
-// Every retained cluster must be accounted for: restyled or hidden.
-// (keep was removed — base-coat handles unaccounted clusters as a safety net.)
+// Gate: canvas + composition + ≥15% rules. Base-coat covers unaccounted clusters.
 {
   const handles = new Set(['c1', 'c2', 'c3']);
 
-  // All three accounted (styles + hide) -> ok. c3 unaccounted -> base-coat territory.
-  const partial = checkCompleteness(
-    { reasoning: '', rules: [
-      { target: 'c1', styles: { color: 'red' } },
-      { target: 'c2', hide: true },
-    ] },
-    handles,
-  );
-  assert.ok(!partial.ok, 'completeness: c3 unaccounted -> not ok');
-  assert.strictEqual(partial.unaccounted.length, 1, 'completeness: one unaccounted handle');
-  assert.ok(partial.unaccounted.includes('c3'), 'completeness: unaccounted handle named');
+  // No canvas → fail
+  const noCanvas = checkCompleteness({ reasoning: '', rules: [{ target: 'c1', styles: { color: 'red' } }] }, handles);
+  assert.ok(!noCanvas.ok, 'completeness: no canvas → fail');
 
-  // All accounted -> ok
+  // Has canvas + composition + enough rules → pass (c3 unaccounted is OK — base-coat)
   const complete = checkCompleteness(
-    { reasoning: '', rules: [
-      { target: 'c1', styles: { color: 'red' } },
-      { target: 'c2', hide: true },
-      { target: 'c3', styles: { background: '#333' } },
-    ] },
+    { reasoning: '', canvas: { background: '#111', color: '#fff' }, composition: [{ target: 'c1', layout: { maxWidth: '760px' } }],
+      rules: [{ target: 'c1', styles: { color: 'red' } }, { target: 'c2', hide: true }] },
     handles,
   );
-  assert.ok(complete.ok, 'completeness: all accounted -> ok');
-  assert.strictEqual(complete.unaccounted.length, 0, 'completeness: no unaccounted handles');
+  assert.ok(complete.ok, 'completeness: canvas + composition + ≥15% rules → pass');
+  assert.ok(complete.unaccounted.includes('c3'), 'completeness: c3 listed as unaccounted (for base-coat)');
+
+  // Not enough rules → fail
+  const tooFew = checkCompleteness(
+    { reasoning: '', canvas: { background: '#111' }, composition: [{ target: 'c1', layout: { maxWidth: '760px' } }],
+      rules: [{ target: 'c1', styles: { color: 'red' } }] },
+    new Set(Array.from({ length: 20 }, (_, i) => `c${i}`)),
+  );
+  assert.ok(!tooFew.ok, 'completeness: 1 rule for 20 clusters → fail (need ≥3)');
 
   // validateSpec parses paletteMode
   const v2 = validateSpec({ reasoning: 'x', paletteMode: 'vivid', rules: [{ target: 'cx', styles: { color: 'red' } }] });
@@ -561,9 +557,9 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   assert.ok(r.css.includes('max-width: min(800px, 100%)'), 'composition: layout emitted');
   assert.ok(r.css.includes('color: red'), 'composition: component rule also emitted');
 
-  // checkCompleteness counts composition rules as accounting
+  // checkCompleteness counts composition rules + requires canvas
   const comp = checkCompleteness(
-    { reasoning: '', composition: [{ target: 'cmain', layout: { maxWidth: '800px' } }], rules: [{ target: 'cside', hide: true }] },
+    { reasoning: '', canvas: { background: '#111', color: '#fff' }, composition: [{ target: 'cmain', layout: { maxWidth: '800px' } }], rules: [{ target: 'cside', hide: true }] },
     new Set(['cmain', 'cside']),
   );
   assert.ok(comp.ok, 'composition: completeness counts composition rules');

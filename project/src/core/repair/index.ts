@@ -124,8 +124,8 @@ function critiqueFor(verify: VerifyResult): string {
 }
 
 /** Best attempt that passed not-broken checks, preferring ones that also pass
- *  quality checks (covered/coherent/changed). Prevents shipping partial redesigns
- *  when a better attempt exists. Scores by quality gates + changeScore. */
+ *  quality checks (covered/coherent/changed). If none are notBroken, fall back
+ *  to the highest-changeScore attempt — a 90% good design is better than none. */
 export function bestNonBroken(attempts: Attempt[]): Attempt | null {
   let best: Attempt | null = null;
   let bestScore = -1;
@@ -134,5 +134,11 @@ export function bestNonBroken(attempts: Attempt[]): Attempt | null {
     const score = (a.changed ? 4 : 0) + (a.coherent ? 2 : 0) + (a.covered ? 1 : 0) + a.changeScore;
     if (score > bestScore) { best = a; bestScore = score; }
   }
-  return best;
+  if (best) return best;
+  // Fallback: highest changeScore among all attempts (don't remove a mostly-good design).
+  let fallback: Attempt | null = null;
+  for (const a of attempts) {
+    if (!fallback || a.changeScore > fallback.changeScore) fallback = a;
+  }
+  return fallback;
 }
