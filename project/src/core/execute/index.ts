@@ -3,27 +3,16 @@
  *
  * Phase 1 applies a single compiled stylesheet, appended LAST in <head> so it
  * wins the cascade, and defends it against frameworks that wipe <head> on
- * re-render (Persistence Exp 004: anchor in a declarative <style>, and re-insert
- * if a framework removes the node).
- *
- * The Transaction types below are the seam for Phase 2+ (reversible DOM ops with
- * undo, Shadow-DOM isolation). Not implemented yet — scaffold only.
+ * re-render. Round 7: also injects + defends per open shadow root so Shadow-DOM
+ * content (YouTube, custom elements) gets the redesign.
  */
 
 import { STYLE_ELEMENT_ID } from '../laws';
 
 const ESCAPE_UI_ID = 'webmorph-escape-ui';
+const SHADOW_STYLE_ID = 'webmorph-shadow-style';
 let observer: MutationObserver | null = null;
-
-// ── Phase-2+ seam (types only) ─────────────────────────────────────
-
-export type OpKind = 'style' | 'structure' | 'augment' | 'act';
-export interface Transaction {
-  kind: OpKind;
-  /** undo() restores the pre-op state. Phase 1 style uses removeStyle() instead. */
-  undo: () => void;
-}
-export type TransactionLog = Transaction[];
+let shadowObservers: MutationObserver[] = [];
 
 // ── Phase-1 style application ──────────────────────────────────────
 
@@ -35,12 +24,32 @@ export function applyStyle(css: string): void {
     el.setAttribute('data-webmorph-ui', 'style');
   }
   el.textContent = css;
-  document.head.appendChild(el); // append (not prepend) => last in head => wins ties
+  document.head.appendChild(el);
+}
+
+export function applyStyleEverywhere(css: string, shadowRoots: ShadowRoot[]): void {
+  applyStyle(css);
+  for (const root of shadowRoots) injectShadowStyle(root, css);
+}
+
+function injectShadowStyle(root: ShadowRoot, css: string): void {
+  root.querySelector(`#${SHADOW_STYLE_ID}`)?.remove();
+  const style = document.createElement('style');
+  style.id = SHADOW_STYLE_ID;
+  style.setAttribute('data-webmorph-ui', 'style');
+  style.textContent = css;
+  root.appendChild(style);
 }
 
 export function removeStyle(): void {
   stopDefense();
   document.getElementById(STYLE_ELEMENT_ID)?.remove();
+}
+
+export function removeStyleEverywhere(shadowRoots: ShadowRoot[]): void {
+  stopDefense();
+  document.getElementById(STYLE_ELEMENT_ID)?.remove();
+  for (const root of shadowRoots) root.querySelector(`#${SHADOW_STYLE_ID}`)?.remove();
 }
 
 /** Re-insert our stylesheet if a framework removes it during re-render. */
@@ -61,9 +70,37 @@ export function startDefense(css: string): void {
   observer.observe(document.head, { childList: true });
 }
 
+export function startDefenseEverywhere(css: string, shadowRoots: ShadowRoot[]): void {
+  startDefense(css);
+  stopShadowDefense();
+  for (const root of shadowRoots) observeShadowRoot(root, css);
+}
+
+function observeShadowRoot(root: ShadowRoot, css: string): void {
+  const obs = new MutationObserver((mutations) => {
+    for (const m of mutations) {
+      for (const node of Array.from(m.removedNodes)) {
+        if (node instanceof HTMLElement && node.id === SHADOW_STYLE_ID) {
+          obs.disconnect();
+          injectShadowStyle(root, css);
+          observeShadowRoot(root, css);
+          return;
+        }
+      }
+    }
+  });
+  obs.observe(root, { childList: true });
+  shadowObservers.push(obs);
+}
+
 export function stopDefense(): void {
   observer?.disconnect();
   observer = null;
+}
+
+function stopShadowDefense(): void {
+  for (const obs of shadowObservers) obs.disconnect();
+  shadowObservers = [];
 }
 
 // ── Escape hatch UI ────────────────────────────────────────────────

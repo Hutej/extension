@@ -5,9 +5,9 @@
  *            -> verify(before) -> repair loop (recompile / re-reason / keepBest)
  *            -> persist
  *
- * DOM-move execution is DEFERRED: the compiler plans moves but this loop applies
- * CSS only. On success/failure it sets a real marker on <html> so the test
- * harness (and any tooling) can wait on the true applied signal.
+ * Round 7: shadow-aware (inject + defend per open shadow root), SPA navigation
+ * (hook pushState/popstate, re-perceive + re-compile on route change), per-URL
+ * persistence (origin + normalized pathname).
  */
 
 import { perceive, serializePerception, clearHandles, captureLayoutFingerprint } from '@/core/perceive';
@@ -16,10 +16,11 @@ import { sanitizeCss } from '@/core/sanitize';
 import { verifyStyle, type VerifyResult } from '@/core/verify';
 import { planRepair, bestNonBroken, type Attempt } from '@/core/repair';
 import { checkCompleteness } from '@/core/spec';
-import { applyStyle, removeStyle, startDefense, ensureEscapeUI, removeEscapeUI } from '@/core/execute';
-import { loadSiteState, saveSiteState, clearSiteState } from '@/core/persist';
+import { applyStyle, applyStyleEverywhere, removeStyle, removeStyleEverywhere, startDefense, startDefenseEverywhere, ensureEscapeUI, removeEscapeUI } from '@/core/execute';
+import { loadSiteState, saveSiteState, clearSiteState, storageKey, type SiteState } from '@/core/persist';
 import { MAX_REPAIR_ATTEMPTS, logDebug } from '@/core/config';
 import type { DesignSpec } from '@/core/spec';
+import type { Perception } from '@/core/perceive';
 
 interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?: string; usage?: unknown; model?: string; }
 
@@ -33,16 +34,14 @@ export interface TransformOutcome {
   clusters?: number;
   changeScore?: number;
   accentFraction?: number;
+  modelCoverageFraction?: number;
 }
 
 const APPLIED = 'webmorphApplied';
 const FAILED = 'webmorphFailed';
 
-// In-flight guard: a duplicate Transform (double-click, harness retry) must NOT
-// start a second model call — two racing runs let the WEAKER spec land last and
-// overwrite the stronger one (seen live: 0.623 overwritten by 0.338). Every
-// caller of a duplicate request gets the same in-flight run's outcome.
 let inFlight: Promise<TransformOutcome> | null = null;
+let activeShadowRoots: ShadowRoot[] = [];
 
 function markApplied(id: string): void {
   delete document.documentElement.dataset[FAILED];
@@ -61,23 +60,20 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
 
   clearHandles();
   const perception = perceive();
+  activeShadowRoots = perception.shadowRoots;
   const serialized = serializePerception(perception);
   const before = captureLayoutFingerprint();
-  logDebug(`perceived ${perception.nodeCount} nodes -> ${perception.clusters.length} clusters (${perception.builtInMs}ms)`);
+  logDebug(`perceived ${perception.nodeCount} nodes -> ${perception.clusters.length} clusters (${perception.builtInMs}ms) ${perception.shadowRoots.length} shadow roots`);
 
   let specRes = await askForSpec(intent, serialized);
   if (!specRes.ok || !specRes.spec) { markFailed(specRes.message || 'engine failed'); return { ok: false, message: specRes.message || 'Design engine failed.' }; }
   let spec = specRes.spec;
-  // Surface served-model + token usage on the PAGE console so the test harness
-  // (which can't see the background service worker) can report real cost per run.
   logDebug(`served by=${specRes.model ?? '?'} usage=${JSON.stringify(specRes.usage ?? {})}`);
   logDebug(`paletteMode=${spec.paletteMode ?? 'restrained(default)'} rules=${spec.rules.length} composition=${spec.composition?.length ?? 0} clusters=${perception.clusters.length}`);
 
   let reReasonsDone = 0;
 
-  // ── Completeness contract (Mechanism 1) — BEFORE apply. Every retained cluster
-  // must be accounted for (restyled / hidden / kept). An incomplete spec routes
-  // the single reReason budget with a critique that names the unaccounted clusters.
+  // Completeness contract — BEFORE apply.
   {
     const comp = checkCompleteness(spec, perception.handles);
     if (!comp.ok) {
@@ -85,7 +81,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
       if (reReasonsDone < MAX_REPAIR_ATTEMPTS) {
         reReasonsDone++;
         logDebug('PAID SECOND CALL — first-call prompt failed to account for all clusters');
-        const critique = `Your spec left ${comp.unaccounted.length} cluster(s) unaccounted: ${comp.unaccounted.slice(0, 24).join(', ')}. EVERY cluster handle in the COMPONENTS list MUST appear in your rules — restyle it (styles/layout) or hide it ("hide": true). Unaccounted clusters will be base-coated as a safety net, but you must actively design the major clusters. Family-consistency reminder: if you restyle one cluster of a family (e.g. one group of links), restyle every cluster of that family in the same visual language.`;
+        const critique = `Your spec left ${comp.unaccounted.length} cluster(s) unaccounted: ${comp.unaccounted.slice(0, 24).join(', ')}. EVERY cluster handle in the COMPONENTS list MUST appear in your rules — restyle it (styles/layout) or hide it ("hide": true). Unaccounted clusters will be base-coated as a safety net, but you must actively design the major clusters.`;
         const re = await askForSpec(intent, serialized, critique);
         if (re.ok && re.spec) {
           spec = re.spec;
@@ -98,11 +94,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     }
   }
 
-  let options: CompileOptions = { paletteMode: spec.paletteMode };
-  const attempts: Attempt[] = [];
-  let lastVerify: VerifyResult | null = null;
-
-  // Build the set of handles the model explicitly addressed (for model coverage gate).
+  // Build modelAddressed set for the model coverage gate.
   const modelAddressed = new Set<string>();
   for (const rule of spec.rules) {
     if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide) modelAddressed.add(rule.target);
@@ -113,12 +105,16 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     }
   }
 
-  for (let iter = 0; iter < 10; iter++) { // deterministic escalation is monotonic; cap is a safety net
+  let options: CompileOptions = { paletteMode: spec.paletteMode };
+  const attempts: Attempt[] = [];
+  let lastVerify: VerifyResult | null = null;
+
+  for (let iter = 0; iter < 10; iter++) {
     const compiled = compileSpec(spec, perception, options);
     const sanitized = sanitizeCss(compiled.css).css;
-    if (!sanitized.trim()) { removeStyle(); markFailed('no styles'); return { ok: false, message: 'Produced no applicable styles.', spec, reasoning: spec.reasoning }; }
+    if (!sanitized.trim()) { removeStyleEverywhere(activeShadowRoots); markFailed('no styles'); return { ok: false, message: 'Produced no applicable styles.', spec, reasoning: spec.reasoning }; }
 
-    applyStyle(sanitized);
+    applyStyleEverywhere(sanitized, activeShadowRoots);
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
     const verify = verifyStyle(before, spec.paletteMode, modelAddressed);
     lastVerify = verify;
@@ -132,46 +128,40 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     const decision = planRepair(verify, options, reReasonsDone, spec.paletteMode);
     logDebug(`repair -> ${decision.action}: ${decision.reason}`);
 
-    if (decision.action === 'rollback') { removeStyle(); markFailed('content blanked'); return failVerify(spec, verify); }
+    if (decision.action === 'rollback') { removeStyleEverywhere(activeShadowRoots); markFailed('content blanked'); return failVerify(spec, verify); }
 
     if (decision.action === 'keepBest') {
       const best = bestNonBroken(attempts);
-      if (!best) { removeStyle(); markFailed('nothing non-broken'); return failVerify(spec, verify); }
-      applyStyle(best.css);
+      if (!best) { removeStyleEverywhere(activeShadowRoots); markFailed('nothing non-broken'); return failVerify(spec, verify); }
+      applyStyleEverywhere(best.css, activeShadowRoots);
       spec = best.spec;
-      break; // keep the best non-broken attempt (a flat result is KEPT, not reverted)
+      break;
     }
 
     if (decision.action === 'reReason') {
-      // ONE-SHOT MANDATE: a paid second call means the first-call prompt failed to
-      // prevent this. Log loudly — it is a to-do for the system prompt, not a
-      // steady state. (Budget is MAX_REPAIR_ATTEMPTS = 1.)
       const failing = Object.entries(verify.checks).filter(([, v]) => !v).map(([k]) => k).join(',');
       logDebug(`PAID SECOND CALL — first-call prompt failed to prevent: ${failing}`);
       reReasonsDone++;
       const re = await askForSpec(intent, serialized, decision.critique);
       if (re.ok && re.spec) { spec = re.spec; options = { paletteMode: spec.paletteMode }; continue; }
       const best = bestNonBroken(attempts);
-      if (best) { applyStyle(best.css); spec = best.spec; break; }
-      removeStyle(); markFailed('revision failed'); return failVerify(spec, verify);
+      if (best) { applyStyleEverywhere(best.css, activeShadowRoots); spec = best.spec; break; }
+      removeStyleEverywhere(activeShadowRoots); markFailed('revision failed'); return failVerify(spec, verify);
     }
 
-    options = decision.options; // recompile (deterministic escalation)
+    options = decision.options;
   }
 
   // Persist + defend + mark applied.
-  const origin = window.location.origin;
-  const state = await loadSiteState(origin);
+  const key = storageKey();
+  const state = await loadSiteState(key);
   const id = `style_${Date.now()}`;
-  // ponytail: persist exactly what's on the page — the verified, repair-baked CSS.
-  // Re-compiling here (as the old code did) discards all repair options and persists
-  // a stylesheet that would have FAILED verify. The DOM is the source of truth.
   const appliedCss = document.getElementById('webmorph-style')?.textContent ?? attempts[attempts.length - 1]?.css ?? '';
   state.enabled = true;
-  state.style = { id, intent, spec, css: appliedCss, reasoning: spec.reasoning, createdAt: Date.now() };
-  await saveSiteState(origin, state);
+  state.style = { id, intent, spec, css: appliedCss, reasoning: spec.reasoning, compileOptions: options, createdAt: Date.now() };
+  await saveSiteState(key, state);
 
-  startDefense(state.style.css);
+  startDefenseEverywhere(state.style.css, activeShadowRoots);
   ensureEscapeUI(toggleSiteState);
   markApplied(id);
 
@@ -179,6 +169,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     ok: true, reasoning: spec.reasoning, spec, verify: lastVerify || undefined,
     perceiveMs: perception.builtInMs, clusters: perception.clusters.length,
     changeScore: lastVerify?.changeScore, accentFraction: lastVerify?.accentFraction,
+    modelCoverageFraction: lastVerify?.modelCoverageFraction,
   };
 }
 
@@ -198,32 +189,59 @@ function askForSpec(intent: string, perception: string, critique?: string): Prom
 // ── Persistence / toggle ───────────────────────────────────────────
 
 async function reapplyStored(): Promise<boolean> {
-  const state = await loadSiteState(window.location.origin);
+  const key = storageKey();
+  let state = await loadSiteState(key);
+  // Origin-level fallback: if no design for this pathname, check origin.
+  if (!state.style) {
+    state = await loadSiteState(window.location.origin);
+    if (!state.style) return false;
+  }
   if (!state.enabled || !state.style?.css) return false;
-  // Re-run perceive so the stable hash handles get re-stamped, then inject stored CSS.
   clearHandles();
-  perceive();
-  applyStyle(state.style.css);
-  startDefense(state.style.css);
+  const perception = perceive();
+  activeShadowRoots = perception.shadowRoots;
+  // Re-compile the stored spec against the current perception (handles may differ).
+  const opts = state.style.compileOptions ?? { paletteMode: state.style.spec.paletteMode };
+  const compiled = compileSpec(state.style.spec, perception, opts);
+  const css = sanitizeCss(compiled.css).css || state.style.css;
+  applyStyleEverywhere(css, activeShadowRoots);
+  startDefenseEverywhere(css, activeShadowRoots);
   ensureEscapeUI(toggleSiteState);
   markApplied(state.style.id);
   return true;
 }
 
 async function toggleSiteState(): Promise<void> {
-  const origin = window.location.origin;
-  const state = await loadSiteState(origin);
+  const key = storageKey();
+  const state = await loadSiteState(key);
   if (!state.style) return;
   state.enabled = !state.enabled;
-  await saveSiteState(origin, state);
+  await saveSiteState(key, state);
   if (state.enabled) await reapplyStored();
-  else { removeStyle(); removeEscapeUI(); delete document.documentElement.dataset[APPLIED]; }
+  else { removeStyleEverywhere(activeShadowRoots); removeEscapeUI(); delete document.documentElement.dataset[APPLIED]; }
 }
 
 async function removeAll(): Promise<void> {
-  removeStyle(); removeEscapeUI();
+  removeStyleEverywhere(activeShadowRoots); removeEscapeUI();
   delete document.documentElement.dataset[APPLIED];
-  await clearSiteState(window.location.origin);
+  await clearSiteState(storageKey());
+}
+
+// ── SPA navigation ─────────────────────────────────────────────────
+
+let routeTimer: ReturnType<typeof setTimeout> | null = null;
+
+function onRouteChange(): void {
+  if (routeTimer) clearTimeout(routeTimer);
+  routeTimer = setTimeout(handleRouteChange, 500); // debounce — SPA frameworks sometimes call pushState multiple times
+}
+
+async function handleRouteChange(): Promise<void> {
+  if (inFlight) return; // a transform is running — it will handle the current page
+  removeStyleEverywhere(activeShadowRoots);
+  removeEscapeUI();
+  delete document.documentElement.dataset[APPLIED];
+  await reapplyStored();
 }
 
 // ── Entry ──────────────────────────────────────────────────────────
@@ -234,6 +252,14 @@ export default defineContentScript({
 
   main() {
     reapplyStored();
+
+    // SPA navigation detection.
+    const origPush = history.pushState;
+    history.pushState = function (...args) { origPush.apply(this, args); onRouteChange(); };
+    const origReplace = history.replaceState;
+    history.replaceState = function (...args) { origReplace.apply(this, args); onRouteChange(); };
+    window.addEventListener('popstate', onRouteChange);
+    window.addEventListener('hashchange', onRouteChange);
 
     window.addEventListener('keydown', (e) => {
       if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'r') toggleSiteState();
@@ -249,6 +275,13 @@ export default defineContentScript({
       }
       if (message.action === 'toggle') return toggleSiteState().then(() => ({ ok: true }));
       if (message.action === 'remove_all') return removeAll().then(() => ({ ok: true }));
+      if (message.action === 'getSiteInfo') {
+        return Promise.resolve({
+          url: window.location.href,
+          origin: window.location.origin,
+          applied: document.documentElement.hasAttribute(`data-${APPLIED}`),
+        });
+      }
       return undefined;
     });
   },
