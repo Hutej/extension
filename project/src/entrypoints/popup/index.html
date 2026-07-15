@@ -4,39 +4,70 @@
     <meta charset="UTF-8" />
     <title>WebMorph</title>
     <style>
-      body { width: 340px; font-family: system-ui, sans-serif; margin: 0; padding: 14px; }
-      h3 { margin: 0 0 10px; }
-      textarea { width: 100%; height: 70px; box-sizing: border-box; margin-bottom: 8px; font: inherit; padding: 6px; }
-      button { padding: 7px 12px; cursor: pointer; }
-      .row { display: flex; gap: 8px; margin-bottom: 8px; }
-      .status { font-size: 12px; color: #444; white-space: pre-wrap; margin-bottom: 8px; }
-      .muted { color: #777; }
-      .settings-toggle { cursor: pointer; color: #2563eb; font-size: 12px; display: inline-block; margin-bottom: 6px; }
-      .settings { display: none; margin-bottom: 8px; padding: 8px; border: 1px solid #ddd; background: #fafafa; }
+      :root { --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a; --text: #e4e4e7; --muted: #71717a; --accent: #6366f1; --accent-hover: #818cf8; --ok: #22c55e; --err: #ef4444; --warn: #f59e0b; }
+      * { box-sizing: border-box; margin: 0; padding: 0; }
+      body { width: 360px; font-family: system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); font-size: 13px; }
+      .header { background: var(--surface); padding: 12px 16px; border-bottom: 1px solid var(--border); display: flex; align-items: center; gap: 8px; }
+      .header h1 { font-size: 15px; font-weight: 600; letter-spacing: -0.3px; }
+      .header .dot { width: 8px; height: 8px; border-radius: 50%; background: var(--accent); flex-shrink: 0; }
+      .body { padding: 14px 16px; }
+      textarea { width: 100%; height: 64px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; padding: 8px 10px; color: var(--text); font: inherit; resize: none; outline: none; }
+      textarea:focus { border-color: var(--accent); }
+      textarea::placeholder { color: var(--muted); }
+      .btn-row { display: flex; gap: 6px; margin-top: 10px; }
+      button { padding: 8px 14px; border-radius: 8px; border: 1px solid var(--border); background: var(--surface); color: var(--text); font: inherit; cursor: pointer; transition: background 0.15s, border-color 0.15s; }
+      button:hover:not(:disabled) { border-color: var(--accent); }
+      button:disabled { opacity: 0.4; cursor: default; }
+      .btn-primary { background: var(--accent); border-color: var(--accent); color: #fff; flex: 1; font-weight: 600; }
+      .btn-primary:hover:not(:disabled) { background: var(--accent-hover); border-color: var(--accent-hover); }
+      .btn-sm { padding: 6px 10px; font-size: 12px; }
+      .status { margin-top: 12px; padding: 10px 12px; border-radius: 8px; font-size: 12px; line-height: 1.5; white-space: pre-wrap; display: none; }
+      .status.show { display: block; }
+      .status.ok { background: rgba(34,197,94,.1); border: 1px solid rgba(34,197,94,.3); color: var(--ok); }
+      .status.err { background: rgba(239,68,68,.1); border: 1px solid rgba(239,68,68,.3); color: var(--err); }
+      .status.info { background: var(--surface); border: 1px solid var(--border); color: var(--text); }
+      .metrics { margin-top: 8px; font-size: 11px; color: var(--muted); display: none; }
+      .metrics.show { display: block; }
+      .metrics span { margin-right: 12px; }
+      .spinner { display: inline-block; width: 14px; height: 14px; border: 2px solid var(--border); border-top-color: var(--accent); border-radius: 50%; animation: spin 0.8s linear infinite; vertical-align: middle; margin-right: 6px; }
+      @keyframes spin { to { transform: rotate(360deg); } }
+      .settings-toggle { color: var(--muted); font-size: 11px; cursor: pointer; margin-bottom: 8px; display: inline-block; }
+      .settings-toggle:hover { color: var(--accent); }
+      .settings { display: none; margin-bottom: 10px; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; }
       .settings.open { display: block; }
-      .settings input { width: 100%; box-sizing: border-box; }
-      #webmorph-spec { display: none; }
+      .settings label { font-size: 11px; color: var(--muted); display: block; margin-bottom: 4px; }
+      .settings input { width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; color: var(--text); font: inherit; outline: none; }
+      .settings input:focus { border-color: var(--accent); }
+      .site-status { margin-top: 10px; font-size: 11px; color: var(--muted); }
+      .elapsed { font-size: 11px; color: var(--muted); margin-top: 4px; display: none; }
+      .elapsed.show { display: block; }
     </style>
   </head>
   <body>
-    <h3>WebMorph</h3>
-    <span class="settings-toggle" id="settingsToggle">Settings (API key)</span>
-    <div class="settings" id="settingsArea">
-      <label for="apiKey">OpenAI API key</label>
-      <input type="password" id="apiKey" />
-      <button id="saveKeyBtn" style="margin-top: 6px; width: 100%">Save</button>
+    <div class="header">
+      <div class="dot"></div>
+      <h1>WebMorph</h1>
     </div>
+    <div class="body">
+      <span class="settings-toggle" id="settingsToggle">⚙ API key settings</span>
+      <div class="settings" id="settingsArea">
+        <label for="apiKey">OpenAI API key</label>
+        <input type="password" id="apiKey" placeholder="sk-..." />
+        <button id="saveKeyBtn" class="btn-sm" style="margin-top: 6px; width: 100%">Save key</button>
+      </div>
 
-    <textarea id="intent" placeholder="Describe the look you want (e.g. neobrutalism, glassmorphism, dark editorial)"></textarea>
-    <div class="row">
-      <button id="transformBtn">Transform</button>
-      <button id="toggleBtn" disabled>On / Off</button>
-      <button id="removeBtn" disabled>Remove</button>
+      <textarea id="intent" placeholder="Describe the look you want — e.g. "warm parchment manuscript" or "high-contrast industrial blueprint""></textarea>
+      <div class="btn-row">
+        <button id="transformBtn" class="btn-primary">Transform</button>
+        <button id="toggleBtn" class="btn-sm" disabled>On / Off</button>
+        <button id="removeBtn" class="btn-sm" disabled>Remove</button>
+      </div>
+
+      <div class="status" id="statusEl"></div>
+      <div class="elapsed" id="elapsedEl"></div>
+      <div class="metrics" id="metricsEl"></div>
+      <div class="site-status" id="siteStatus"></div>
     </div>
-
-    <div class="status" id="statusEl">Ready</div>
-    <div class="status muted" id="siteStatus"></div>
-    <pre id="webmorph-spec"></pre>
 
     <script type="module" src="./main.ts"></script>
   </body>

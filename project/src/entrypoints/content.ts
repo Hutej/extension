@@ -27,6 +27,7 @@ interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?
 export interface TransformOutcome {
   ok: boolean;
   message?: string;
+  kind?: string;         // error kind for popup taxonomy (invalid_key, timeout, etc.)
   reasoning?: string;
   spec?: DesignSpec;
   verify?: VerifyResult;
@@ -35,6 +36,10 @@ export interface TransformOutcome {
   changeScore?: number;
   accentFraction?: number;
   modelCoverageFraction?: number;
+  wallMs?: number;       // total transform wall-clock
+  model?: string;        // which model served the request
+  usage?: unknown;       // token usage
+  paidCalls?: number;    // paid model calls used
 }
 
 const APPLIED = 'webmorphApplied';
@@ -55,6 +60,7 @@ function markFailed(msg: string): void {
 // ── Core Phase-1 run ───────────────────────────────────────────────
 
 async function runStyle(intent: string): Promise<TransformOutcome> {
+  const t0 = Date.now();
   delete document.documentElement.dataset[APPLIED];
   delete document.documentElement.dataset[FAILED];
 
@@ -66,7 +72,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   logDebug(`perceived ${perception.nodeCount} nodes -> ${perception.clusters.length} clusters (${perception.builtInMs}ms) ${perception.shadowRoots.length} shadow roots`);
 
   let specRes = await askForSpec(intent, serialized);
-  if (!specRes.ok || !specRes.spec) { markFailed(specRes.message || 'engine failed'); return { ok: false, message: specRes.message || 'Design engine failed.' }; }
+  if (!specRes.ok || !specRes.spec) { markFailed(specRes.message || 'engine failed'); return { ok: false, kind: specRes.kind, message: specRes.message || 'Design engine failed.' }; }
   let spec = specRes.spec;
   logDebug(`served by=${specRes.model ?? '?'} usage=${JSON.stringify(specRes.usage ?? {})}`);
   logDebug(`paletteMode=${spec.paletteMode ?? 'restrained(default)'} rules=${spec.rules.length} composition=${spec.composition?.length ?? 0} clusters=${perception.clusters.length}`);
@@ -170,6 +176,8 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     perceiveMs: perception.builtInMs, clusters: perception.clusters.length,
     changeScore: lastVerify?.changeScore, accentFraction: lastVerify?.accentFraction,
     modelCoverageFraction: lastVerify?.modelCoverageFraction,
+    wallMs: Date.now() - t0, model: specRes.model, usage: specRes.usage,
+    paidCalls: 1 + reReasonsDone,
   };
 }
 
