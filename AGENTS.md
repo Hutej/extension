@@ -10,7 +10,7 @@ This is not just an extension — this is an AI agent that lives in your browser
 - `.kiro/steering/product.md` — roadmap with ALL phases + sub-phases and the CURRENT POSITION. **Read before starting any task.**
 - `.kiro/steering/ponytail.md` — engineering discipline. **Read before starting any task.**
 - `docs/ARCHITECTURE.md` — engine pipeline, laws/constants, model config, harness gotchas. **Read before touching `project/src/`.**
-- `BROWSER_LAWS/`, `RESEARCH/`, `all-about-webmorph.txt` — background reference; read only when relevant.
+- `BROWSER_LAWS/`, `RESEARCH/`, `all-about_webmorph.txt` — background reference; read only when relevant.
 
 ## Absolute rules
 
@@ -19,7 +19,7 @@ This is not just an extension — this is an AI agent that lives in your browser
 3. **Real proof only:** real extension, real sites, real model calls, real popup→Transform flow. NEVER pass a test by loosening it. NEVER fake or overstate a result.
 4. **All or nothing:** any original-looking region after a redesign = FAILURE, even if every automated check is green. The human eye is the final gate.
 5. **One-shot mandate:** best design in exactly ONE paid model call; deterministic/free repair preferred; paid reReason budget 1 (log loudly as a failure signal); ≤120s hard abort per attempt; retries only on 429/5xx; log tokens per run.
-6. **Do not rebuild `observe/`** (perception is proven sufficient). No vision/screenshot input to the design model.
+6. **Do not rebuild `perceive/`** unless the audit proves it wrong (Round 7 rebuilt it — full-page, no node cap, hierarchical, family-aware). No vision/screenshot input to the design model.
 7. **Security/git:** `.env` stays gitignored (public repo); push only after proven slices. Quality over speed.
 
 ## The ladder (walk it before every change)
@@ -37,6 +37,7 @@ This is not just an extension — this is an AI agent that lives in your browser
 ```
 cd project && node --experimental-strip-types --env-file=.env tests/popup.test.ts
 ```
+`WMGRID=smoke` for 1-site quick test, `WMGRID=full` (default) for 5-site grid.
 
 ## Status updates (required duty)
 
