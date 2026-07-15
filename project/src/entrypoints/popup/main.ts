@@ -101,6 +101,8 @@ transformBtn.addEventListener('click', async () => {
       const checks = res.verify?.checks;
       const verdict = checks ? `${checks.covered ? '✓' : '✗'}coverage ${checks.changed ? '✓' : '✗'}change ${checks.coherent ? '✓' : '✗'}coherent ${checks.contrastOk ? '✓' : '✗'}contrast ${checks.noOverflow ? '✓' : '✗'}no-overflow` : '';
       showStatus(`✓ Applied: ${res.reasoning || 'Design applied.'}${verdict ? '\n' + verdict : ''}`, 'ok');
+      // Hidden JSON for test harness.
+      $('webmorph-result').textContent = JSON.stringify(res);
       // Metrics.
       metricsEl.innerHTML = [
         `<span>⏱ ${fmtMs(res.wallMs ?? 0)}</span>`,
