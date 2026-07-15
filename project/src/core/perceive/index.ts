@@ -11,8 +11,8 @@
  *   - captureLayoutFingerprint() so verify can measure how much layout changed
  */
 
-import { STYLE_ELEMENT_ID } from '../laws';
-import { isTransparent } from '@/shared/color';
+import { STYLE_ELEMENT_ID } from '../laws/index.ts';
+import { isTransparent, parseColor } from '../../shared/color.ts';
 
 const IGNORED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'BR', 'HR', 'WBR', 'LINK', 'META', 'TEMPLATE', 'SLOT', 'PATH', 'DEFS']);
 const ESCAPE_UI_ID = 'webmorph-escape-ui';
@@ -21,7 +21,7 @@ const MAX_NODES = 3000;
 const MAX_TIME_MS = 4000;
 const CLUSTER_ATTR = 'data-wm-c';
 const PROMINENCE_FLOOR_RATIO = 0.015;  // tail below this * top is noise
-const SERIALIZE_CHAR_BUDGET = 9000;    // adaptive cap by budget, not a fixed count
+const SERIALIZE_CHAR_BUDGET = 24000;   // adaptive cap by budget, not a fixed count (quality>speed: give the designer real evidence)
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -40,6 +40,7 @@ export interface ClusterLayout {
   constraintOwnerHandle: string | null;  // handle of that ancestor, if it is a cluster
   parentHandle: string | null;
   isPassiveWrapper: boolean;             // safe to collapse via display:contents
+  isOpaqueWrapper: boolean;              // large solid-bg container hiding the canvas backdrop
   depth: number;
 }
 
@@ -60,7 +61,7 @@ export interface Cluster {
 }
 
 export interface LayoutSkeleton {
-  regions: { role: string; handle: string; widthRatio: number; order: number }[];
+  regions: { role: string; handle: string; widthRatio: number; order: number; rect: { w: number; h: number } }[];
   contentMaxWidthPx: number | null;
   columnCount: number;
 }
@@ -77,14 +78,17 @@ export interface Perception {
   clusters: Cluster[];
   skeleton: LayoutSkeleton;
   handles: Set<string>;
+  opaqueWrappers: Set<string>;   // handles of large solid-bg wrappers that hide the canvas
+  viewport: { w: number; h: number };  // for area-fraction math (accent-trim budget)
 }
 
 export interface LayoutFingerprint {
-  regions: { handle: string; x: number; y: number; w: number; h: number }[];
+  regions: { handle: string; x: number; y: number; w: number; h: number; paint: string }[];
   contentMaxWidthPx: number | null;
   columnCount: number;
   typeSizesPx: number[];
   overlapCount: number;   // non-nested region collisions (compared before/after by verify)
+  bleedCount: number;     // text escaping its own painted block (compared before/after by verify)
 }
 
 interface Candidate {
@@ -218,6 +222,8 @@ export function perceive(): Perception {
     nodeCount: visited,
     canvas, cssVars, clusters, skeleton,
     handles: new Set(clusters.map((c) => c.handle)),
+    opaqueWrappers: new Set(clusters.filter((c) => c.layout.isOpaqueWrapper).map((c) => c.handle)),
+    viewport: { w: vpW, h: window.innerHeight || 800 },
   };
 }
 
@@ -283,6 +289,11 @@ function placeholderLayout(rep: Candidate, vpW: number): ClusterLayout {
   const disp = rep.style.display;
   const isFlex = disp.includes('flex');
   const isGrid = disp.includes('grid');
+  // Opaque wrapper: wide (>85% viewport), solid bg, not a passive wrapper.
+  // These hide the canvas backdrop and need to be made transparent when the
+  // canvas is redesigned. Only flag on non-passive containers at low depth.
+  const isOpaqueWrapper = rep.hasSolidBg && !rep.passive &&
+    (rep.rect.w / vpW) >= 0.85 && rep.rect.h > 80;
   return {
     display: disp,
     flow: isFlex ? (rep.flexDirection.startsWith('column') ? 'column' : 'row') : (isGrid ? 'row' : 'none'),
@@ -292,6 +303,7 @@ function placeholderLayout(rep: Candidate, vpW: number): ClusterLayout {
     constraintOwnerHandle: null,
     parentHandle: null,
     isPassiveWrapper: rep.passive,
+    isOpaqueWrapper,
     depth: rep.depth,
   };
 }
@@ -335,7 +347,7 @@ function buildSkeleton(clusters: Cluster[], vpW: number): LayoutSkeleton {
   const regions = clusters
     .filter((c) => c.layout.widthRatio >= 0.15 && c.rect.w > 0)
     .slice(0, 12)
-    .map((c, i) => ({ role: c.role || c.tag, handle: c.handle, widthRatio: round2(c.layout.widthRatio), order: i }));
+    .map((c, i) => ({ role: c.role || c.tag, handle: c.handle, widthRatio: round2(c.layout.widthRatio), order: i, rect: { w: c.rect.w, h: c.rect.h } }));
 
   // Column count: distinct left-edge buckets among medium-width side-by-side regions.
   const cols = new Set<number>();
@@ -358,9 +370,11 @@ export function captureLayoutFingerprint(): LayoutFingerprint {
   for (const el of els) {
     const r = el.getBoundingClientRect();
     if (r.width < 1 && r.height < 1) continue;
+    const cs = getComputedStyle(el);
     regions.push({
       handle: el.getAttribute(CLUSTER_ATTR) || '',
       x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height),
+      paint: cs.backgroundColor + '|' + cs.color,
     });
   }
   const primary = findPrimaryContentNode();
@@ -377,7 +391,7 @@ export function captureLayoutFingerprint(): LayoutFingerprint {
     const ratio = r.width / (window.innerWidth || 1280);
     if (ratio >= 0.2 && ratio <= 0.75) cols.add(Math.round(r.x / 40));
   }
-  return { regions, contentMaxWidthPx, columnCount: Math.max(1, cols.size), typeSizesPx: [...sizes].sort((a, b) => a - b), overlapCount: computeOverlapCount() };
+  return { regions, contentMaxWidthPx, columnCount: Math.max(1, cols.size), typeSizesPx: [...sizes].sort((a, b) => a - b), overlapCount: computeOverlapCount(), bleedCount: countTextBleeds() };
 }
 
 /**
@@ -386,6 +400,26 @@ export function captureLayoutFingerprint(): LayoutFingerprint {
  * (floating infoboxes, sticky/absolute panels) cancel out and never false-fail.
  * One representative element per cluster (deduped by handle) keeps it O(regions^2).
  */
+/**
+ * Text bleeding horizontally out of its own painted block — e.g. oversized
+ * display type escaping a fixed color-block header. Only elements that paint
+ * their own background/border with overflow visible are counted; scrollable and
+ * hidden containers overflow by design and are skipped. Compared before/after
+ * by verify, so pre-existing bleeds never false-fail.
+ */
+function countTextBleeds(): number {
+  let n = 0;
+  for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
+    if (!(el instanceof HTMLElement) || el.hasAttribute('data-webmorph-ui') || el.clientWidth === 0) continue;
+    const cs = getComputedStyle(el);
+    if (cs.overflowX !== 'visible') continue;
+    const bg = parseColor(cs.backgroundColor);
+    const painted = (bg !== null && bg[3] >= 0.1) || ((parseFloat(cs.borderTopWidth) || 0) >= 2 && cs.borderTopStyle !== 'none');
+    if (painted && el.scrollWidth > el.clientWidth + 8) n++;
+  }
+  return n;
+}
+
 function computeOverlapCount(): number {
   const vpW = window.innerWidth || 1280;
   const seen = new Set<string>();
@@ -484,12 +518,16 @@ export function clearHandles(): void {
 export function serializePerception(p: Perception): string {
   const lines: string[] = [];
   lines.push('PAGE CANVAS');
+  lines.push(`  viewport:${p.viewport.w}x${p.viewport.h}px (design to fit this width)`);
   lines.push(`  background:${short(p.canvas.bg)} text:${short(p.canvas.color)} font:${p.canvas.fontFamily} ${p.canvas.fontSize}`);
 
   lines.push('LAYOUT SKELETON');
   lines.push(`  columns:${p.skeleton.columnCount} contentWidth:${p.skeleton.contentMaxWidthPx ?? '?'}px`);
   if (p.skeleton.regions.length) {
-    lines.push('  regions: ' + p.skeleton.regions.map((r) => `${r.handle}(${r.role} ${Math.round(r.widthRatio * 100)}%)`).join(', '));
+    lines.push('PAGE COMPOSITION — decide these region proportions FIRST, then design inside them:');
+    for (const r of p.skeleton.regions) {
+      lines.push(`  [region] ${r.handle} ${r.role} ${r.rect.w}x${r.rect.h}px (${Math.round(r.widthRatio * 100)}%w)`);
+    }
   }
 
   if (p.cssVars.length) {
@@ -511,7 +549,9 @@ export function serializePerception(p: Perception): string {
     if (c.style.borderRadius !== '0px') parts.push(`radius:${c.style.borderRadius}`);
     parts.push(`font:${c.style.fontFamily}/${c.style.fontSize}/${c.style.fontWeight}`);
     if (c.isNativeControl) parts.push('[native-control]');
+    if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) parts.push('[image]');
     if (L.isPassiveWrapper) parts.push('[passive-wrapper]');
+    if (L.isOpaqueWrapper) parts.push('[opaque-wrapper]');
     let line = parts.join(' ');
     if (c.samples.length) line += `  e.g. ${c.samples.map((s) => JSON.stringify(s.slice(0, 30))).join(', ')}`;
     lines.push(line);

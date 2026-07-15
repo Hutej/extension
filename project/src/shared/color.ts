@@ -6,7 +6,7 @@
 
 export type RGBA = [r: number, g: number, b: number, a: number];
 
-/** Parse rgb()/rgba()/#hex into [r,g,b,a]. Returns null if not a solid parseable color. */
+/** Parse rgb()/rgba()/#hex/hsl()/hsla() into [r,g,b,a]. Returns null if not a solid parseable color. */
 export function parseColor(input: string): RGBA | null {
   if (!input) return null;
   const s = input.trim().toLowerCase();
@@ -26,7 +26,32 @@ export function parseColor(input: string): RGBA | null {
     if (h.length === 6) return [i2(h, 0), i2(h, 2), i2(h, 4), 1];
     if (h.length === 8) return [i2(h, 0), i2(h, 2), i2(h, 4), i2(h, 6) / 255];
   }
+
+  const hsl = parseHsl(s);
+  if (hsl) return hsl;
+
   return null;
+}
+
+/** Parse hsl()/hsla() into RGBA. Pure — standard HSL→RGB algorithm. */
+function parseHsl(s: string): RGBA | null {
+  const m = s.match(/hsla?\(\s*([\d.]+)(?:deg)?[\s,]+([\d.]+)%?[\s,]+([\d.]+)%?(?:[\s,/]+([\d.]+%?))?\s*\)/i);
+  if (!m) return null;
+  const h = +m[1] % 360;
+  const sat = +m[2] / 100;
+  const light = +m[3] / 100;
+  const a = m[4] == null ? 1 : (m[4].endsWith('%') ? parseFloat(m[4]) / 100 : parseFloat(m[4]));
+  const c = (1 - Math.abs(2 * light - 1)) * sat;
+  const x = c * (1 - Math.abs(((h / 60) % 2) - 1));
+  const m2 = light - c / 2;
+  let r = 0, g = 0, b = 0;
+  if (h < 60) { r = c; g = x; }
+  else if (h < 120) { r = x; g = c; }
+  else if (h < 180) { g = c; b = x; }
+  else if (h < 240) { g = x; b = c; }
+  else if (h < 300) { r = x; b = c; }
+  else { r = c; b = x; }
+  return [clampByte((r + m2) * 255), clampByte((g + m2) * 255), clampByte((b + m2) * 255), clamp01(a)];
 }
 
 /** True when the color is effectively see-through (so it must not be treated as a real surface). */
@@ -70,6 +95,20 @@ export function colorfulness(c: RGBA): number {
   const max = Math.max(c[0], c[1], c[2]);
   const min = Math.min(c[0], c[1], c[2]);
   return (max - min) / 255;
+}
+
+/**
+ * RGB Euclidean distance (0..441). Alpha-weighted so a change from transparent
+ * to opaque (a region gaining a background) reads as a large, real change.
+ * Used by the coverage gate to tell a perceptible repaint from computed jitter.
+ */
+export function colorDistance(a: RGBA, b: RGBA): number {
+  // Fold alpha into effective channels (over a neutral) so opacity changes count.
+  const ea = (v: number, al: number) => v * al + 128 * (1 - al);
+  const dr = ea(a[0], a[3]) - ea(b[0], b[3]);
+  const dg = ea(a[1], a[3]) - ea(b[1], b[3]);
+  const db = ea(a[2], a[3]) - ea(b[2], b[3]);
+  return Math.sqrt(dr * dr + dg * dg + db * db);
 }
 
 function clampByte(n: number): number { return Math.max(0, Math.min(255, Math.round(n))); }

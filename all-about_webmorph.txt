@@ -12,7 +12,7 @@ Everything else should be questioned.
 
 # What is WebMorph?
 
-WebMorph is an AI-powered browser extension that allows users to completely transform any website using natural language.
+WebMorph is an AI-powered browser extension that lives in Browser that allows users to completely transform any website using natural language.
 
 Examples:
 

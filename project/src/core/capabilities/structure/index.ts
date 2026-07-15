@@ -18,7 +18,7 @@
  * make it safe rather than forbidden.
  */
 
-import { LAYOUT_PROPS, BOX_GROWTH_KEYS, SIZING_KEYS, isSafeValue } from '../../laws/index.ts';
+import { LAYOUT_PROPS, BOX_GROWTH_KEYS, SIZING_KEYS, isSafeValue, clampDisplayFont, clampColumnCount, normalizeGridTemplate } from '../../laws/index.ts';
 import type { LayoutDecls } from '../../spec';
 
 export interface LayoutBuildOptions {
@@ -26,6 +26,7 @@ export interface LayoutBuildOptions {
   ownsTarget: boolean;          // target's box is owned by a flex/grid ancestor
   isPassiveWrapper?: boolean;   // safe to collapse via display:contents
   dropSizing?: boolean;         // repair: strip width/flex growth on overflow
+  containerWidthPx?: number;    // the cluster's measured block width — clamps display type to fit it
 }
 
 export interface LayoutBuildResult {
@@ -36,12 +37,11 @@ export interface LayoutBuildResult {
 export function buildLayoutDeclarations(input: LayoutDecls, opts: LayoutBuildOptions): LayoutBuildResult {
   const out = new Map<string, string>();
   const dropped: string[] = [];
-  let widthValue = '';
 
   for (const [key, rawVal] of Object.entries(input)) {
     const cssProp = LAYOUT_PROPS[key];
     if (!cssProp) { dropped.push(key); continue; }
-    const val = rawVal.trim();
+    let val = rawVal.trim();
     if (!isSafeValue(val)) { dropped.push(key + '(unsafe)'); continue; }
 
     // Ghost-column avoidance: display:none is never a layout op.
@@ -53,13 +53,38 @@ export function buildLayoutDeclarations(input: LayoutDecls, opts: LayoutBuildOpt
     // Overflow repair: strip growth-causing sizing.
     if (opts.dropSizing && SIZING_KEYS.has(key)) { dropped.push(key + '(dropSizing)'); continue; }
 
-    out.set(cssProp, val);
-    if (key === 'width') widthValue = val;
-  }
+    // ── Viewport-safe by construction (prevention beats repair) ──
+    // A fixed px/vw width can never exceed its container: min(X, 100%).
+    if ((cssProp === 'width' || cssProp === 'max-width') && isFixedLength(val)) {
+      val = `min(${val}, 100%)`;
+    }
+    // Display type is clamped to fit its OWN container block (not just the
+    // viewport) so oversized headings can't bleed out of a narrow card.
+    if (cssProp === 'font-size') val = clampDisplayFont(val, opts.containerWidthPx);
 
-  // Overflow guard / max-width supremacy: an absolute wide width must be capped.
-  if (widthValue && !out.has('max-width') && isAbsoluteWide(widthValue)) {
-    out.set('max-width', '100%');
+    // Fix 3 — columnCount: only accept if containerWidth ÷ count ≥ MIN_COLUMN_PX.
+    // Otherwise clamp to the max count that fits (1 if none). Kills the one-char-
+    // per-line failure (Wikipedia columnCount:2 in a ~150px column).
+    if (cssProp === 'column-count') {
+      const requested = parseInt(val);
+      if (!isNaN(requested)) {
+        const clamped = clampColumnCount(requested, opts.containerWidthPx);
+        if (clamped !== requested) { dropped.push(`columnCount(clamped:${requested}->${clamped})`); }
+        val = String(clamped);
+      }
+    }
+
+    // Fix 3 — grid-template-columns: normalize to overflow-safe form by
+    // construction. Bare 'fr' → minmax(0, Xfr) so min-content can't force
+    // overflow; fixed px tracks wider than container → min(Xpx, 100%).
+    // This makes the BBC 1.97× blow-out impossible to emit, not repaired after.
+    if (cssProp === 'grid-template-columns') {
+      val = normalizeGridTemplate(val, opts.containerWidthPx);
+      // Grid containers must never exceed their parent.
+      if (!out.has('max-width')) out.set('max-width', '100%');
+    }
+
+    out.set(cssProp, val);
   }
 
   // Box-sizing coupling: any width change needs border-box or geometry shifts.
@@ -71,28 +96,7 @@ export function buildLayoutDeclarations(input: LayoutDecls, opts: LayoutBuildOpt
   return { decls, dropped };
 }
 
-/** A width that can overflow its owner: absolute unit and physically large, or >100vw. */
-function isAbsoluteWide(width: string): boolean {
-  const w = width.toLowerCase();
-  const vw = w.match(/^([\d.]+)vw$/);
-  if (vw) return parseFloat(vw[1]) > 100;
-  const abs = w.match(/^([\d.]+)(px|pt|cm|in|mm|pc)$/);
-  if (abs) {
-    const px = unitToPx(parseFloat(abs[1]), abs[2]);
-    return px > 1600; // wider than a typical desktop viewport
-  }
-  // percentages / auto / fit-content / min-content / clamp() etc. are safe
-  return false;
-}
-
-function unitToPx(n: number, unit: string): number {
-  switch (unit) {
-    case 'px': return n;
-    case 'pt': return n * 96 / 72;
-    case 'pc': return n * 16;
-    case 'in': return n * 96;
-    case 'cm': return n * 96 / 2.54;
-    case 'mm': return n * 96 / 25.4;
-    default: return n;
-  }
+/** A fixed length that could exceed its container (px or vw). %/auto/min-content/fit-content/clamp()/calc()/min() are already safe. */
+function isFixedLength(v: string): boolean {
+  return /^[\d.]+(px|pt|cm|in|mm|pc|vw)$/i.test(v.trim());
 }

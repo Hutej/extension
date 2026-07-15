@@ -53,7 +53,7 @@ No permanent layout laws established yet.
 1. **The Implicit Grid Overlap Law:** Grid cells are not physically sealed. Elements within an implicit grid layout can and will physically overlap if they possess negative margins or CSS transforms, despite not having explicit grid placement coordinates.
 2. **The Dimensional Expansion Hazard:** Injecting arbitrary dimensional expansion (width: >100%) onto an element is universally destructive across all layout models (Block, Flex, Grid), guaranteed to trigger clipping, overlap, or horizontal scrolling.
 
-3. **The Flex Intrinsic Overflow Law:** By default, Flexbox will permit a child to physically overflow and clip its parent container if the child's intrinsic content (min-content, such as a long text string) exceeds the available space. The browser's native lex-shrink algorithm is physically bounded by min-content and will not prevent this destruction unless manually overridden.
+3. **The Flex Intrinsic Overflow Law:** By default, Flexbox will permit a child to physically overflow and clip its parent container if the child's intrinsic content (min-content, such as a long text string) exceeds the available space. The browser's native   lex-shrink algorithm is physically bounded by min-content and will not prevent this destruction unless manually overridden.
 
 
 

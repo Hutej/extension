@@ -7,7 +7,7 @@
  *   - `background` shorthand, never background-color (Color Exp 003)
  *   - Contrast Lock: a background is never emitted without a coupled text color
  *   - box-sizing:border-box whenever a border/padding is added (Surface/Sizing)
- *   - appearance:none before surfacing native controls (Surface Exp 002),
+ *   - appearance:none before surfacing native controls (Surface  Exp 002),
  *     except checkbox/radio which must keep native rendering
  *   - everything !important (Typography Exp / Precedence Exp 006)
  *
@@ -15,7 +15,7 @@
  * share the same "open-ended in, safe-ops out" shape.
  */
 
-import { BASE_PROPS, INTERACTION_PROPS, BACKGROUND_KEYS, BOXING_KEYS, SURFACE_KEYS, isSafeValue } from '../../laws/index.ts';
+import { BASE_PROPS, INTERACTION_PROPS, BACKGROUND_KEYS, BOXING_KEYS, SURFACE_KEYS, isSafeValue, clampDisplayFont } from '../../laws/index.ts';
 import type { StyleDecls } from '../../spec';
 import { parseColor, pickReadableText } from '../../../shared/color.ts';
 
@@ -27,6 +27,14 @@ export interface BuildOptions {
   defaultText?: string;
   /** Repair flag: force a readable text color on any rule that paints a background. */
   forceContrast?: boolean;
+  /** Effective canvas background — under forceContrast, a rule that sets a text
+   *  color but NO background gets its color made readable against this, so it
+   *  can't be dark-on-dark on the redesigned canvas. */
+  contrastBg?: string;
+  /** The cluster's measured block width — display type in the styles bag is
+   *  clamped to fit it, just like the layout bag (Fix 1: oversized type set via
+   *  "styles" used to escape the clamp). */
+  containerWidthPx?: number;
 }
 
 export interface BuildResult {
@@ -48,8 +56,11 @@ export function buildDeclarations(input: StyleDecls, opts: BuildOptions): BuildR
   for (const [key, rawVal] of Object.entries(input)) {
     const cssProp = map[key];
     if (!cssProp) { dropped.push(key); continue; }
-    const val = rawVal.trim();
+    let val = rawVal.trim();
     if (!isSafeValue(val)) { dropped.push(key + '(unsafe)'); continue; }
+
+    // Display type set via the styles bag is clamped to fit its container too.
+    if (cssProp === 'font-size') val = clampDisplayFont(val, opts.containerWidthPx);
 
     out.set(cssProp, val);
     if (BACKGROUND_KEYS.has(key)) { setsBackground = true; bgValue = val; }
@@ -63,6 +74,12 @@ export function buildDeclarations(input: StyleDecls, opts: BuildOptions): BuildR
     const parsed = parseColor(bgValue);
     const text = parsed ? pickReadableText(parsed) : (opts.defaultText || '');
     if (text && (opts.forceContrast || !hasExplicitColor)) out.set('color', text);
+  } else if (opts.forceContrast && hasExplicitColor && opts.contrastBg) {
+    // No background on this rule, but it sets a text color: under forceContrast,
+    // make that color readable against the canvas backdrop (rule-level companion
+    // to compile's body-level floor — together they cover uncovered + covered text).
+    const parsed = parseColor(opts.contrastBg);
+    if (parsed) out.set('color', pickReadableText(parsed));
   }
 
   // Box model safety — borders/padding require border-box or they shift geometry.
