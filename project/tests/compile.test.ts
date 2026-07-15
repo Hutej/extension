@@ -34,12 +34,13 @@ function cluster(over: Partial<Cluster>): Cluster {
 
 function perception(clusters: Cluster[], canvasBg = 'rgb(255,255,255)', regions: Perception['skeleton']['regions'] = []): Perception {
   return {
-    builtInMs: 1, nodeCount: clusters.length, cssVars: [],
+    builtInMs: 1, nodeCount: clusters.length, cssVars: [], cssVarMap: {},
     canvas: { bg: canvasBg, color: 'rgb(0,0,0)', fontFamily: 'sans-serif', fontSize: '16px' },
     clusters, skeleton: { regions, contentMaxWidthPx: 800, columnCount: 2 },
     handles: new Set(clusters.map((c) => c.handle)),
     opaqueWrappers: new Set<string>(),
     viewport: { w: 1280, h: 900 },
+    shadowRoots: [],
   };
 }
 

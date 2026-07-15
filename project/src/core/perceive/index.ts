@@ -4,11 +4,11 @@
  * geometry + text, let visually-similar elements CLUSTER themselves, and stamp
  * each emergent cluster with a stable signature-hash handle.
  *
- * This slice adds LAYOUT awareness so a redesign can change arrangement:
- *   - adaptive cluster retention (NO fixed count) by relative prominence + budget
- *   - per-cluster ClusterLayout (display/flow/width/container/owner/passive)
- *   - a LayoutSkeleton (regions / content column width / column count)
- *   - captureLayoutFingerprint() so verify can measure how much layout changed
+ * Round 7 rewrite: no node cap (see the whole page), coarsened signature
+ * buckets (merge families), hierarchical tree serialization (model sees
+ * parent-child nesting), two-tier detail (every handle listed, attention
+ * focused), shadow-root tracking for downstream CSS injection, pre-resolved
+ * CSS variables for pure compile/verify.
  */
 
 import { STYLE_ELEMENT_ID } from '../laws/index.ts';
@@ -17,11 +17,10 @@ import { isTransparent, parseColor } from '../../shared/color.ts';
 const IGNORED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'BR', 'HR', 'WBR', 'LINK', 'META', 'TEMPLATE', 'SLOT', 'PATH', 'DEFS']);
 const ESCAPE_UI_ID = 'webmorph-escape-ui';
 
-const MAX_NODES = 3000;
-const MAX_TIME_MS = 4000;
+const MAX_TIME_MS = 6000;           // budget — no node cap, time is the only limit
+const MAX_DEPTH = 30;               // safety net (not a truncation — 30 is very deep)
 const CLUSTER_ATTR = 'data-wm-c';
-const PROMINENCE_FLOOR_RATIO = 0.015;  // tail below this * top is noise
-const SERIALIZE_CHAR_BUDGET = 24000;   // adaptive cap by budget, not a fixed count (quality>speed: give the designer real evidence)
+const TIER1_FULL_DETAIL_COUNT = 80; // top clusters by prominence get full serialization
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -75,11 +74,13 @@ export interface Perception {
   nodeCount: number;
   canvas: PageCanvas;
   cssVars: { name: string; value: string }[];
+  cssVarMap: Record<string, string>;    // --name → resolved rgb (for pure compile/verify)
   clusters: Cluster[];
   skeleton: LayoutSkeleton;
   handles: Set<string>;
-  opaqueWrappers: Set<string>;   // handles of large solid-bg wrappers that hide the canvas
-  viewport: { w: number; h: number };  // for area-fraction math (accent-trim budget)
+  opaqueWrappers: Set<string>;          // handles of large solid-bg wrappers that hide the canvas
+  viewport: { w: number; h: number };   // for area-fraction math (accent-trim budget)
+  shadowRoots: ShadowRoot[];            // open shadow roots for downstream CSS injection
 }
 
 export interface LayoutFingerprint {
@@ -87,8 +88,9 @@ export interface LayoutFingerprint {
   contentMaxWidthPx: number | null;
   columnCount: number;
   typeSizesPx: number[];
-  overlapCount: number;   // non-nested region collisions (compared before/after by verify)
-  bleedCount: number;     // text escaping its own painted block (compared before/after by verify)
+  overlapCount: number;
+  bleedCount: number;
+  scrollWidth: number;                  // ponytail: for delta-overflow in verify (Phase 3)
 }
 
 interface Candidate {
@@ -155,12 +157,13 @@ export function perceive(): Perception {
   clearHandles();
 
   const candidates: Candidate[] = [];
+  const shadowRoots: ShadowRoot[] = [];
   const vpW = window.innerWidth || 1280;
   const vpArea = vpW * (window.innerHeight || 800);
   let visited = 0;
 
   const walk = (el: HTMLElement, depth: number): void => {
-    if (visited >= MAX_NODES || performance.now() - t0 > MAX_TIME_MS || depth > 24) return;
+    if (performance.now() - t0 > MAX_TIME_MS || depth > MAX_DEPTH) return;
     const tag = el.tagName.toUpperCase();
     if (IGNORED_TAGS.has(tag)) return;
     if (el.id === STYLE_ELEMENT_ID || el.id === ESCAPE_UI_ID || el.hasAttribute('data-webmorph-ui')) return;
@@ -172,7 +175,10 @@ export function perceive(): Perception {
 
     const descend = () => {
       for (const child of Array.from(el.children)) if (child instanceof HTMLElement) walk(child, depth + 1);
-      if (el.shadowRoot) for (const child of Array.from(el.shadowRoot.children)) if (child instanceof HTMLElement) walk(child, depth + 1);
+      if (el.shadowRoot) {
+        shadowRoots.push(el.shadowRoot);
+        for (const child of Array.from(el.shadowRoot.children)) if (child instanceof HTMLElement) walk(child, depth + 1);
+      }
     };
 
     if (w <= 1 || h <= 1) { descend(); return; }
@@ -215,19 +221,21 @@ export function perceive(): Perception {
   const clusters = clusterAndStamp(candidates, vpArea, vpW);
   const canvas = readCanvas();
   const cssVars = readColorVars();
+  const cssVarMap = resolveVarMap(cssVars);
   const skeleton = buildSkeleton(clusters, vpW);
 
   return {
     builtInMs: Math.round(performance.now() - t0),
     nodeCount: visited,
-    canvas, cssVars, clusters, skeleton,
+    canvas, cssVars, cssVarMap, clusters, skeleton,
     handles: new Set(clusters.map((c) => c.handle)),
     opaqueWrappers: new Set(clusters.filter((c) => c.layout.isOpaqueWrapper).map((c) => c.handle)),
     viewport: { w: vpW, h: window.innerHeight || 800 },
+    shadowRoots,
   };
 }
 
-// ── Clustering + adaptive retention + layout enrichment ────────────
+// ── Clustering + retention + layout enrichment ─────────────────────
 
 function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): Cluster[] {
   const groups = new Map<string, Candidate[]>();
@@ -262,19 +270,10 @@ function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): 
 
   raws.sort((a, b) => b.prominence - a.prominence);
 
-  // Adaptive retention: relative prominence floor + serialization budget. NO fixed count.
-  const kept: Raw[] = [];
-  if (raws.length) {
-    const floor = raws[0].prominence * PROMINENCE_FLOOR_RATIO;
-    let chars = 0;
-    for (const r of raws) {
-      if (r.prominence < floor) break;
-      const cost = estimateChars(r);
-      if (chars + cost > SERIALIZE_CHAR_BUDGET && kept.length > 0) break;
-      kept.push(r);
-      chars += cost;
-    }
-  }
+  // Retain ALL clusters — no prominence floor, no char budget truncation.
+  // Every visible cluster the user can see must be in the inventory.
+  // Two-tier serialization handles the prompt-size budget.
+  const kept: Raw[] = raws;
 
   // Stamp handles on kept members.
   for (const r of kept) for (const m of r._members) m.el.setAttribute(CLUSTER_ATTR, r.handle);
@@ -289,9 +288,6 @@ function placeholderLayout(rep: Candidate, vpW: number): ClusterLayout {
   const disp = rep.style.display;
   const isFlex = disp.includes('flex');
   const isGrid = disp.includes('grid');
-  // Opaque wrapper: wide (>85% viewport), solid bg, not a passive wrapper.
-  // These hide the canvas backdrop and need to be made transparent when the
-  // canvas is redesigned. Only flag on non-passive containers at low depth.
   const isOpaqueWrapper = rep.hasSolidBg && !rep.passive &&
     (rep.rect.w / vpW) >= 0.85 && rep.rect.h > 80;
   return {
@@ -309,7 +305,6 @@ function placeholderLayout(rep: Candidate, vpW: number): ClusterLayout {
 }
 
 function enrichLayout(cluster: Cluster, rep: Candidate, _vpW: number): void {
-  // First flex/grid ancestor owns the box; record whether one exists + its handle.
   let owner: HTMLElement | null = null;
   let p = rep.el.parentElement;
   while (p && p !== document.body && p !== document.documentElement) {
@@ -319,7 +314,6 @@ function enrichLayout(cluster: Cluster, rep: Candidate, _vpW: number): void {
   }
   cluster.layout.ownedByFlexGrid = owner != null;
   cluster.layout.constraintOwnerHandle = owner?.getAttribute(CLUSTER_ATTR) || null;
-  // Nearest ancestor cluster = parent handle.
   let a = rep.el.parentElement;
   while (a) {
     const h = a.getAttribute(CLUSTER_ATTR);
@@ -328,17 +322,17 @@ function enrichLayout(cluster: Cluster, rep: Candidate, _vpW: number): void {
   }
 }
 
+/** Coarsened signature: 4px buckets for size, 8-step quantize for colors.
+ *  Merges 14px/15px buttons into one cluster — stops family fragmentation.
+ *  Reported style values stay exact; only the grouping is coarsened. */
 function signature(c: Candidate): string {
   const s = c.style;
   return [
-    c.tag, c.role ?? '-', s.background, s.color, s.border,
-    pxBucket(s.borderRadius), s.boxShadow === 'none' ? '0' : '1',
-    s.fontFamily, pxBucket(s.fontSize), s.fontWeight, s.display,
+    c.tag, c.role ?? '-',
+    colorBucket(s.background), colorBucket(s.color), s.border,
+    pxBucket4(s.borderRadius), s.boxShadow === 'none' ? '0' : '1',
+    s.fontFamily, pxBucket4(s.fontSize), s.fontWeight, s.display,
   ].join('|');
-}
-
-function estimateChars(c: Cluster): number {
-  return 60 + c.samples.join('').length;
 }
 
 // ── Layout skeleton ────────────────────────────────────────────────
@@ -357,9 +351,21 @@ function buildSkeleton(clusters: Cluster[], vpW: number): LayoutSkeleton {
       if (el) cols.add(Math.round(el.getBoundingClientRect().x / 40));
     }
   }
-  const primary = findPrimaryContentNode();
-  const contentMaxWidthPx = primary ? Math.round(primary.getBoundingClientRect().width) : null;
+  // Content width from cluster data — O(clusters), no O(n²) DOM scan.
+  const contentMaxWidthPx = findContentWidthFromClusters(clusters, vpW);
   return { regions, contentMaxWidthPx, columnCount: Math.max(1, cols.size) };
+}
+
+function findContentWidthFromClusters(clusters: Cluster[], vpW: number): number | null {
+  let best = 0;
+  for (const c of clusters) {
+    if (c.layout.widthRatio >= 0.9) continue;       // skip full-width wrappers
+    if (c.layout.isPassiveWrapper || c.layout.isOpaqueWrapper) continue;
+    if (c.samples.length > 0 || c.role === 'main' || c.role === 'article') {
+      best = Math.max(best, c.rect.w);
+    }
+  }
+  return best || null;
 }
 
 // ── Layout fingerprint (for verify's change signal) ────────────────
@@ -377,8 +383,7 @@ export function captureLayoutFingerprint(): LayoutFingerprint {
       paint: cs.backgroundColor + '|' + cs.color,
     });
   }
-  const primary = findPrimaryContentNode();
-  const contentMaxWidthPx = primary ? Math.round(primary.getBoundingClientRect().width) : null;
+  const contentMaxWidthPx = findContentWidthFromStamped();
 
   const sizes = new Set<number>();
   for (const el of Array.from(document.querySelectorAll('h1, h2, h3, h4, p, li, a, button')).slice(0, 40)) {
@@ -391,22 +396,39 @@ export function captureLayoutFingerprint(): LayoutFingerprint {
     const ratio = r.width / (window.innerWidth || 1280);
     if (ratio >= 0.2 && ratio <= 0.75) cols.add(Math.round(r.x / 40));
   }
-  return { regions, contentMaxWidthPx, columnCount: Math.max(1, cols.size), typeSizesPx: [...sizes].sort((a, b) => a - b), overlapCount: computeOverlapCount(), bleedCount: countTextBleeds() };
+  return {
+    regions, contentMaxWidthPx, columnCount: Math.max(1, cols.size),
+    typeSizesPx: [...sizes].sort((a, b) => a - b),
+    overlapCount: computeOverlapCount(), bleedCount: countTextBleeds(),
+    scrollWidth: document.documentElement.scrollWidth,
+  };
 }
 
-/**
- * Count non-nested region collisions. Computed identically before AND after apply,
- * so verify can flag only NEW overlaps our CSS introduced — pre-existing overlaps
- * (floating infoboxes, sticky/absolute panels) cancel out and never false-fail.
- * One representative element per cluster (deduped by handle) keeps it O(regions^2).
- */
-/**
- * Text bleeding horizontally out of its own painted block — e.g. oversized
- * display type escaping a fixed color-block header. Only elements that paint
- * their own background/border with overflow visible are counted; scrollable and
- * hidden containers overflow by design and are skipped. Compared before/after
- * by verify, so pre-existing bleeds never false-fail.
- */
+/** O(stamped) content-width — replaces the O(n²) findPrimaryContentNode for fingerprints. */
+function findContentWidthFromStamped(): number | null {
+  const vpW = window.innerWidth || 1280;
+  let best = 0;
+  for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
+    const r = el.getBoundingClientRect();
+    const ratio = r.width / vpW;
+    if (ratio >= 0.9 || ratio < 0.15) continue;
+    const role = el.getAttribute('role');
+    const tag = el.tagName.toLowerCase();
+    if (role === 'main' || tag === 'main' || role === 'article' || tag === 'article') {
+      best = Math.max(best, r.width);
+    }
+  }
+  if (!best) {
+    for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
+      const r = el.getBoundingClientRect();
+      const ratio = r.width / vpW;
+      if (ratio >= 0.9 || ratio < 0.2) continue;
+      if ((el.textContent || '').trim().length > 200) { best = Math.max(best, r.width); break; }
+    }
+  }
+  return best || null;
+}
+
 function countTextBleeds(): number {
   let n = 0;
   for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
@@ -489,19 +511,45 @@ function readColorVars(): { name: string; value: string }[] {
   return out;
 }
 
-// ── Primary content detection ──────────────────────────────────────
+/** Resolve CSS variable values to rgb for pure compile/verify. parseColor handles
+ *  rgb/hex/hsl; oklch/named get a DOM fallback (only runs during perception). */
+function resolveVarMap(vars: { name: string; value: string }[]): Record<string, string> {
+  const map: Record<string, string> = {};
+  for (const v of vars) {
+    if (parseColor(v.value)) { map[v.name] = v.value; continue; }
+    // DOM fallback for oklch/named/exotic — runs once during perception.
+    try {
+      const el = document.createElement('div');
+      el.style.color = v.value;
+      el.style.display = 'none';
+      document.body.appendChild(el);
+      map[v.name] = getComputedStyle(el).color;
+      el.remove();
+    } catch { map[v.name] = v.value; }
+  }
+  return map;
+}
+
+// ── Primary content detection (O(stamped) — no O(n²) scan) ─────────
 
 export function findPrimaryContentNode(): Element | null {
+  // Fast path: look for main/article regions among stamped clusters.
+  for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
+    const role = el.getAttribute('role');
+    const tag = el.tagName.toLowerCase();
+    if (role === 'main' || tag === 'main' || role === 'article' || tag === 'article') {
+      const rect = el.getBoundingClientRect();
+      if (rect.width > 0 && rect.height > 0) return el;
+    }
+  }
+  // Fallback: stamped cluster with most text content.
   let best: Element | null = null;
   let bestLen = 200;
   const vpArea = (window.innerWidth || 1280) * (window.innerHeight || 800);
-  for (const el of Array.from(document.body.querySelectorAll('*'))) {
+  for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
     if (el.hasAttribute('data-webmorph-ui')) continue;
     const textLen = (el.textContent || '').replace(/\s+/g, ' ').trim().length;
     if (textLen < bestLen) continue;
-    let interactive = 0;
-    el.querySelectorAll('a, button, input, select, textarea').forEach((i) => { interactive += (i.textContent || '').trim().length; });
-    if (interactive / textLen >= 0.3) continue;
     const rect = el.getBoundingClientRect();
     if (rect.width * rect.height < vpArea * 0.05) continue;
     best = el; bestLen = textLen;
@@ -513,50 +561,75 @@ export function clearHandles(): void {
   document.querySelectorAll(`[${CLUSTER_ATTR}]`).forEach((el) => el.removeAttribute(CLUSTER_ATTR));
 }
 
-// ── Serialize for the AI ───────────────────────────────────────────
+// ── Serialize for the AI — hierarchical tree, two-tier detail ───────
 
 export function serializePerception(p: Perception): string {
   const lines: string[] = [];
-  lines.push('PAGE CANVAS');
-  lines.push(`  viewport:${p.viewport.w}x${p.viewport.h}px (design to fit this width)`);
-  lines.push(`  background:${short(p.canvas.bg)} text:${short(p.canvas.color)} font:${p.canvas.fontFamily} ${p.canvas.fontSize}`);
-
-  lines.push('LAYOUT SKELETON');
-  lines.push(`  columns:${p.skeleton.columnCount} contentWidth:${p.skeleton.contentMaxWidthPx ?? '?'}px`);
+  lines.push(`PAGE ${p.viewport.w}x${p.viewport.h} bg:${short(p.canvas.bg)} text:${short(p.canvas.color)} font:${p.canvas.fontFamily} ${p.canvas.fontSize}`);
+  lines.push(`COLS ${p.skeleton.columnCount} CONTENT ${p.skeleton.contentMaxWidthPx ?? '?'}px`);
   if (p.skeleton.regions.length) {
-    lines.push('PAGE COMPOSITION — decide these region proportions FIRST, then design inside them:');
-    for (const r of p.skeleton.regions) {
-      lines.push(`  [region] ${r.handle} ${r.role} ${r.rect.w}x${r.rect.h}px (${Math.round(r.widthRatio * 100)}%w)`);
-    }
+    lines.push('REGIONS ' + p.skeleton.regions.map((r) => `${r.handle}=${r.role}(${Math.round(r.widthRatio * 100)}%w,${r.rect.w}x${r.rect.h})`).join(' '));
   }
-
   if (p.cssVars.length) {
-    lines.push('CSS COLOR VARIABLES (override via "variables" to retheme framework CSS):');
-    lines.push('  ' + p.cssVars.map((v) => `${v.name}:${short(v.value)}`).join('  '));
+    lines.push('VARS ' + p.cssVars.map((v) => `${v.name}:${short(v.value)}`).join(' '));
   }
 
-  lines.push('');
-  lines.push('COMPONENTS (target these ids; use styles for paint, layout for arrangement/sizing/spacing):');
+  // Two-tier: top N by prominence get full detail; rest get compact one-liners.
+  const byProminence = [...p.clusters].sort((a, b) => b.prominence - a.prominence);
+  const tier1 = new Set(byProminence.slice(0, TIER1_FULL_DETAIL_COUNT).map((c) => c.handle));
+
+  // Build parent → children map for tree serialization.
+  const childrenOf = new Map<string | null, Cluster[]>();
   for (const c of p.clusters) {
-    const L = c.layout;
-    const parts = [
-      `  ${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
-      `~${c.rect.w}x${c.rect.h}(${Math.round(L.widthRatio * 100)}%w)`,
-      `disp:${L.display}${L.isContainer ? '/container' : ''}`,
-      `bg:${short(c.style.background)}`, `text:${short(c.style.color)}`,
-    ];
-    if (c.style.border !== 'none') parts.push(`border:${short(c.style.border)}`);
-    if (c.style.borderRadius !== '0px') parts.push(`radius:${c.style.borderRadius}`);
-    parts.push(`font:${c.style.fontFamily}/${c.style.fontSize}/${c.style.fontWeight}`);
-    if (c.isNativeControl) parts.push('[native-control]');
-    if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) parts.push('[image]');
-    if (L.isPassiveWrapper) parts.push('[passive-wrapper]');
-    if (L.isOpaqueWrapper) parts.push('[opaque-wrapper]');
-    let line = parts.join(' ');
-    if (c.samples.length) line += `  e.g. ${c.samples.map((s) => JSON.stringify(s.slice(0, 30))).join(', ')}`;
-    lines.push(line);
+    const parent = c.layout.parentHandle;
+    const arr = childrenOf.get(parent);
+    if (arr) arr.push(c); else childrenOf.set(parent, [c]);
   }
+  for (const arr of childrenOf.values()) arr.sort((a, b) => b.prominence - a.prominence);
+
+  lines.push('TREE:');
+  const serialize = (handle: string | null, depth: number): void => {
+    const children = childrenOf.get(handle);
+    if (!children) return;
+    for (const c of children) {
+      const indent = '  '.repeat(Math.min(depth, 6));
+      lines.push(indent + (tier1.has(c.handle) ? formatFull(c) : formatCompact(c)));
+      serialize(c.handle, depth + 1);
+    }
+  };
+  serialize(null, 0);
+
   return lines.join('\n');
+}
+
+function formatFull(c: Cluster): string {
+  const L = c.layout;
+  const parts = [
+    `${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
+    `${c.rect.w}x${c.rect.h} ${Math.round(L.widthRatio * 100)}%w`,
+    `${L.display}${L.isContainer ? '/container' : ''}`,
+    `bg:${short(c.style.background)}`, `text:${short(c.style.color)}`,
+  ];
+  if (c.style.border !== 'none') parts.push(`border:${short(c.style.border)}`);
+  if (c.style.borderRadius !== '0px') parts.push(`r:${c.style.borderRadius}`);
+  parts.push(`font:${c.style.fontFamily}/${c.style.fontSize}/${c.style.fontWeight}`);
+  if (c.isNativeControl) parts.push('[native]');
+  if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) parts.push('[image]');
+  if (L.isPassiveWrapper) parts.push('[passive]');
+  if (L.isOpaqueWrapper) parts.push('[opaque]');
+  let line = parts.join(' ');
+  if (c.samples.length) line += ` e.g.${c.samples.slice(0, 2).map((s) => JSON.stringify(s.slice(0, 20))).join(',')}`;
+  return line;
+}
+
+function formatCompact(c: Cluster): string {
+  const parts = [
+    `${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
+    `${c.rect.w}x${c.rect.h} ${Math.round(c.layout.widthRatio * 100)}%w`,
+  ];
+  if (c.hasSolidBg) parts.push(`bg:${short(c.style.background)}`);
+  if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) parts.push('[image]');
+  return parts.join(' ');
 }
 
 // ── small helpers ──────────────────────────────────────────────────
@@ -578,7 +651,15 @@ function directText(el: Element): string {
   return t || (el.textContent || '').replace(/\s+/g, ' ').trim();
 }
 function firstFamily(f: string): string { return (f.split(',')[0] || 'sans-serif').trim().replace(/['"]/g, ''); }
-function pxBucket(v: string): string { const n = parseFloat(v); return isNaN(n) ? v : String(Math.round(n)); }
+/** 4px buckets — merges 14px/15px buttons into the same cluster. */
+function pxBucket4(v: string): string { const n = parseFloat(v); return isNaN(n) ? v : String(Math.floor(n / 4) * 4); }
+/** 8-step per channel quantization for signature grouping (reported values stay exact). */
+function colorBucket(colorStr: string): string {
+  const c = parseColor(colorStr);
+  if (!c) return colorStr;
+  const q = (v: number) => Math.round(v / 32) * 32;
+  return `${q(c[0])},${q(c[1])},${q(c[2])}`;
+}
 function round2(n: number): number { return Math.round(n * 100) / 100; }
 function short(color: string): string { return color.replace(/\s+/g, ''); }
 function hash(str: string): string {
