@@ -54,8 +54,8 @@ export function buildLayoutDeclarations(input: LayoutDecls, opts: LayoutBuildOpt
     if (opts.dropSizing && SIZING_KEYS.has(key)) { dropped.push(key + '(dropSizing)'); continue; }
 
     // ── Viewport-safe by construction (prevention beats repair) ──
-    // A fixed px/vw width can never exceed its container: min(X, 100%).
-    if ((cssProp === 'width' || cssProp === 'max-width') && isFixedLength(val)) {
+    // A fixed px/vw width/min-width can never exceed its container: min(X, 100%).
+    if ((cssProp === 'width' || cssProp === 'max-width' || cssProp === 'min-width') && isFixedLength(val)) {
       val = `min(${val}, 100%)`;
     }
     // Display type is clamped to fit its OWN container block (not just the
@@ -80,8 +80,9 @@ export function buildLayoutDeclarations(input: LayoutDecls, opts: LayoutBuildOpt
     // This makes the BBC 1.97× blow-out impossible to emit, not repaired after.
     if (cssProp === 'grid-template-columns') {
       val = normalizeGridTemplate(val, opts.containerWidthPx);
-      // Grid containers must never exceed their parent.
-      if (!out.has('max-width')) out.set('max-width', '100%');
+      // Only set max-width:100% if the model didn't explicitly set one (order-independent).
+      const hasModelMaxWidth = Object.keys(input).some((k) => LAYOUT_PROPS[k] === 'max-width');
+      if (!hasModelMaxWidth) out.set('max-width', '100%');
     }
 
     out.set(cssProp, val);

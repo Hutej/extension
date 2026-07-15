@@ -10,8 +10,8 @@
 
 import { findPrimaryContentNode, captureLayoutFingerprint, type LayoutFingerprint } from '../perceive/index.ts';
 import {
-  MIN_CONTRAST_RATIO, MAX_OVERFLOW_RATIO, CONTRAST_SAMPLE_COUNT,
-  MIN_CHANGE_SCORE, MAX_ACCENT_FRACTION, MAX_FRAMED_FRACTION, MIN_COVERAGE_FRACTION, PERCEPTIBLE_COLOR_DELTA,
+  MIN_CONTRAST_RATIO, MAX_OVERFLOW_RATIO, CONTRAST_SAMPLE_COUNT, CONTRAST_MAX_FAILURES, CONTRAST_TOP_FAIL_COUNT,
+  MIN_CHANGE_SCORE, MAX_ACCENT_FRACTION, MAX_FRAMED_FRACTION, MIN_COVERAGE_FRACTION, MIN_MODEL_COVERAGE_FRACTION, PERCEPTIBLE_COLOR_DELTA,
   luminanceCompatible, MIN_CHARS_PER_LINE,
 } from '../laws/index.ts';
 import { parseColor, contrastRatio, colorfulness, colorDistance, type RGBA } from '../../shared/color.ts';
@@ -24,16 +24,17 @@ export interface VerifyResult {
   changeScore: number;
   accentFraction: number;
   framedFraction: number;
-  coverageFraction: number;
-  overflowTargets: string[];   // cluster handles whose box extends past the viewport — targeted repair clamps only these
-  bleedTargets: string[];      // cluster handles whose text bleeds its block — targeted word-break repair (Mech 3)
-  squeezeTargets: string[];    // cluster handles whose text is squeezed (< MIN_CHARS_PER_LINE) — targeted columnCount/width drop (Fix 3)
-  contrastTargets: string[];   // cluster handles carrying flagged low-contrast text — targeted forceContrast fixes these
-  repeatedAccent: boolean;     // any repeated cluster with an identical model-painted accent bg (absolute law, Mech 4)
+  coverageFraction: number;         // total: model + base-coat + hide
+  modelCoverageFraction: number;    // model rules only (prevents base-coat-only escape)
+  overflowTargets: string[];
+  bleedTargets: string[];
+  squeezeTargets: string[];
+  contrastTargets: string[];
+  repeatedAccent: boolean;
   details: string[];
 }
 
-export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained' | 'vivid'): VerifyResult {
+export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained' | 'vivid', modelAddressed?: Set<string>): VerifyResult {
   const details: string[] = [];
   const after = captureLayoutFingerprint();
 
@@ -49,14 +50,13 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
     details.push('no primary content node found — page may be blank');
   }
 
-  // 2) No horizontal blow-out.
+  // 2) No horizontal blow-out — DELTA: flag only overflow WE introduced, not pre-existing.
   const scrollW = document.documentElement.scrollWidth;
   const innerW = window.innerWidth || 1;
-  const pageOverflowOk = scrollW / innerW <= MAX_OVERFLOW_RATIO;
-  if (!pageOverflowOk) details.push(`layout blow-out: ${(scrollW / innerW).toFixed(2)}`);
-  // NEW text bleeds (oversized type escaping its painted block) count as overflow
-  // so the existing dropPadding -> dropSizing -> dropLayout escalation fixes them
-  // (dropLayout strips fontSize, restoring the original fit).
+  const beforeRatio = before.scrollWidth / innerW;
+  const afterRatio = scrollW / innerW;
+  const pageOverflowOk = afterRatio <= Math.max(beforeRatio * 1.02, MAX_OVERFLOW_RATIO) + 0.01;
+  if (!pageOverflowOk) details.push(`layout blow-out: ${afterRatio.toFixed(2)} (before=${beforeRatio.toFixed(2)})`);
   const noNewBleeds = after.bleedCount <= before.bleedCount;
   if (!noNewBleeds) details.push(`text bleeds its block: ${before.bleedCount} -> ${after.bleedCount}`);
   const noOverflow = pageOverflowOk && noNewBleeds;
@@ -87,13 +87,18 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
 
   // 7) Coverage: every region must be part of the design — repainted (by a
   // PERCEPTIBLE color delta, not epsilon jitter), moved/resized, or hidden.
-  // LUMINANCE-AWARE (Mechanism 2): a text-color-only delta on a background that
-  // clashes with the canvas does NOT count — the white-strip false pass.
+  // SPLIT: total coverage (model + base-coat + hide) ≥ 0.85, model-only ≥ 0.40.
+  // The model coverage gate prevents the base-coat-only escape.
   const canvasBg = readEffectiveCanvasBg();
-  const coverageFraction = measureCoverage(before, after, canvasBg, details);
-  const covered = coverageFraction >= MIN_COVERAGE_FRACTION;
-  if (!covered) details.push(`page under-covered: ${(coverageFraction * 100).toFixed(0)}% of regions addressed`);
-  details.push(`changeScore=${changeScore.toFixed(3)} accent=${accentFraction.toFixed(3)} framed=${framedFraction.toFixed(3)} coverage=${coverageFraction.toFixed(3)}`);
+  const { totalFraction, modelFraction } = measureCoverage(before, after, canvasBg, details, modelAddressed);
+  const coverageFraction = totalFraction;
+  const modelCoverageFraction = modelFraction;
+  const covered = coverageFraction >= MIN_COVERAGE_FRACTION && modelCoverageFraction >= MIN_MODEL_COVERAGE_FRACTION;
+  if (!covered) {
+    if (coverageFraction < MIN_COVERAGE_FRACTION) details.push(`page under-covered: ${(coverageFraction * 100).toFixed(0)}% of regions addressed`);
+    if (modelCoverageFraction < MIN_MODEL_COVERAGE_FRACTION) details.push(`model under-covered: only ${(modelCoverageFraction * 100).toFixed(0)}% by model rules (base-coat is safety net, not design)`);
+  }
+  details.push(`changeScore=${changeScore.toFixed(3)} accent=${accentFraction.toFixed(3)} framed=${framedFraction.toFixed(3)} coverage=${coverageFraction.toFixed(3)} modelCoverage=${modelCoverageFraction.toFixed(3)}`);
 
   // Which clusters overflow (for targeted repair) — computed regardless so repair can use it.
   const overflowTargets = findOverflowTargets();
@@ -101,7 +106,7 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   const squeezeTargets = findSqueezeTargets();
 
   const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered;
-  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered }, changeScore, accentFraction, framedFraction, coverageFraction, overflowTargets, bleedTargets, squeezeTargets, contrastTargets: [...contrastFlags], repeatedAccent, details };
+  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered }, changeScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, contrastTargets: [...contrastFlags], repeatedAccent, details };
 }
 
 /**
@@ -200,40 +205,39 @@ function fingerprintDelta(a: LayoutFingerprint, b: LayoutFingerprint): number {
 
 /**
  * Fraction of before-regions ADDRESSED by the design: repainted by a PERCEPTIBLE
- * color delta (not epsilon jitter), visibly moved/resized, or hidden entirely.
- * LUMINANCE-AWARE (Mechanism 2): a text-color-only delta on a background that
- * clashes with the canvas does NOT count as addressed — the white-strip false
- * pass where a white header sat on a near-black canvas with only its text
- * recolored. Pure math on measured luminance. One representative per handle;
- * before/after comparison so a site's own quirks never false-fail.
+ * color delta, visibly moved/resized, or hidden entirely. Returns BOTH total
+ * (model + base-coat + hide) and model-only fractions — the split prevents the
+ * base-coat-only escape (a lazy spec that passes total coverage via base-coat).
+ * LUMINANCE-AWARE: a text-color-only delta on a clashing bg does NOT count.
  */
-function measureCoverage(a: LayoutFingerprint, b: LayoutFingerprint, canvasBg: string, details: string[]): number {
+function measureCoverage(a: LayoutFingerprint, b: LayoutFingerprint, canvasBg: string, details: string[], modelAddressed?: Set<string>): { totalFraction: number; modelFraction: number } {
   const bMap = new Map<string, LayoutFingerprint['regions'][number]>();
   for (const r of b.regions) if (!bMap.has(r.handle)) bMap.set(r.handle, r);
   const seen = new Set<string>();
-  let total = 0;
-  let addressed = 0;
+  let total = 0, addressed = 0, modelAddr = 0;
   const unaddressed: string[] = [];
   for (const ra of a.regions) {
     if (seen.has(ra.handle)) continue;
     seen.add(ra.handle);
     total++;
     const rb = bMap.get(ra.handle);
-    if (!rb) { addressed++; continue; } // gone = hidden = a deliberate design decision
+    if (!rb) { addressed++; if (modelAddressed?.has(ra.handle)) modelAddr++; continue; }
     const moved = Math.abs(ra.x - rb.x) + Math.abs(ra.y - rb.y) + Math.abs(ra.w - rb.w) + Math.abs(ra.h - rb.h) > 12;
     const [bgA, fgA] = ra.paint.split('|');
     const [bgB, fgB] = rb.paint.split('|');
     const bgD = perceptibleDelta(bgA, bgB);
     const fgD = perceptibleDelta(fgA, fgB);
     const isAddressed = regionAddressed(moved, bgD, fgD, bgA, canvasBg);
-    if (isAddressed) addressed++;
-    else if (unaddressed.length < 8) {
+    if (isAddressed) {
+      addressed++;
+      if (modelAddressed?.has(ra.handle)) modelAddr++;
+    } else if (unaddressed.length < 8) {
       const clash = fgD >= PERCEPTIBLE_COLOR_DELTA && bgD < PERCEPTIBLE_COLOR_DELTA && !luminanceCompatible(bgA, canvasBg);
       unaddressed.push(`${ra.handle}(bgΔ${Math.round(bgD)} fgΔ${Math.round(fgD)}${clash ? ' CLASH' : ''})`);
     }
   }
   details.push(`coverage ${addressed}/${total} addressed${unaddressed.length ? `; unaddressed: ${unaddressed.join(', ')}` : ''}`);
-  return total ? addressed / total : 1;
+  return { totalFraction: total ? addressed / total : 1, modelFraction: total ? modelAddr / total : 1 };
 }
 
 /**
@@ -354,9 +358,7 @@ function measureFramedClusterFraction(): number {
 // ── contrast ───────────────────────────────────────────────────────
 
 function checkContrast(details: string[], targets: Set<string>): boolean {
-  // Largest type first: display/hero text is the most visible place to fail, and
-  // document-order sampling used to spend the entire budget on nav links (the
-  // washed-out coffee-shop hero passed exactly this way).
+  // Largest type first: display/hero text is the most visible place to fail.
   const candidates = Array.from(document.querySelectorAll('h1, h2, h3, h4, p, li, td, a, span, blockquote'))
     .filter((el) => !el.hasAttribute('data-webmorph-ui') && (el.textContent || '').trim().length >= 5)
     .slice(0, 200)
@@ -372,24 +374,43 @@ function checkContrast(details: string[], targets: Set<string>): boolean {
     checked++;
     if (contrastRatio(fg, effectiveBackground(el)) < MIN_CONTRAST_RATIO) {
       failed++;
-      if (checked <= 3) failedTop++; // a failure among the biggest text is never acceptable
-      // Record the cluster handle this text belongs to so forceContrast can fix it.
+      if (checked <= CONTRAST_TOP_FAIL_COUNT) failedTop++;
       const h = el.closest('[data-wm-c]')?.getAttribute('data-wm-c');
       if (h) targets.add(h);
       details.push(`low contrast on "${(el.textContent || '').trim().slice(0, 24)}"`);
     }
   }
-  return !(checked > 0 && (failedTop > 0 || failed > checked / 2));
+  // Strict: ≤2 failures out of 50, AND zero failures among top-10 largest text.
+  return !(checked > 0 && (failedTop > 0 || failed > CONTRAST_MAX_FAILURES));
 }
 
+/** Walk parent chain to find effective background. Alpha-composites semi-transparent
+ *  colors over the parent so contrast is measured against the real perceived color. */
 function effectiveBackground(el: Element): RGBA {
   let cur: Element | null = el;
   while (cur) {
     const c = parseColor(getComputedStyle(cur).backgroundColor);
-    if (c && c[3] >= 0.1) return c;
+    if (c && c[3] >= 0.95) return c;  // fully opaque
+    if (c && c[3] >= 0.1) {
+      // Semi-transparent — composite over parent's effective background.
+      const parent = cur.parentElement ? effectiveBackground(cur.parentElement) : [255, 255, 255, 1] as RGBA;
+      return alphaBlend(c, parent);
+    }
     cur = cur.parentElement;
   }
   return [255, 255, 255, 1];
+}
+
+/** Alpha-composite fg over bg. */
+function alphaBlend(fg: RGBA, bg: RGBA): RGBA {
+  const a = fg[3] + bg[3] * (1 - fg[3]);
+  if (a === 0) return [0, 0, 0, 0];
+  return [
+    (fg[0] * fg[3] + bg[0] * bg[3] * (1 - fg[3])) / a,
+    (fg[1] * fg[3] + bg[1] * bg[3] * (1 - fg[3])) / a,
+    (fg[2] * fg[3] + bg[2] * bg[3] * (1 - fg[3])) / a,
+    a,
+  ];
 }
 
 function clamp01(n: number): number { return Math.max(0, Math.min(1, n)); }

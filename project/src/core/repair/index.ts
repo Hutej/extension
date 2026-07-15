@@ -34,6 +34,9 @@ export interface Attempt {
   css: string;
   notBroken: boolean;   // notBlank && noOverflow && noOverlap && contrastOk
   changeScore: number;
+  covered: boolean;
+  coherent: boolean;
+  changed: boolean;
 }
 
 export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasonsDone: number, paletteMode?: 'restrained' | 'vivid'): RepairDecision {
@@ -100,28 +103,36 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
 }
 
 function critiqueFor(verify: VerifyResult): string {
+  // Collect ALL quality failures — the model needs to fix everything, not just the first.
+  const parts: string[] = [];
   if (!verify.checks.changed) {
-    return `Your previous design changed almost NO layout (changeScore=${verify.changeScore.toFixed(2)}). A recolor is not a redesign. You MUST alter arrangement AND the page background: change container/content widths (maxWidth + marginInline:auto), columns/spacing scale, type scale, AND set a deliberate canvas background distinct from the site default.`;
+    parts.push(`Your previous design changed almost NO layout (changeScore=${verify.changeScore.toFixed(2)}). A recolor is not a redesign. You MUST alter arrangement AND the page background: change container/content widths (maxWidth + marginInline:auto), columns/spacing scale, type scale, AND set a deliberate canvas background distinct from the site default.`);
   }
   if (verify.repeatedAccent) {
-    return `Your previous design painted the same accent color on every member of a repeated cluster. This is an absolute law: NEVER use an identical accent on every row of a repeated cluster (every card in a grid, every item in a list). It collapses the accent into a new background and destroys hierarchy. Treat repeated items as calm secondary surfaces; reserve the accent for the one or two singular, prominent regions.`;
+    parts.push(`Your previous design painted the same accent color on every member of a repeated cluster. This is an absolute law: NEVER use an identical accent on every row of a repeated cluster. Treat repeated items as calm secondary surfaces; reserve the accent for singular, prominent regions.`);
   }
   if (!verify.checks.covered) {
-    return `Your previous design left ${(100 - verify.coverageFraction * 100).toFixed(0)}% of the page's regions in their ORIGINAL look (coverage=${verify.coverageFraction.toFixed(2)}). Every region must be part of the design: restyle it into the new system, or set "hide": true on chrome (utility sidebars, banners, settings/appearance panels) that does not serve the requested experience. A page with original-looking patches is not a redesign. A text-color-only change on a background that clashes with your canvas does NOT count — repaint or hide those regions.`;
+    parts.push(`Your previous design left ${(100 - verify.coverageFraction * 100).toFixed(0)}% of the page's regions in their ORIGINAL look (coverage=${verify.coverageFraction.toFixed(2)}). Every region must be part of the design: restyle it or set "hide": true on chrome that doesn't serve the aesthetic. Clashing unaccounted regions will be base-coated, but base-coat is a safety net — you must actively design the major clusters.`);
   }
   if (verify.accentFraction > MAX_ACCENT_FRACTION) {
-    return `Your previous design over-used the accent color (it covered ${(verify.accentFraction * 100).toFixed(0)}% of the page). Accent is EMPHASIS ONLY — a few primary elements. Keep most surfaces calm and establish clear hierarchy.`;
+    parts.push(`Your previous design over-used the accent color (${(verify.accentFraction * 100).toFixed(0)}% of the page). Accent is EMPHASIS ONLY — a few primary elements. Keep most surfaces calm.`);
   }
-  // over-framed
-  return `Your previous design framed almost everything (${(verify.framedFraction * 100).toFixed(0)}% of the page carries heavy borders/shadows). Frames belong on a FEW primary containers only — most content must stay unframed. Add hierarchy: primary vs secondary vs plain, and make the page BACKGROUND carry the aesthetic instead of bordering every cluster.`;
+  if (verify.framedFraction > 0.45) {
+    parts.push(`Your previous design framed almost everything (${(verify.framedFraction * 100).toFixed(0)}% carries heavy borders). Frames belong on a FEW primary containers only — make the page BACKGROUND carry the aesthetic instead of bordering every cluster.`);
+  }
+  return parts.join(' ALSO: ') || 'The previous design failed quality checks. Review the page perception and produce a complete, coherent redesign.';
 }
 
-/** Highest-changeScore attempt that passed the not-broken checks, or null. */
+/** Best attempt that passed not-broken checks, preferring ones that also pass
+ *  quality checks (covered/coherent/changed). Prevents shipping partial redesigns
+ *  when a better attempt exists. Scores by quality gates + changeScore. */
 export function bestNonBroken(attempts: Attempt[]): Attempt | null {
   let best: Attempt | null = null;
+  let bestScore = -1;
   for (const a of attempts) {
     if (!a.notBroken) continue;
-    if (!best || a.changeScore > best.changeScore) best = a;
+    const score = (a.changed ? 4 : 0) + (a.coherent ? 2 : 0) + (a.covered ? 1 : 0) + a.changeScore;
+    if (score > bestScore) { best = a; bestScore = score; }
   }
   return best;
 }

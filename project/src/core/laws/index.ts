@@ -9,9 +9,9 @@ import { parseColor, luminance } from '../../shared/color.ts';
  * guarantees safety, so every rule that matters lives here as data the engine
  * reads — never as scattered special-cases.
  *
- * Phase 1 is a PAINT-LAYER redesign: color, type, borders, radius, shadow,
- * backdrop, and safe inner spacing. Structural moves (width/position/margin/
- * display/flex/grid) are deliberately excluded here and owned by Phase 2.
+ * Phase 1 includes paint AND layout: color, type, borders, radius, shadow,
+ * backdrop, safe inner spacing, widths, grid/flex arrangement, and type scale.
+ * DOM moves and element injection are Phase 2+.
  */
 
 /**
@@ -164,7 +164,7 @@ export const BOX_GROWTH_KEYS = new Set([
 ]);
 
 /** Layout keys stripped by the overflow-repair pass (dropSizing / targeted clamp). */
-export const SIZING_KEYS = new Set(['width', 'flex', 'flexGrow', 'flexBasis', 'gridTemplateColumns', 'gridTemplateRows']);
+export const SIZING_KEYS = new Set(['width', 'minWidth', 'flex', 'flexGrow', 'flexBasis', 'gridTemplateColumns', 'gridTemplateRows']);
 
 /**
  * Viewport-safe type. A fontSize whose px-equivalent exceeds this is "display
@@ -217,26 +217,25 @@ function fontLengthToPx(v: string): number | null {
   }
 }
 
-/** Verify thresholds. */
+/** Verify thresholds. Round 7: strict — calibrated to enforce all-or-nothing, not ship-something. */
 export const MIN_CONTRAST_RATIO = 4.5;
-export const MAX_OVERFLOW_RATIO = 1.28;
-export const CONTRAST_SAMPLE_COUNT = 12;
+export const MAX_OVERFLOW_RATIO = 1.02;       // was 1.28 — 28% overflow was a visible scrollbar
+export const CONTRAST_SAMPLE_COUNT = 50;       // was 12 — body text must pass, not just headings
+export const CONTRAST_MAX_FAILURES = 2;        // ≤2 fail out of 50 samples
+export const CONTRAST_TOP_FAIL_COUNT = 10;     // top-N largest text that must ALL pass
 
 /**
- * Change/coherence thresholds. CALIBRATED from logged real runs: genuine
- * redesigns land ~0.6, pure recolors ~0.0. 0.18 keeps honest-but-subtle
- * redesigns passing while sending recolors back to the model with a critique. MAX_ACCENT_FRACTION caps how much of the
- * viewport a loud accent color may cover (kills "every link red").
+ * Change/coherence thresholds. Round 7: tightened to reject near-recolors.
+ * Genuine redesigns land ~0.6; 0.25 sends recolors (~0.0) and flat specs back.
  */
-export const MIN_CHANGE_SCORE = 0.18;
-export const MAX_ACCENT_FRACTION = 0.4;
+export const MIN_CHANGE_SCORE = 0.25;
+export const MAX_ACCENT_FRACTION = 0.15;       // was 0.4 — accent is RARE, not 40% of the page
 
 /**
- * Framed-area ceiling — the border/frame analogue of the accent guard. If nearly
- * every surface carries a heavy border/offset-shadow, the design has no hierarchy
- * (the "border everything" failure). Generous: only flags near-universal framing.
+ * Framed-area ceiling — 0.45 was 0.78. 2× stricter, doesn't kill card-grid designs
+ * (which frame 30-50% of clusters) but rejects "border everything" (78%+).
  */
-export const MAX_FRAMED_FRACTION = 0.78;
+export const MAX_FRAMED_FRACTION = 0.45;
 
 /** Two non-nested regions overlapping more than this fraction of the smaller = a layout collision. */
 export const MAX_REGION_OVERLAP = 0.35;
@@ -277,12 +276,14 @@ export const MAX_HIDDEN_HEIGHT_PX = 500;   // ...that are also tall
 export const MAX_HIDDEN_MEMBERS = 40;      // refuse hiding huge repeated clusters (likely content)
 
 /**
- * Coverage gate (verify). Fraction of the page's before-regions that must be
- * ADDRESSED by the design — repainted, moved/resized, or hidden. LENIENT start
- * (calibrate upward from real-run logs, never guess): a page where half the
- * regions still look original is not a redesign.
+ * Coverage gate (verify). Round 7: 0.85 was 0.5 — a page where 50% of regions
+ * still look original is NOT a redesign. 0.85 enforces all-or-nothing.
+ * Split: total (model + base-coat + hide) ≥ 0.85, model-only ≥ 0.40.
+ * The model coverage gate prevents the base-coat-only escape (a lazy spec that
+ * passes total coverage via base-coat alone, doing no real design work).
  */
-export const MIN_COVERAGE_FRACTION = 0.5;
+export const MIN_COVERAGE_FRACTION = 0.85;
+export const MIN_MODEL_COVERAGE_FRACTION = 0.40;
 
 /**
  * Perceptible paint change for coverage. A region only counts as "addressed by
@@ -319,7 +320,7 @@ export function luminanceCompatible(regionBg: string, canvasBg: string): boolean
  * cluster — long unbreakable strings (code identifiers, nav labels) would
  * otherwise bleed out of the narrowed block (Flex Intrinsic Overflow Law).
  */
-export const NARROWING_KEYS = new Set(['width', 'maxWidth', 'minWidth', 'gridTemplateColumns', 'columnCount', 'flexBasis']);
+export const NARROWING_KEYS = new Set(['width', 'maxWidth', 'minWidth', 'gridTemplateColumns', 'columnCount', 'flexBasis', 'flex']);
 
 /**
  * Minimum pixels per CSS column (Fix 3). columnCount is only accepted if
@@ -361,7 +362,7 @@ export function clampColumnCount(requested: number, containerWidthPx?: number): 
 export function normalizeGridTemplate(val: string, containerWidthPx?: number): string {
   const trimmed = val.trim();
   // Expand repeat(N, track) → N tracks for normalization
-  const repeatMatch = trimmed.match(/^repeat\((\d+),\s*(.+)\)$/i);
+  const repeatMatch = trimmed.match(/^repeat\((\d+|auto-fit|auto-fill),\s*(.+)\)$/i);
   if (repeatMatch) {
     const n = parseInt(repeatMatch[1]);
     const track = normalizeTrack(repeatMatch[2].trim(), containerWidthPx);

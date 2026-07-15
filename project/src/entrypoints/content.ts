@@ -85,7 +85,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
       if (reReasonsDone < MAX_REPAIR_ATTEMPTS) {
         reReasonsDone++;
         logDebug('PAID SECOND CALL — first-call prompt failed to account for all clusters');
-        const critique = `Your spec left ${comp.unaccounted.length} cluster(s) unaccounted: ${comp.unaccounted.slice(0, 24).join(', ')}. EVERY cluster handle in the COMPONENTS list MUST appear in your rules — restyle it (styles/layout), hide it ("hide": true), or explicitly keep it ("keep": true) if its original design already serves the aesthetic. A spec that ignores clusters is incomplete and will be rejected. Family-consistency reminder: if you restyle one cluster of a family (e.g. one group of links), restyle every cluster of that family in the same visual language.`;
+        const critique = `Your spec left ${comp.unaccounted.length} cluster(s) unaccounted: ${comp.unaccounted.slice(0, 24).join(', ')}. EVERY cluster handle in the COMPONENTS list MUST appear in your rules — restyle it (styles/layout) or hide it ("hide": true). Unaccounted clusters will be base-coated as a safety net, but you must actively design the major clusters. Family-consistency reminder: if you restyle one cluster of a family (e.g. one group of links), restyle every cluster of that family in the same visual language.`;
         const re = await askForSpec(intent, serialized, critique);
         if (re.ok && re.spec) {
           spec = re.spec;
@@ -102,21 +102,30 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   const attempts: Attempt[] = [];
   let lastVerify: VerifyResult | null = null;
 
+  // Build the set of handles the model explicitly addressed (for model coverage gate).
+  const modelAddressed = new Set<string>();
+  for (const rule of spec.rules) {
+    if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide) modelAddressed.add(rule.target);
+  }
+  if (spec.composition) {
+    for (const rule of spec.composition) {
+      if (rule.styles || rule.layout || rule.hide) modelAddressed.add(rule.target);
+    }
+  }
+
   for (let iter = 0; iter < 10; iter++) { // deterministic escalation is monotonic; cap is a safety net
     const compiled = compileSpec(spec, perception, options);
     const sanitized = sanitizeCss(compiled.css).css;
     if (!sanitized.trim()) { removeStyle(); markFailed('no styles'); return { ok: false, message: 'Produced no applicable styles.', spec, reasoning: spec.reasoning }; }
 
     applyStyle(sanitized);
-    // Wait one rAF tick: !important injection via appendChild needs a layout pass before
-    // getComputedStyle (used by verify's contrast + fingerprint) reflects the new values.
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
-    const verify = verifyStyle(before, spec.paletteMode);
+    const verify = verifyStyle(before, spec.paletteMode, modelAddressed);
     lastVerify = verify;
     const notBroken = verify.checks.notBlank && verify.checks.noOverflow && verify.checks.noOverlap && verify.checks.contrastOk;
-    attempts.push({ spec, css: sanitized, notBroken, changeScore: verify.changeScore });
-    logDebug(`iter ${iter}: rules=${compiled.rulesEmitted} baseCoat=${compiled.baseCoatCount} checks=${JSON.stringify(verify.checks)} change=${verify.changeScore.toFixed(3)} accent=${verify.accentFraction.toFixed(3)} framed=${verify.framedFraction.toFixed(3)} coverage=${verify.coverageFraction.toFixed(3)} bleeds=${verify.bleedTargets.length} squeezes=${verify.squeezeTargets.length} repeatedAccent=${verify.repeatedAccent}${compiled.droppedProps.length ? ' dropped=[' + compiled.droppedProps.slice(0, 12).join(',') + ']' : ''}`);
-    logDebug(`  detail: ${verify.details.join(' | ')}`); // per-region coverage verdicts + contrast fails, every run
+    attempts.push({ spec, css: sanitized, notBroken, changeScore: verify.changeScore, covered: verify.checks.covered, coherent: verify.checks.coherent, changed: verify.checks.changed });
+    logDebug(`iter ${iter}: rules=${compiled.rulesEmitted} baseCoat=${compiled.baseCoatCount} checks=${JSON.stringify(verify.checks)} change=${verify.changeScore.toFixed(3)} accent=${verify.accentFraction.toFixed(3)} framed=${verify.framedFraction.toFixed(3)} coverage=${verify.coverageFraction.toFixed(3)} modelCov=${verify.modelCoverageFraction.toFixed(3)} bleeds=${verify.bleedTargets.length} squeezes=${verify.squeezeTargets.length} repeatedAccent=${verify.repeatedAccent}${compiled.droppedProps.length ? ' dropped=[' + compiled.droppedProps.slice(0, 12).join(',') + ']' : ''}`);
+    logDebug(`  detail: ${verify.details.join(' | ')}`);
 
     if (verify.passed) break;
 
