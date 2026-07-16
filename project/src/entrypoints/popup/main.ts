@@ -114,6 +114,7 @@ transformBtn.addEventListener('click', async () => {
       metricsEl.className = 'metrics show';
       updateSiteStatus();
     } else {
+      $('webmorph-result').textContent = JSON.stringify(res);
       const kind = res.kind as string | undefined;
       const msg = (kind && ERROR_MESSAGES[kind]) ? ERROR_MESSAGES[kind] : (res.message || 'Transform failed.');
       showStatus(`✗ ${msg}`, 'err');

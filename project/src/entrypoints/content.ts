@@ -22,7 +22,18 @@ import { MAX_REPAIR_ATTEMPTS, logDebug } from '@/core/config';
 import type { DesignSpec } from '@/core/spec';
 import type { Perception } from '@/core/perceive';
 
-interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?: string; usage?: unknown; model?: string; }
+interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?: string; usage?: unknown; model?: string; callMs?: number; }
+
+export interface Ledger {
+  perceiveMs: number;
+  serializeChars: number;
+  modelCalls: { ms: number; promptTokens?: number }[];
+  compileMs: number;
+  applyMs: number;
+  verifyMs: number;
+  totalMs: number;
+  paidCalls: number;
+}
 
 export interface TransformOutcome {
   ok: boolean;
@@ -40,6 +51,7 @@ export interface TransformOutcome {
   model?: string;        // which model served the request
   usage?: unknown;       // token usage
   paidCalls?: number;    // paid model calls used
+  ledger?: Ledger;       // Round 8: stage-by-stage time breakdown
 }
 
 const APPLIED = 'webmorphApplied';
@@ -68,11 +80,19 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   const perception = perceive();
   activeShadowRoots = perception.shadowRoots;
   const serialized = serializePerception(perception);
+  const serializeChars = serialized.length;
   const before = captureLayoutFingerprint();
-  logDebug(`perceived ${perception.nodeCount} nodes -> ${perception.clusters.length} clusters (${perception.builtInMs}ms) ${perception.shadowRoots.length} shadow roots`);
+  logDebug(`perceived ${perception.nodeCount} nodes -> ${perception.clusters.length} clusters (${perception.builtInMs}ms) ${perception.shadowRoots.length} shadow roots serialize=${serializeChars}chars`);
+
+  const modelCalls: { ms: number; promptTokens?: number }[] = [];
 
   let specRes = await askForSpec(intent, serialized);
-  if (!specRes.ok || !specRes.spec) { markFailed(specRes.message || 'engine failed'); return { ok: false, kind: specRes.kind, message: specRes.message || 'Design engine failed.' }; }
+  if (specRes.callMs != null) modelCalls.push({ ms: specRes.callMs, promptTokens: (specRes.usage as { prompt_tokens?: number })?.prompt_tokens });
+  if (!specRes.ok || !specRes.spec) {
+    logDebug(`LEDGER perceive=${perception.builtInMs}ms serialize=${serializeChars}chars model=[${modelCalls.map((c) => `${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] total=${Date.now() - t0}ms paidCalls=${modelCalls.length} — FAILED ${specRes.kind ?? ''}`);
+    markFailed(specRes.message || 'engine failed');
+    return { ok: false, kind: specRes.kind, message: specRes.message || 'Design engine failed.', paidCalls: modelCalls.length, wallMs: Date.now() - t0 };
+  }
   let spec = specRes.spec;
   logDebug(`served by=${specRes.model ?? '?'} usage=${JSON.stringify(specRes.usage ?? {})}`);
   logDebug(`paletteMode=${spec.paletteMode ?? 'restrained(default)'} rules=${spec.rules.length} composition=${spec.composition?.length ?? 0} clusters=${perception.clusters.length}`);
@@ -89,6 +109,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
         logDebug('PAID SECOND CALL — completeness gate failed');
         const critique = comp.reason + ' Unaccounted clusters will be base-coated as a safety net, but you must actively design the major clusters.';
         const re = await askForSpec(intent, serialized, critique);
+        if (re.callMs != null) modelCalls.push({ ms: re.callMs, promptTokens: (re.usage as { prompt_tokens?: number })?.prompt_tokens });
         if (re.ok && re.spec) {
           spec = re.spec;
           const comp2 = checkCompleteness(spec, perception.handles);
@@ -114,15 +135,22 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   let options: CompileOptions = { paletteMode: spec.paletteMode };
   const attempts: Attempt[] = [];
   let lastVerify: VerifyResult | null = null;
+  let compileMsTotal = 0, applyMsTotal = 0, verifyMsTotal = 0;
 
   for (let iter = 0; iter < 10; iter++) {
+    const tcCompile = performance.now();
     const compiled = compileSpec(spec, perception, options);
+    compileMsTotal += performance.now() - tcCompile;
     const sanitized = sanitizeCss(compiled.css).css;
-    if (!sanitized.trim()) { removeStyleEverywhere(activeShadowRoots); markFailed('no styles'); return { ok: false, message: 'Produced no applicable styles.', spec, reasoning: spec.reasoning }; }
+    if (!sanitized.trim()) { removeStyleEverywhere(activeShadowRoots); markFailed('no styles'); return { ok: false, message: 'Produced no applicable styles.', spec, reasoning: spec.reasoning, paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 }; }
 
+    const tcApply = performance.now();
     applyStyleEverywhere(sanitized, activeShadowRoots);
+    applyMsTotal += performance.now() - tcApply;
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    const tcVerify = performance.now();
     const verify = verifyStyle(before, spec.paletteMode, modelAddressed);
+    verifyMsTotal += performance.now() - tcVerify;
     lastVerify = verify;
     const notBroken = verify.checks.notBlank && verify.checks.noOverflow && verify.checks.noOverlap && verify.checks.contrastOk;
     attempts.push({ spec, css: sanitized, notBroken, changeScore: verify.changeScore, covered: verify.checks.covered, coherent: verify.checks.coherent, changed: verify.checks.changed });
@@ -134,11 +162,11 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     const decision = planRepair(verify, options, reReasonsDone, spec.paletteMode);
     logDebug(`repair -> ${decision.action}: ${decision.reason}`);
 
-    if (decision.action === 'rollback') { removeStyleEverywhere(activeShadowRoots); markFailed('content blanked'); return failVerify(spec, verify); }
+    if (decision.action === 'rollback') { removeStyleEverywhere(activeShadowRoots); markFailed('content blanked'); return { ...failVerify(spec, verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 }; }
 
     if (decision.action === 'keepBest') {
       const best = bestNonBroken(attempts);
-      if (!best) { removeStyleEverywhere(activeShadowRoots); markFailed('nothing non-broken'); return failVerify(spec, verify); }
+      if (!best) { removeStyleEverywhere(activeShadowRoots); markFailed('nothing non-broken'); return { ...failVerify(spec, verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 }; }
       applyStyleEverywhere(best.css, activeShadowRoots);
       spec = best.spec;
       break;
@@ -149,14 +177,26 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
       logDebug(`PAID SECOND CALL — first-call prompt failed to prevent: ${failing}`);
       reReasonsDone++;
       const re = await askForSpec(intent, serialized, decision.critique);
+      if (re.callMs != null) modelCalls.push({ ms: re.callMs, promptTokens: (re.usage as { prompt_tokens?: number })?.prompt_tokens });
       if (re.ok && re.spec) { spec = re.spec; options = { paletteMode: spec.paletteMode }; continue; }
       const best = bestNonBroken(attempts);
       if (best) { applyStyleEverywhere(best.css, activeShadowRoots); spec = best.spec; break; }
-      removeStyleEverywhere(activeShadowRoots); markFailed('revision failed'); return failVerify(spec, verify);
+      removeStyleEverywhere(activeShadowRoots); markFailed('revision failed'); return { ...failVerify(spec, verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
     }
 
     options = decision.options;
   }
+
+  // Ledger — stage-by-stage time breakdown (Round 8: instrument before you fix).
+  const totalMs = Date.now() - t0;
+  const ledger: Ledger = {
+    perceiveMs: perception.builtInMs, serializeChars,
+    modelCalls, compileMs: Math.round(compileMsTotal),
+    applyMs: Math.round(applyMsTotal), verifyMs: Math.round(verifyMsTotal),
+    totalMs, paidCalls: 1 + reReasonsDone,
+  };
+  const modelMsStr = modelCalls.map((c) => `${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ');
+  logDebug(`LEDGER perceive=${ledger.perceiveMs}ms serialize=${serializeChars}chars model=[${modelMsStr}] compile=${ledger.compileMs}ms apply=${ledger.applyMs}ms verify=${ledger.verifyMs}ms total=${totalMs}ms paidCalls=${ledger.paidCalls}`);
 
   // Persist + defend + mark applied.
   const key = storageKey();
@@ -176,8 +216,8 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     perceiveMs: perception.builtInMs, clusters: perception.clusters.length,
     changeScore: lastVerify?.changeScore, accentFraction: lastVerify?.accentFraction,
     modelCoverageFraction: lastVerify?.modelCoverageFraction,
-    wallMs: Date.now() - t0, model: specRes.model, usage: specRes.usage,
-    paidCalls: 1 + reReasonsDone,
+    wallMs: totalMs, model: specRes.model, usage: specRes.usage,
+    paidCalls: 1 + reReasonsDone, ledger,
   };
 }
 

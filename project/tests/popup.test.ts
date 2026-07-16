@@ -27,22 +27,24 @@ interface SiteSpec {
 // childrens picture book, expensive quiet, editorial magazine, minimal brutalist,
 // calm night, retro terminal, 1920s newspaper, coffee shop, dark academia,
 // Swiss grid, glassmorphism, neobrutalism, industrial blueprint, parchment
-// manuscript, magazine spread, bold magazine spread.
+// manuscript, magazine spread, bold magazine spread, Japanese zen garden,
+// retro 8-bit pixel arcade, Art Nouveau Mucha poster, tropical resort brochure,
+// vintage travel poster.
 const SITES: SiteSpec[] = [
   { name: 'Wikipedia', url: 'https://en.wikipedia.org/wiki/Main_Page',
-    prompt: 'Japanese zen garden — muted sage greens, stone gray, bamboo textures, lots of whitespace, thin sans-serif type, subtle ink-brush accents',
+    prompt: 'Bauhaus workshop manifesto — primary red blue yellow geometry, thick black grid lines, clean sans-serif, functional circles and squares, stark asymmetry',
     isSPA: false, isShadowDOM: false },
   { name: 'MDN', url: 'https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties',
-    prompt: 'Retro 8-bit pixel arcade — blocky pixel fonts, primary colors on black, chunky borders, CRT scanline feel, game-UI panels',
+    prompt: 'Soviet constructivist poster — dramatic diagonal compositions, red black and cream, bold condensed sans-serif headlines, geometric block layouts',
     isSPA: false, isShadowDOM: false },
   { name: 'BBC', url: 'https://www.bbc.com/news',
-    prompt: 'Art Nouveau Mucha poster — flowing organic borders, warm gold and olive, elegant serif typography, botanical ornament frames',
+    prompt: 'Memphis design group postmodern — bright pink teal and yellow, bold zigzag and squiggle patterns, geometric shapes scattered playfully, asymmetric blocks',
     isSPA: false, isShadowDOM: false },
   { name: 'GitHub', url: 'https://github.com/torvalds/linux',
-    prompt: 'Tropical resort brochure — warm coral and turquoise, palm leaf patterns, relaxed rounded type, generous spacing, sunset gradients',
+    prompt: 'Cottagecore botanical journal — muted sage green and lavender, hand-drawn leaf and vine margins, warm serif typography, pressed-flower feel, generous whitespace',
     isSPA: true, isShadowDOM: false },
   { name: 'YouTube', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-    prompt: 'Vintage travel poster — bold flat colors, geometric shapes, condensed sans-serif headlines, stamp textures, adventurous spirit',
+    prompt: 'Frida Kahlo Mexican folk art — vibrant terracotta and cobalt blue, ornate talavera tile borders, passionate serif headlines, marigold accent flowers',
     isSPA: true, isShadowDOM: true },
 ];
 
@@ -130,11 +132,14 @@ async function run() {
     const status = r.applied ? 'APPLIED' : r.timedOut ? 'TIMEOUT' : 'FAILED';
     console.log(`  ${r.name}: ${status} change=${r.changeScore.toFixed(3)} coverage=${r.coverageFraction.toFixed(3)} modelCov=${r.modelCoverageFraction.toFixed(3)} paidCalls=${r.paidCalls} dropLayout=${r.dropLayout} wall=${(r.wallMs / 1000).toFixed(1)}s${r.errorKind ? ` kind=${r.errorKind}` : ''}`);
 
+    if (r.timedOut) { console.log(`    ✗ FAIL: timed out — WASTED MONEY (paid call returned nothing)`); failures++; }
     if (!r.applied && !r.timedOut) failures++;
+    if (r.applied && r.wallMs > 120000) { console.log(`    ✗ FAIL: wall-clock ${(r.wallMs / 1000).toFixed(1)}s > 120s`); failures++; }
     if (r.applied && r.changeScore < 0.25) { console.log(`    ✗ FAIL: changeScore ${r.changeScore.toFixed(3)} < 0.25`); failures++; }
     if (r.applied && r.coverageFraction < 0.85) { console.log(`    ✗ FAIL: coverageFraction ${r.coverageFraction.toFixed(3)} < 0.85`); failures++; }
     if (r.applied && r.dropLayout) { console.log(`    ✗ FAIL: dropLayout fired`); failures++; }
     if (r.applied && r.paidCalls > 2) { console.log(`    ✗ FAIL: paidCalls ${r.paidCalls} > 2`); failures++; }
+    if (r.applied && r.paidCalls > 1) console.log(`    ⚠ WARN: paidCalls ${r.paidCalls} > 1 — reReason fired (prompt failure signal)`);
   }
 
   const appliedCount = results.filter((r) => r.applied).length;
@@ -202,7 +207,7 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
       await page.waitForFunction(
         () => document.documentElement.hasAttribute('data-webmorph-applied') ||
               document.documentElement.hasAttribute('data-webmorph-failed'),
-        null, { timeout: 480000 },
+        null, { timeout: 130000 },
       );
       markerSeen = true;
       result.applied = await page.evaluate(() => document.documentElement.hasAttribute('data-webmorph-applied'));
@@ -243,6 +248,11 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
         if (parsed.verify) {
           console.log(`  checks: ${JSON.stringify(parsed.verify.checks)}`);
           console.log(`  coverage: ${result.coverageFraction.toFixed(3)} modelCov: ${result.modelCoverageFraction.toFixed(3)} change: ${result.changeScore.toFixed(3)}`);
+        }
+        if (parsed.ledger) {
+          const l = parsed.ledger;
+          const mcStr = l.modelCalls.map((c: { ms: number; promptTokens?: number }) => `${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ');
+          console.log(`  LEDGER perceive=${l.perceiveMs}ms serialize=${l.serializeChars}chars model=[${mcStr}] compile=${l.compileMs}ms apply=${l.applyMs}ms verify=${l.verifyMs}ms total=${l.totalMs}ms paidCalls=${l.paidCalls}`);
         }
       } catch { /* leave defaults */ }
     }

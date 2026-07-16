@@ -16,8 +16,8 @@ export type ReasonError =
   | 'bad_output' | 'context_limit' | 'invalid_request' | 'unknown';
 
 export type StyleSpecResult =
-  | { ok: true; spec: DesignSpec; usage?: unknown; model?: string }
-  | { ok: false; kind: ReasonError; message: string };
+  | { ok: true; spec: DesignSpec; usage?: unknown; model?: string; callMs?: number }
+  | { ok: false; kind: ReasonError; message: string; callMs?: number };
 
 export interface StyleSpecRequest {
   intent: string;
@@ -127,9 +127,9 @@ export async function requestStyleSpec({ intent, perception, apiKey, critique }:
     } catch (err) {
       const e = err as { name?: string; message?: string };
       const s = ((Date.now() - t0) / 1000).toFixed(1);
-      if (e.name === 'AbortError') { logDebug(`model=${model} TIMEOUT after ${s}s`); return { ok: false, kind: 'timeout', message: `Design engine timed out after ${s}s. Try again.` }; }
+      if (e.name === 'AbortError') { logDebug(`model=${model} TIMEOUT after ${s}s`); return { ok: false, kind: 'timeout', message: `Design engine timed out after ${s}s. Try again.`, callMs: Date.now() - t0 }; }
       if (transient < AI_CONFIG.maxTransientRetries) { transient++; logDebug(`model=${model} network error after ${s}s (${e.message}) — transient retry ${transient}`); await sleep(AI_CONFIG.baseBackoffMs * 2 ** (transient - 1)); continue; }
-      return { ok: false, kind: 'network', message: `Network error: ${e.message}` };
+      return { ok: false, kind: 'network', message: `Network error: ${e.message}`, callMs: Date.now() - t0 };
     }
     const s = ((Date.now() - t0) / 1000).toFixed(1);
 
@@ -158,7 +158,7 @@ export async function requestStyleSpec({ intent, perception, apiKey, critique }:
     const validated = validateSpec(parsed);
     if (!validated.ok || !validated.spec) { logDebug(`model=${model} invalid spec: ${validated.error}`); return { ok: false, kind: 'bad_output', message: `Invalid design spec: ${validated.error}` }; }
     logDebug(`spec produced by ${model}: ${validated.spec.rules.length} rules`);
-    return { ok: true, spec: validated.spec, usage: data.usage, model };
+    return { ok: true, spec: validated.spec, usage: data.usage, model, callMs: Date.now() - t0 };
   }
 }
 
