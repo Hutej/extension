@@ -99,12 +99,11 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       const readable = parsed ? pickReadableText(parsed) : canvasText;
       if (readable) decls.push(`color: ${readable} !important;`);
     }
-    // ponytail: overflow-x hidden is a safety net for non-clustered elements with
-    // fixed widths that the compiler can't clamp. The model should design within the
-    // viewport, but this prevents a horizontal scrollbar from ruining an otherwise
-    // good design. Only added when a canvas is set (a redesign is in progress).
+    // ponytail: overflow-x:clip prevents horizontal scrollbar WITHOUT affecting
+    // overflow-y (unlike overflow-x:hidden which forces overflow-y:auto per CSS
+    // spec, potentially clipping content). clip is supported in Chrome 90+.
     if (spec.canvas?.background) {
-      decls.push('overflow-x: hidden !important;');
+      decls.push('overflow-x: clip !important;');
     }
     if (decls.length) { blocks.push(`html, body {\n${indent(decls)}\n}`); rulesEmitted++; }
 
@@ -409,6 +408,7 @@ function planAccentKeep(spec: DesignSpec, byHandle: Map<string, Cluster>, percep
 function hideRefusal(c: Cluster): string | null {
   if (c.role === 'main' || c.role === 'article') return 'primary-content';
   if (c.layout.isPassiveWrapper || c.layout.isOpaqueWrapper) return 'wrapper';
+  if (c.rect.h > 300) return 'tall-content'; // content sections are tall; chrome is short
   if (c.layout.widthRatio >= MAX_HIDDEN_WIDTH_RATIO && c.rect.h > MAX_HIDDEN_HEIGHT_PX) return 'page-scale';
   if (c.count > MAX_HIDDEN_MEMBERS) return 'repeated-content';
   return null;

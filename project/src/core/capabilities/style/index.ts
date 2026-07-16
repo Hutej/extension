@@ -65,6 +65,14 @@ export function buildDeclarations(input: StyleDecls, opts: BuildOptions): BuildR
     // Display type set via the styles bag is clamped to fit its container too.
     if (cssProp === 'font-size') val = clampDisplayFont(val, opts.containerWidthPx);
 
+    // Opacity floor: never let the model make a cluster invisible via opacity:0.
+    // That's content destruction — same as hide but bypassing hideRefusal. If the
+    // model wants to remove something, it must use "hide": true (which has guards).
+    if (cssProp === 'opacity') {
+      const num = parseFloat(val);
+      if (!isNaN(num) && num < 0.1) { dropped.push(`opacity(${val}→dropped)`); continue; }
+    }
+
     out.set(cssProp, val);
     if (BACKGROUND_KEYS.has(key)) { setsBackground = true; bgValue = val; }
     if (key === 'color') hasExplicitColor = true;

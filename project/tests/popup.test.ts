@@ -265,7 +265,7 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
 
     // Log WebMorph console output for debugging failures.
     if (wmLogs.length) {
-      const relevant = wmLogs.filter((l) => l.includes('PAID') || l.includes('repair') || l.includes('FAILED') || l.includes('INCOMPLETE') || l.includes('dropLayout') || l.includes('rollback') || l.includes('keepBest') || l.includes('iter 0'));
+      const relevant = wmLogs.filter((l) => l.includes('PAID') || l.includes('repair') || l.includes('FAILED') || l.includes('INCOMPLETE') || l.includes('dropLayout') || l.includes('rollback') || l.includes('keepBest') || l.includes('iter 0') || l.includes('collapsed') || l.includes('LEDGER'));
       if (relevant.length) console.log(`  logs: ${relevant.slice(0, 5).join(' | ')}`);
     }
 

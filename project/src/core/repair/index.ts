@@ -48,6 +48,16 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
     return { action: 'rollback', options: prev, reason: 'content blanked' };
   }
 
+  // Content collapsed (but not fully blanked) — regions shrank to near-zero.
+  // Try dropping hides first (display:none causes collapse), then sizing
+  // (maxHeight/height constraints), then all layout (flex/grid collapse).
+  if (!c.contentCollapsed) {
+    if (!prev.dropHides) return { action: 'recompile', options: { ...prev, dropHides: true }, reason: 'content collapsed — drop hides first' };
+    if (!prev.dropSizing) return { action: 'recompile', options: { ...prev, dropSizing: true }, reason: 'content collapsed — drop sizing (height constraints)' };
+    if (!prev.dropLayout) return { action: 'recompile', options: { ...prev, dropLayout: true }, reason: 'content collapsed — drop all layout (flex/grid collapse)' };
+    return { action: 'rollback', options: prev, reason: 'content collapsed unfixable' };
+  }
+
   // ── Deterministic fixes: each targets ONLY the check it can actually fix, and
   // each is applied at most once (gated on the option not yet being set). We take
   // the highest-priority available fix, recompile, and re-verify — so multiple

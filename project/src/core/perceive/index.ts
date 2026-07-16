@@ -372,13 +372,21 @@ function findContentWidthFromClusters(clusters: Cluster[], vpW: number): number 
 
 export function captureLayoutFingerprint(): LayoutFingerprint {
   const regions: LayoutFingerprint['regions'] = [];
-  const els = Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`)).slice(0, 60);
-  for (const el of els) {
+  // Deduplicate by handle — one representative per cluster, not per element.
+  // Without this, multi-element clusters (count > 1) waste slots and push
+  // below-fold handles past the cap, hiding their collapse from verify.
+  const seenHandles = new Set<string>();
+  const allEls = Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`));
+  for (const el of allEls) {
+    if (regions.length >= 200) break;
+    const h = el.getAttribute(CLUSTER_ATTR) || '';
+    if (!h || seenHandles.has(h)) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 1 && r.height < 1) continue;
     const cs = getComputedStyle(el);
+    seenHandles.add(h);
     regions.push({
-      handle: el.getAttribute(CLUSTER_ATTR) || '',
+      handle: h,
       x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height),
       paint: cs.backgroundColor + '|' + cs.color,
     });

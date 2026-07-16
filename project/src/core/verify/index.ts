@@ -20,7 +20,7 @@ const OVERLAP_TOLERANCE = 2; // allow minor noise / a couple of self-inflicted-b
 
 export interface VerifyResult {
   passed: boolean;
-  checks: { notBlank: boolean; noOverflow: boolean; noOverlap: boolean; contrastOk: boolean; changed: boolean; coherent: boolean; covered: boolean };
+  checks: { notBlank: boolean; noOverflow: boolean; noOverlap: boolean; contrastOk: boolean; changed: boolean; coherent: boolean; covered: boolean; contentCollapsed: boolean; contentVisible: boolean };
   changeScore: number;
   accentFraction: number;
   framedFraction: number;
@@ -49,6 +49,39 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   } else {
     details.push('no primary content node found — page may be blank');
   }
+
+  // 1b) Content not collapsed — no significant before-region shrank to near-zero.
+  // Catches the "blank void below the fold" failure: content containers that
+  // were >100px tall before but <20px after (or gone entirely) = collapsed.
+  const afterByHandle = new Map<string, LayoutFingerprint['regions'][number]>();
+  for (const r of after.regions) if (!afterByHandle.has(r.handle)) afterByHandle.set(r.handle, r);
+  const collapsedRegions: string[] = [];
+  for (const ra of before.regions) {
+    if (ra.h < 100) continue;
+    const rb = afterByHandle.get(ra.handle);
+    if (!rb || rb.h < 20) collapsedRegions.push(ra.handle);
+  }
+  const contentCollapsed = collapsedRegions.length === 0;
+  if (!contentCollapsed) {
+    const detail = collapsedRegions.slice(0, 6).map((h) => {
+      const rb = before.regions.find((r) => r.handle === h);
+      const ra = afterByHandle.get(h);
+      return `${h}(${rb?.h ?? '?'}px→${ra?.h ?? 'gone'}px)`;
+    }).join(', ');
+    details.push(`content collapsed: ${collapsedRegions.length} region(s): ${detail}`);
+  }
+
+  // 1c) Content visible — no significant cluster has opacity near-zero.
+  // Catches the model using opacity:0 to hide content (bypasses hideRefusal).
+  let invisibleCount = 0;
+  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
+    if (el.hasAttribute('data-webmorph-ui')) continue;
+    const rect = el.getBoundingClientRect();
+    if (rect.width < 50 || rect.height < 50) continue;
+    if (parseFloat(getComputedStyle(el).opacity) < 0.1) invisibleCount++;
+  }
+  const contentVisible = invisibleCount === 0;
+  if (!contentVisible) details.push(`${invisibleCount} cluster(s) have opacity < 0.1 — content may be invisible`);
 
   // 2) No horizontal blow-out — DELTA: flag only overflow WE introduced, not pre-existing.
   const scrollW = document.documentElement.scrollWidth;
@@ -105,8 +138,8 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   const bleedTargets = findBleedTargets();
   const squeezeTargets = findSqueezeTargets();
 
-  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered;
-  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered }, changeScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, contrastTargets: [...contrastFlags], repeatedAccent, details };
+  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible;
+  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible }, changeScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, contrastTargets: [...contrastFlags], repeatedAccent, details };
 }
 
 /**

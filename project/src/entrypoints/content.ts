@@ -152,7 +152,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     const verify = verifyStyle(before, spec.paletteMode, modelAddressed);
     verifyMsTotal += performance.now() - tcVerify;
     lastVerify = verify;
-    const notBroken = verify.checks.notBlank && verify.checks.noOverflow && verify.checks.noOverlap && verify.checks.contrastOk;
+    const notBroken = verify.checks.notBlank && verify.checks.noOverflow && verify.checks.noOverlap && verify.checks.contrastOk && verify.checks.contentCollapsed && verify.checks.contentVisible;
     attempts.push({ spec, css: sanitized, notBroken, changeScore: verify.changeScore, covered: verify.checks.covered, coherent: verify.checks.coherent, changed: verify.checks.changed });
     logDebug(`iter ${iter}: rules=${compiled.rulesEmitted} baseCoat=${compiled.baseCoatCount} checks=${JSON.stringify(verify.checks)} change=${verify.changeScore.toFixed(3)} accent=${verify.accentFraction.toFixed(3)} framed=${verify.framedFraction.toFixed(3)} coverage=${verify.coverageFraction.toFixed(3)} modelCov=${verify.modelCoverageFraction.toFixed(3)} bleeds=${verify.bleedTargets.length} squeezes=${verify.squeezeTargets.length} repeatedAccent=${verify.repeatedAccent}${compiled.droppedProps.length ? ' dropped=[' + compiled.droppedProps.slice(0, 12).join(',') + ']' : ''}`);
     logDebug(`  detail: ${verify.details.join(' | ')}`);
