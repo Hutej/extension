@@ -32,11 +32,12 @@ export interface RepairDecision {
 export interface Attempt {
   spec: DesignSpec;
   css: string;
-  notBroken: boolean;   // notBlank && noOverflow && noOverlap && contrastOk
+  notBroken: boolean;   // notBlank && noOverflow && noOverlap && contrastOk && contentCollapsed && contentVisible
   changeScore: number;
   covered: boolean;
   coherent: boolean;
   changed: boolean;
+  contentCollapsed: boolean;
 }
 
 export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasonsDone: number, paletteMode?: 'restrained' | 'vivid'): RepairDecision {
@@ -55,7 +56,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
     if (!prev.dropHides) return { action: 'recompile', options: { ...prev, dropHides: true }, reason: 'content collapsed — drop hides first' };
     if (!prev.dropSizing) return { action: 'recompile', options: { ...prev, dropSizing: true }, reason: 'content collapsed — drop sizing (height constraints)' };
     if (!prev.dropLayout) return { action: 'recompile', options: { ...prev, dropLayout: true }, reason: 'content collapsed — drop all layout (flex/grid collapse)' };
-    return { action: 'rollback', options: prev, reason: 'content collapsed unfixable' };
+    return { action: 'keepBest', options: prev, reason: 'content collapsed — keeping best available (prefer non-collapsed)' };
   }
 
   // ── Deterministic fixes: each targets ONLY the check it can actually fix, and
@@ -84,25 +85,29 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // Overflow / overlap: squeeze repair FIRST (drop columnCount on squeezed
   // clusters — free, targeted, kills the one-char-per-line failure), then
   // word-break for text bleeds, then targeted clamp on geometric overflow,
-  // then blanket dropLayout (last resort).
+  // then blanket dropLayout (last resort). Overflow-specific repairs run
+  // ONLY when !noOverflow — when !noOverlap alone, skip straight to keepBest
+  // (overlap is caused by layout shifting, not by sizing growth).
   if (!c.noOverflow || !c.noOverlap) {
-    if (verify.squeezeTargets.length && !prev.squeezeTargets) {
-      return { action: 'recompile', options: { ...prev, squeezeTargets: verify.squeezeTargets }, reason: `squeeze repair on ${verify.squeezeTargets.length} cluster(s): ${verify.squeezeTargets.slice(0, 6).join(',')}` };
-    }
-    if (verify.bleedTargets.length && !prev.wordBreakTargets) {
-      return { action: 'recompile', options: { ...prev, wordBreakTargets: verify.bleedTargets }, reason: `word-break on ${verify.bleedTargets.length} bleeding cluster(s): ${verify.bleedTargets.slice(0, 6).join(',')}` };
-    }
-    // Clip repair: when word-break didn't fix the bleeds (nowrap children or
-    // fixed-width elements that can't wrap), clip the overflow. Less destructive
-    // than dropLayout — preserves the entire layout.
-    if (verify.bleedTargets.length && prev.wordBreakTargets && !prev.clipOverflowTargets) {
-      return { action: 'recompile', options: { ...prev, clipOverflowTargets: verify.bleedTargets }, reason: `clip overflow on ${verify.bleedTargets.length} still-bleeding cluster(s) (word-break ineffective)` };
-    }
-    if (verify.overflowTargets.length && !prev.clampTargets) {
-      return { action: 'recompile', options: { ...prev, clampTargets: verify.overflowTargets }, reason: `clamp ${verify.overflowTargets.length} overflowing cluster(s): ${verify.overflowTargets.slice(0, 6).join(',')}` };
-    }
-    if (!prev.dropLayout) {
-      return { action: 'recompile', options: { ...prev, dropLayout: true }, reason: 'LOUD: dropLayout fired — design collapsed to paint (failure signal)' };
+    if (!c.noOverflow) {
+      if (verify.squeezeTargets.length && !prev.squeezeTargets) {
+        return { action: 'recompile', options: { ...prev, squeezeTargets: verify.squeezeTargets }, reason: `squeeze repair on ${verify.squeezeTargets.length} cluster(s): ${verify.squeezeTargets.slice(0, 6).join(',')}` };
+      }
+      if (verify.bleedTargets.length && !prev.wordBreakTargets) {
+        return { action: 'recompile', options: { ...prev, wordBreakTargets: verify.bleedTargets }, reason: `word-break on ${verify.bleedTargets.length} bleeding cluster(s): ${verify.bleedTargets.slice(0, 6).join(',')}` };
+      }
+      // Clip repair: when word-break didn't fix the bleeds (nowrap children or
+      // fixed-width elements that can't wrap), clip the overflow. Less destructive
+      // than dropLayout — preserves the entire layout.
+      if (verify.bleedTargets.length && prev.wordBreakTargets && !prev.clipOverflowTargets) {
+        return { action: 'recompile', options: { ...prev, clipOverflowTargets: verify.bleedTargets }, reason: `clip overflow on ${verify.bleedTargets.length} still-bleeding cluster(s) (word-break ineffective)` };
+      }
+      if (verify.overflowTargets.length && !prev.clampTargets) {
+        return { action: 'recompile', options: { ...prev, clampTargets: verify.overflowTargets }, reason: `clamp ${verify.overflowTargets.length} overflowing cluster(s): ${verify.overflowTargets.slice(0, 6).join(',')}` };
+      }
+      if (!prev.dropLayout) {
+        return { action: 'recompile', options: { ...prev, dropLayout: true }, reason: 'LOUD: dropLayout fired — design collapsed to paint (failure signal)' };
+      }
     }
     // Overflow truly unfixable and nothing else pending — keep the best attempt.
     if (c.changed && c.coherent && c.covered) return { action: 'keepBest', options: prev, reason: 'structural fixes exhausted' };
@@ -151,8 +156,15 @@ export function bestNonBroken(attempts: Attempt[]): Attempt | null {
     if (score > bestScore) { best = a; bestScore = score; }
   }
   if (best) return best;
-  // Fallback: highest changeScore among all attempts (don't remove a mostly-good design).
+  // Fallback: prefer attempts where content is NOT collapsed, then highest changeScore.
+  // A design with 2 small collapsed sidebar items is better than no design at all.
   let fallback: Attempt | null = null;
+  for (const a of attempts) {
+    if (a.contentCollapsed) continue;
+    if (!fallback || a.changeScore > fallback.changeScore) fallback = a;
+  }
+  if (fallback) return fallback;
+  // Last resort: highest changeScore among all attempts.
   for (const a of attempts) {
     if (!fallback || a.changeScore > fallback.changeScore) fallback = a;
   }
