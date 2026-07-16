@@ -433,13 +433,13 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   const textCluster = cluster({ handle: 'ctxt', selector: '[data-wm-c="ctxt"]', samples: ['some text content'] });
   const pText = perception([textCluster]);
   const rNarrow = compileSpec({ reasoning: '', rules: [{ target: 'ctxt', layout: { maxWidth: '300px' } }] }, pText);
-  assert.ok(rNarrow.css.includes('overflow-wrap: break-word'), 'word-break: narrowing a text container emits overflow-wrap (prevention)');
+  assert.ok(rNarrow.css.includes('overflow-wrap: anywhere'), 'word-break: narrowing a text container emits overflow-wrap (prevention)');
 
   // Non-text cluster narrowed -> overflow-wrap STILL emitted (harmless, inherited by text descendants)
   const imgCluster = cluster({ handle: 'cimg', selector: '[data-wm-c="cimg"]', samples: [], tag: 'img', role: 'img' });
   const pImg = perception([imgCluster]);
   const rImg = compileSpec({ reasoning: '', rules: [{ target: 'cimg', layout: { maxWidth: '300px' } }] }, pImg);
-  assert.ok(rImg.css.includes('overflow-wrap: break-word'), 'word-break: non-text container also gets overflow-wrap (inherited by descendants)');
+  assert.ok(rImg.css.includes('overflow-wrap: anywhere'), 'word-break: non-text container also gets overflow-wrap (inherited by descendants)');
 
   // Non-narrowing layout (gap only) on a text cluster -> no overflow-wrap
   const rGap = compileSpec({ reasoning: '', rules: [{ target: 'ctxt', layout: { gap: '20px' } }] }, pText);

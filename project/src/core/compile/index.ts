@@ -408,8 +408,8 @@ function planAccentKeep(spec: DesignSpec, byHandle: Map<string, Cluster>, percep
 function hideRefusal(c: Cluster): string | null {
   if (c.role === 'main' || c.role === 'article') return 'primary-content';
   if (c.layout.isPassiveWrapper || c.layout.isOpaqueWrapper) return 'wrapper';
-  if (c.rect.h > 300) return 'tall-content'; // content sections are tall; chrome is short
   if (c.layout.widthRatio >= MAX_HIDDEN_WIDTH_RATIO && c.rect.h > MAX_HIDDEN_HEIGHT_PX) return 'page-scale';
+  if (c.rect.h > 300) return 'tall-content'; // content sections are tall; chrome is short
   if (c.count > MAX_HIDDEN_MEMBERS) return 'repeated-content';
   return null;
 }
