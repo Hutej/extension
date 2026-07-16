@@ -28,6 +28,7 @@ export interface CompileOptions {
   clampTargets?: string[]; // targeted overflow repair: strip growth-sizing on ONLY these offending clusters
   contrastTargets?: string[]; // targeted contrast repair: force readable text on ONLY these flagged handles
   wordBreakTargets?: string[]; // targeted bleed repair: overflow-wrap on ONLY these bleeding clusters (Mech 3)
+  clipOverflowTargets?: string[]; // targeted bleed repair: overflow-x:clip on clusters where word-break didn't fix the bleed
   squeezeTargets?: string[];  // targeted squeeze repair: drop columnCount + relax width on ONLY these squeezed clusters (Fix 3)
   paletteMode?: 'restrained' | 'vivid'; // declared palette intent — vivid lifts the area cap (Mech 4)
 }
@@ -153,7 +154,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
         });
         droppedProps.push(...r.dropped);
         decls.push(...r.decls);
-        if (!clampThis && hasNarrowingKey(rule.layout)) decls.push('overflow-wrap: break-word !important;');
+        if (!clampThis && hasNarrowingKey(rule.layout)) decls.push('overflow-wrap: anywhere !important;');
       }
       if (decls.length) { blocks.push(`${cluster.selector} {\n${indent(decls)}\n}`); rulesEmitted++; }
     }
@@ -228,11 +229,13 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       droppedProps.push(...r.dropped);
       decls.push(...r.decls);
       // Mechanism 3 (a) — prevention: narrowing a container also emits
-      // overflow-wrap:break-word so long unbreakable strings (code identifiers,
-      // nav labels) can't bleed out of the narrowed block. overflow-wrap is
-      // inherited, so it covers grid/flex children and wrapper descendants too.
+      // overflow-wrap:anywhere + overflow-x:clip so long unbreakable strings
+      // (code identifiers, nav labels) and fixed-width children can't bleed out
+      // of the narrowed block. 'anywhere' breaks aggressively (vs 'break-word'
+      // which only breaks as last resort); clip prevents bleed detection from
+      // flagging children with white-space:nowrap that ignore overflow-wrap.
       if (!clampThis && cluster && hasNarrowingKey(rule.layout)) {
-        decls.push('overflow-wrap: break-word !important;');
+        decls.push('overflow-wrap: anywhere !important;');
       }
     }
 
@@ -289,6 +292,19 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       const cl = byHandle.get(h);
       if (!cl) continue;
       blocks.push(`${cl.selector} {\n  overflow-wrap: anywhere !important;\n}`);
+      rulesEmitted++;
+    }
+  }
+
+  // 3d-b) Targeted clip repair. When word-break didn't fix the bleed (caused by
+  // white-space:nowrap children or fixed-width elements that can't wrap), clip
+  // the overflow on those clusters. Less destructive than dropLayout — preserves
+  // the entire layout, only clips the bleeding cluster's horizontal overflow.
+  if (opts.clipOverflowTargets?.length) {
+    for (const h of new Set(opts.clipOverflowTargets)) {
+      const cl = byHandle.get(h);
+      if (!cl) continue;
+      blocks.push(`${cl.selector} {\n  overflow-x: clip !important;\n}`);
       rulesEmitted++;
     }
   }

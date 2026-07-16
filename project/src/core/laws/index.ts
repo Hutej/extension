@@ -316,7 +316,7 @@ export function luminanceCompatible(regionBg: string, canvasBg: string): boolean
 
 /**
  * Layout keys that narrow a text-bearing container (Mechanism 3). When the
- * compiler emits any of these, it also emits overflow-wrap:break-word on that
+ * compiler emits any of these, it also emits overflow-wrap:anywhere + overflow-x:clip
  * cluster — long unbreakable strings (code identifiers, nav labels) would
  * otherwise bleed out of the narrowed block (Flex Intrinsic Overflow Law).
  */

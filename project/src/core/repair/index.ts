@@ -82,6 +82,12 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
     if (verify.bleedTargets.length && !prev.wordBreakTargets) {
       return { action: 'recompile', options: { ...prev, wordBreakTargets: verify.bleedTargets }, reason: `word-break on ${verify.bleedTargets.length} bleeding cluster(s): ${verify.bleedTargets.slice(0, 6).join(',')}` };
     }
+    // Clip repair: when word-break didn't fix the bleeds (nowrap children or
+    // fixed-width elements that can't wrap), clip the overflow. Less destructive
+    // than dropLayout — preserves the entire layout.
+    if (verify.bleedTargets.length && prev.wordBreakTargets && !prev.clipOverflowTargets) {
+      return { action: 'recompile', options: { ...prev, clipOverflowTargets: verify.bleedTargets }, reason: `clip overflow on ${verify.bleedTargets.length} still-bleeding cluster(s) (word-break ineffective)` };
+    }
     if (verify.overflowTargets.length && !prev.clampTargets) {
       return { action: 'recompile', options: { ...prev, clampTargets: verify.overflowTargets }, reason: `clamp ${verify.overflowTargets.length} overflowing cluster(s): ${verify.overflowTargets.slice(0, 6).join(',')}` };
     }
