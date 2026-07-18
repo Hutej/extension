@@ -114,11 +114,11 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     const comp = checkCompleteness(spec, perception.handles);
     if (!comp.ok) {
       logDebug(`INCOMPLETE SPEC — ${comp.reason}`);
-      if (reReasonsDone < MAX_REPAIR_ATTEMPTS) {
+      if (reReasonsDone < MAX_REPAIR_ATTEMPTS && Date.now() - t0 < 60000) {
         reReasonsDone++;
         logDebug('PAID SECOND CALL — completeness gate failed');
         const critique = comp.reason + ' Unaccounted clusters will be base-coated as a safety net, but you must actively design the major clusters.';
-        const re = await askForSpec(intent, serialized, critique);
+        const re = await askForSpec(intent, serialized, critique, Math.max(15000, 115000 - (Date.now() - t0)));
         if (re.callMs != null) modelCalls.push({ ms: re.callMs, promptTokens: (re.usage as { prompt_tokens?: number })?.prompt_tokens });
         if (re.ok && re.spec) {
           spec = re.spec;
@@ -183,10 +183,20 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     }
 
     if (decision.action === 'reReason') {
+      // Latency guard: if the 1st call already consumed >60s (YouTube's 1st call ran
+      // ~116s near its 120s timeout), a 2nd call — even capped — pushes total past the
+      // 130s harness marker. Skip it, keepBest, ship what we have. No timeout, no
+      // wasted 2nd call. The reReason is a prompt-failure signal anyway.
+      if (Date.now() - t0 > 60000) {
+        logDebug('reReason skipped — elapsed > 60s (latency budget); keepBest instead');
+        const best = bestNonBroken(attempts);
+        if (best) { applyStyleEverywhere(best.css, activeShadowRoots); spec = best.spec; break; }
+        removeStyleEverywhere(activeShadowRoots); markFailed('latency budget — no revision'); return { ...failVerify(spec, verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+      }
       const failing = Object.entries(verify.checks).filter(([, v]) => !v).map(([k]) => k).join(',');
       logDebug(`PAID SECOND CALL — first-call prompt failed to prevent: ${failing}`);
       reReasonsDone++;
-      const re = await askForSpec(intent, serialized, decision.critique);
+      const re = await askForSpec(intent, serialized, decision.critique, Math.max(15000, 115000 - (Date.now() - t0)));
       if (re.callMs != null) modelCalls.push({ ms: re.callMs, promptTokens: (re.usage as { prompt_tokens?: number })?.prompt_tokens });
       if (re.ok && re.spec) { spec = re.spec; options = { paletteMode: spec.paletteMode }; continue; }
       const best = bestNonBroken(attempts);
@@ -238,9 +248,9 @@ function failVerify(spec: DesignSpec, verify: VerifyResult): TransformOutcome {
   return { ok: false, message: 'Result failed checks: ' + verify.details.slice(0, 3).join('; '), spec, reasoning: spec.reasoning, verify };
 }
 
-function askForSpec(intent: string, perception: string, critique?: string): Promise<SpecResponse> {
+function askForSpec(intent: string, perception: string, critique?: string, timeoutMs?: number): Promise<SpecResponse> {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'styleSpec', intent, perception, critique }, (response) => {
+    chrome.runtime.sendMessage({ action: 'styleSpec', intent, perception, critique, timeoutMs }, (response) => {
       if (chrome.runtime.lastError || !response) resolve({ ok: false, message: chrome.runtime.lastError?.message || 'No response from design engine.' });
       else resolve(response as SpecResponse);
     });

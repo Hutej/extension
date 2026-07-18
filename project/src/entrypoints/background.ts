@@ -15,7 +15,7 @@ export default defineBackground(() => {
           return;
         }
         try {
-          const res = await requestStyleSpec({ intent: message.intent, perception: message.perception, apiKey, critique: message.critique });
+          const res = await requestStyleSpec({ intent: message.intent, perception: message.perception, apiKey, critique: message.critique, timeoutMs: message.timeoutMs });
           sendResponse(res);
         } catch (err) {
           sendResponse({ ok: false, kind: 'unknown', message: (err as Error).message || 'Design engine error.' });

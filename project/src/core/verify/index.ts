@@ -30,6 +30,7 @@ export interface VerifyResult {
   overflowTargets: string[];
   bleedTargets: string[];
   squeezeTargets: string[];
+  collapseTargets: string[];   // handles of regions that collapsed (>100px→<20px) — for targeted repair
   contrastTargets: string[];
   contrastTargetBgs: Record<string, string>;   // handle -> effective bg the flagged text sits on
   repeatedAccent: boolean;
@@ -162,8 +163,12 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   const bleedTargets = findBleedTargets();
   const squeezeTargets = findSqueezeTargets();
 
-  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible;
-  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible, layoutReshaped }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), repeatedAccent, details };
+  // layoutReshaped is enforced: a recolor (columns + content width unchanged) fails
+  // passed, so the loop doesn't break and the regenerative reReason fires with the
+  // "reshape the structure" critique. Calibrated from 3 grid runs: Wikipedia/GitHub
+  // recolors showed layoutReshaped=false while passing every other check.
+  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible && layoutReshaped;
+  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible, layoutReshaped }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, collapseTargets: [...collapsedRegions], contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), repeatedAccent, details };
 }
 
 /**

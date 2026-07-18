@@ -31,6 +31,7 @@ export interface CompileOptions {
   wordBreakTargets?: string[]; // targeted bleed repair: overflow-wrap on ONLY these bleeding clusters (Mech 3)
   clipOverflowTargets?: string[]; // targeted bleed repair: overflow-x:clip on clusters where word-break didn't fix the bleed
   squeezeTargets?: string[];  // targeted squeeze repair: drop columnCount + relax width on ONLY these squeezed clusters (Fix 3)
+  collapseTargets?: string[]; // targeted collapse repair: drop layout on ONLY these collapsed regions (preserves the rest of the design)
   paletteMode?: 'restrained' | 'vivid'; // declared palette intent — vivid lifts the area cap (Mech 4)
 }
 
@@ -144,7 +145,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
         droppedProps.push(...r.dropped);
         decls.push(...r.decls);
       }
-      if (rule.layout) {
+      if (rule.layout && !opts.collapseTargets?.includes(rule.target)) {
         const clampThis = opts.dropSizing || (opts.clampTargets?.includes(rule.target) ?? false) || (opts.squeezeTargets?.includes(rule.target) ?? false);
         const r = buildLayoutDeclarations(rule.layout, {
           isConstraintOwner: cluster.layout.isContainer ?? false,
@@ -215,7 +216,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       decls.push(...r.decls);
     }
 
-    if (rule.layout && !opts.dropLayout) {
+    if (rule.layout && !opts.dropLayout && !opts.collapseTargets?.includes(rule.target)) {
       // Targeted overflow repair: strip growth-sizing on ONLY the offending
       // clusters, leaving every other cluster's layout intact (vs the blanket
       // dropLayout that collapsed the whole redesign into a recolor).

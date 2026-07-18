@@ -24,6 +24,7 @@ export interface StyleSpecRequest {
   perception: string;
   apiKey: string;
   critique?: string; // regenerative-repair feedback appended to the user message
+  timeoutMs?: number; // per-call override (used to cap a reReason so total stays < budget)
 }
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
@@ -104,13 +105,15 @@ Respond with exactly this JSON:
  * HTTP retries are reserved for TRANSIENT faults (429/5xx). A 400 that rejects
  * response_format/reasoning_effort drops those params and retries once.
  */
-export async function requestStyleSpec({ intent, perception, apiKey, critique }: StyleSpecRequest): Promise<StyleSpecResult> {
+export async function requestStyleSpec({ intent, perception, apiKey, critique, timeoutMs: callTimeout }: StyleSpecRequest): Promise<StyleSpecResult> {
   let userContent = `USER REQUEST: ${intent}\n\nRUNTIME PAGE PERCEPTION:\n${perception}`;
   if (critique) userContent += `\n\nREVISION REQUIRED — your previous attempt was rejected:\n${critique}`;
 
   const model = AI_CONFIG.styleModel;
   const reasoning = isReasoningModel(model);
-  const timeout = reasoning ? AI_CONFIG.timeoutMs : AI_CONFIG.fallbackTimeoutMs;
+  // A reReason passes a reduced timeout so the 2nd call can't push total past the
+  // ~120s budget (YouTube timeout root cause: an unbounded 2nd call after a ~50s 1st).
+  const timeout = callTimeout ?? (reasoning ? AI_CONFIG.timeoutMs : AI_CONFIG.fallbackTimeoutMs);
   let useResponseFormat = true;
   let useReasoningEffort = true;
   let transient = 0;

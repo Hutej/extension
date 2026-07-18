@@ -54,9 +54,19 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // (maxHeight/height constraints), then all layout (flex/grid collapse).
   if (!c.contentCollapsed) {
     if (!prev.dropHides) return { action: 'recompile', options: { ...prev, dropHides: true }, reason: 'content collapsed — drop hides first' };
+    // Targeted: drop layout on ONLY the collapsed region(s), preserving the rest of
+    // the design. The blanket dropSizing below nukes ALL layout (turns a real reshape
+    // into a recolor) — try the surgical fix first.
+    if (verify.collapseTargets.length && !prev.collapseTargets) {
+      return { action: 'recompile', options: { ...prev, collapseTargets: verify.collapseTargets }, reason: `targeted collapse repair on ${verify.collapseTargets.length} region(s): ${verify.collapseTargets.slice(0, 6).join(',')}` };
+    }
     if (!prev.dropSizing) return { action: 'recompile', options: { ...prev, dropSizing: true }, reason: 'content collapsed — drop sizing (height constraints)' };
     if (!prev.dropLayout) return { action: 'recompile', options: { ...prev, dropLayout: true }, reason: 'content collapsed — drop all layout (flex/grid collapse)' };
-    return { action: 'keepBest', options: prev, reason: 'content collapsed — keeping best available (prefer non-collapsed)' };
+    // Collapse unfixable (often a parent's layout squeezed the region). DON'T return
+    // keepBest here — fall through so contrast/accent/overflow repairs can still fix
+    // what's fixable. The keepBest at the end of planRepair catches the rest. This
+    // prevents a single unfixable collapse from blocking every other repair (the BBC
+    // case: accent=1.000 + low contrast went unfixed because collapse monopolized).
   }
 
   // ── Deterministic fixes: each targets ONLY the check it can actually fix, and
@@ -114,8 +124,8 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   }
 
   // ── Regenerative tier: quality failures a deterministic pass can't fix
-  // (flat / still-incoherent after trim / over-framed / under-covered).
-  if (!c.changed || !c.coherent || !c.covered) {
+  // (flat / still-incoherent after trim / over-framed / under-covered / no reshape).
+  if (!c.changed || !c.coherent || !c.covered || !c.layoutReshaped) {
     if (reReasonsDone >= MAX_REPAIR_ATTEMPTS) return { action: 'keepBest', options: prev, reason: 'reReason budget exhausted' };
     return { action: 'reReason', options: prev, critique: critiqueFor(verify), reason: 'regenerate for quality' };
   }
@@ -128,6 +138,9 @@ function critiqueFor(verify: VerifyResult): string {
   const parts: string[] = [];
   if (!verify.checks.changed) {
     parts.push(`Your previous design changed almost NO layout (changeScore=${verify.changeScore.toFixed(2)}). A recolor is not a redesign. You MUST alter arrangement AND the page background: change container/content widths (maxWidth + marginInline:auto), columns/spacing scale, type scale, AND set a deliberate canvas background distinct from the site default.`);
+  }
+  if (!verify.checks.layoutReshaped) {
+    parts.push(`Your previous design did NOT reshape the structure — column count and content width are unchanged (a recolor). You MUST change the column arrangement (gridTemplateColumns) and/or the content width (maxWidth) so the layout visibly differs from the original. A color swap on stock layout is a FAILURE.`);
   }
   if (verify.repeatedAccent) {
     parts.push(`Your previous design painted the same accent color on every member of a repeated cluster. This is an absolute law: NEVER use an identical accent on every row of a repeated cluster. Treat repeated items as calm secondary surfaces; reserve the accent for singular, prominent regions.`);
