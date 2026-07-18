@@ -20,8 +20,9 @@ const OVERLAP_TOLERANCE = 2; // allow minor noise / a couple of self-inflicted-b
 
 export interface VerifyResult {
   passed: boolean;
-  checks: { notBlank: boolean; noOverflow: boolean; noOverlap: boolean; contrastOk: boolean; changed: boolean; coherent: boolean; covered: boolean; contentCollapsed: boolean; contentVisible: boolean };
+  checks: { notBlank: boolean; noOverflow: boolean; noOverlap: boolean; contrastOk: boolean; changed: boolean; coherent: boolean; covered: boolean; contentCollapsed: boolean; contentVisible: boolean; layoutReshaped: boolean };
   changeScore: number;
+  layoutReshapedScore: number;   // Round 9: structural-change signal (columns + content width + region widths)
   accentFraction: number;
   framedFraction: number;
   coverageFraction: number;         // total: model + base-coat + hide
@@ -30,6 +31,7 @@ export interface VerifyResult {
   bleedTargets: string[];
   squeezeTargets: string[];
   contrastTargets: string[];
+  contrastTargetBgs: Record<string, string>;   // handle -> effective bg the flagged text sits on
   repeatedAccent: boolean;
   details: string[];
 }
@@ -101,11 +103,33 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   // 4) Contrast sane. Collect the specific cluster handles that carry flagged
   // low-contrast text so forceContrast can fix exactly those (Fix 2).
   const contrastFlags = new Set<string>();
-  const contrastOk = checkContrast(details, contrastFlags);
+  const contrastTargetBgs = new Map<string, string>();
+  const contrastOk = checkContrast(details, contrastFlags, contrastTargetBgs);
 
   // 5) Layout actually changed (lenient).
   const changeScore = fingerprintDelta(before, after);
   const changed = changeScore >= MIN_CHANGE_SCORE;
+
+  // 5b) STRUCTURAL reshape — the recolor-killer. changeScore blends paint-jitter
+  // and padding shifts, so a recolor can pass it. This measures the two signals
+  // that distinguish a real redesign from a recolor: did the column count change,
+  // did the content width change materially, did major regions change width?
+  // Round 9: LOG ONLY this run — calibrate the threshold from real data before
+  // adding it to `passed` (enforce second).
+  const columnsReshaped = before.columnCount !== after.columnCount;
+  const wBefore = before.contentMaxWidthPx, wAfter = after.contentMaxWidthPx;
+  const contentWidthChangedRel = (wBefore && wAfter) ? Math.abs(wAfter - wBefore) / wBefore : 0;
+  let widthShared = 0, widthChanged = 0;
+  for (const ra of before.regions) {
+    const rb = afterByHandle.get(ra.handle);
+    if (!rb) continue;
+    widthShared++;
+    if (Math.abs(ra.w - rb.w) > 24) widthChanged++;
+  }
+  const regionWidthChangedFrac = widthShared ? widthChanged / widthShared : 0;
+  const layoutReshapedScore = clamp01((columnsReshaped ? 0.4 : 0) + Math.min(0.4, contentWidthChangedRel) + regionWidthChangedFrac * 0.2);
+  const layoutReshaped = columnsReshaped || contentWidthChangedRel > 0.2 || regionWidthChangedFrac > 0.4;
+  details.push(`layoutReshaped=${layoutReshaped} score=${layoutReshapedScore.toFixed(3)} cols=${before.columnCount}→${after.columnCount} contentW=${wBefore ?? '?'}→${wAfter ?? '?'} (${(contentWidthChangedRel * 100).toFixed(0)}%) regionWidthChanged=${(regionWidthChangedFrac * 100).toFixed(0)}%`);
 
   // 6) Coherence: sparing accent (area, restrained only) + non-uniform framing +
   // the absolute repeated-accent law (never identical accent on every member of
@@ -139,7 +163,7 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   const squeezeTargets = findSqueezeTargets();
 
   const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible;
-  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible }, changeScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, contrastTargets: [...contrastFlags], repeatedAccent, details };
+  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible, layoutReshaped }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), repeatedAccent, details };
 }
 
 /**
@@ -390,7 +414,7 @@ function measureFramedClusterFraction(): number {
 
 // ── contrast ───────────────────────────────────────────────────────
 
-function checkContrast(details: string[], targets: Set<string>): boolean {
+function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<string, string>): boolean {
   // Largest type first: display/hero text is the most visible place to fail.
   const candidates = Array.from(document.querySelectorAll('h1, h2, h3, h4, p, li, td, a, span, blockquote'))
     .filter((el) => !el.hasAttribute('data-webmorph-ui') && (el.textContent || '').trim().length >= 5)
@@ -408,11 +432,19 @@ function checkContrast(details: string[], targets: Set<string>): boolean {
     // WCAG: 4.5:1 for normal text, 3.0:1 for large text (≥18px or ≥14px bold).
     const isLarge = fs >= 18 || (fs >= 14 && parseInt(getComputedStyle(el).fontWeight) >= 700);
     const threshold = isLarge ? 3.0 : MIN_CONTRAST_RATIO;
-    if (contrastRatio(fg, effectiveBackground(el)) < threshold) {
+    const eb = effectiveBackground(el);
+    if (contrastRatio(fg, eb) < threshold) {
       failed++;
       if (checked <= CONTRAST_TOP_FAIL_COUNT) failedTop++;
       const h = el.closest('[data-wm-c]')?.getAttribute('data-wm-c');
-      if (h) targets.add(h);
+      if (h) {
+        targets.add(h);
+        // Capture the EFFECTIVE background the text actually sits on (walked up
+        // the parent chain) — the repair needs this, not the handle's own bg, or
+        // it picks a readable color against the wrong surface (root cause of the
+        // persistent contrast failure: text on an ancestor's painted panel).
+        targetBgs.set(h, `rgb(${Math.round(eb[0])},${Math.round(eb[1])},${Math.round(eb[2])})`);
+      }
       details.push(`low contrast on "${(el.textContent || '').trim().slice(0, 24)}"`);
     }
   }

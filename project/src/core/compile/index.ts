@@ -15,7 +15,7 @@ import type { DesignSpec, StyleDecls, LayoutDecls } from '../spec';
 import type { Perception, Cluster } from '../perceive';
 import { buildDeclarations } from '../capabilities/style/index.ts';
 import { buildLayoutDeclarations } from '../capabilities/structure/index.ts';
-import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, NARROWING_KEYS, luminanceCompatible } from '../laws/index.ts';
+import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, luminanceCompatible } from '../laws/index.ts';
 import { parseColor, colorfulness, pickReadableText } from '../../shared/color.ts';
 
 export interface CompileOptions {
@@ -27,6 +27,7 @@ export interface CompileOptions {
   trimAccent?: boolean;   // repair: strip accent bg from repeated/low-prominence clusters (over-accent)
   clampTargets?: string[]; // targeted overflow repair: strip growth-sizing on ONLY these offending clusters
   contrastTargets?: string[]; // targeted contrast repair: force readable text on ONLY these flagged handles
+  contrastTargetBgs?: Record<string, string>; // effective bg each flagged handle's text sits on (from verify's parent-chain walk)
   wordBreakTargets?: string[]; // targeted bleed repair: overflow-wrap on ONLY these bleeding clusters (Mech 3)
   clipOverflowTargets?: string[]; // targeted bleed repair: overflow-x:clip on clusters where word-break didn't fix the bleed
   squeezeTargets?: string[];  // targeted squeeze repair: drop columnCount + relax width on ONLY these squeezed clusters (Fix 3)
@@ -138,7 +139,8 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       }
       const decls: string[] = [];
       if (rule.styles) {
-        const r = buildDeclarations(rule.styles, { mode: 'base', defaultText: canvasText, forceContrast: opts.forceContrast, contrastBg: canvasBg, containerWidthPx: cluster.rect.w, varMap: perception.cssVarMap });
+        const styles = stripImageBg(rule.styles, cluster.style.hasBgImage, droppedProps, rule.target);
+        const r = buildDeclarations(styles, { mode: 'base', defaultText: canvasText, forceContrast: opts.forceContrast, contrastBg: canvasBg, containerWidthPx: cluster.rect.w, varMap: perception.cssVarMap });
         droppedProps.push(...r.dropped);
         decls.push(...r.decls);
       }
@@ -153,7 +155,11 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
         });
         droppedProps.push(...r.dropped);
         decls.push(...r.decls);
-        if (!clampThis && hasNarrowingKey(rule.layout)) decls.push('overflow-wrap: anywhere !important;');
+        // ponytail: NO preventive overflow-wrap on narrowed containers. `anywhere`
+        // collapses min-content to 1 char, letting flex/grid squeeze text columns
+        // to a few characters and break every word ("PROTES TS IN UKRAIN E's").
+        // Genuine bleeds are caught by verify's bleedTargets and repaired with
+        // break-word (last-resort only) — see the wordBreakTargets block below.
       }
       if (decls.length) { blocks.push(`${cluster.selector} {\n${indent(decls)}\n}`); rulesEmitted++; }
     }
@@ -192,6 +198,9 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       // background (and the coupled text color, which would be unreadable on the
       // canvas). Deliberate accent blocks stay; repeated/low-prominence ones calm down.
       if (accentKeep && !accentKeep.has(rule.target)) { styles = stripKeys(styles, ACCENT_STRIP_KEYS); droppedProps.push(`trimAccent(${rule.target})`); }
+      // Content-image protection: a cluster whose own bg is a url() image (thumbnail)
+      // must never receive a solid background (would paint over the image).
+      styles = stripImageBg(styles, cluster?.style.hasBgImage ?? false, droppedProps, rule.target);
       const r = buildDeclarations(styles, {
         mode: 'base',
         isNativeControl: cluster?.isNativeControl,
@@ -227,15 +236,9 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       });
       droppedProps.push(...r.dropped);
       decls.push(...r.decls);
-      // Mechanism 3 (a) — prevention: narrowing a container also emits
-      // overflow-wrap:anywhere + overflow-x:clip so long unbreakable strings
-      // (code identifiers, nav labels) and fixed-width children can't bleed out
-      // of the narrowed block. 'anywhere' breaks aggressively (vs 'break-word'
-      // which only breaks as last resort); clip prevents bleed detection from
-      // flagging children with white-space:nowrap that ignore overflow-wrap.
-      if (!clampThis && cluster && hasNarrowingKey(rule.layout)) {
-        decls.push('overflow-wrap: anywhere !important;');
-      }
+      // ponytail: NO preventive overflow-wrap on narrowed containers (see
+      // composition-rule note above). `anywhere` was destroying prose by
+      // collapsing min-content; bleeds are repaired targeted, post-verify.
     }
 
     if (decls.length) { blocks.push(`${selector} {\n${indent(decls)}\n}`); rulesEmitted++; }
@@ -274,23 +277,30 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
     for (const h of new Set(opts.contrastTargets)) {
       const cl = byHandle.get(h);
       if (!cl) continue;
-      const parsed = parseColor(specBg.get(h) ?? cl.style.background) ?? canvasParsed;
+      // Priority: the EFFECTIVE bg verify's parent-chain walk captured (the real
+      // surface the text sits on — usually an ancestor's painted panel, not the
+      // handle's own bg), then the rule's bg, then the cluster's original bg, then canvas.
+      const parsed = parseColor(opts.contrastTargetBgs?.[h] ?? specBg.get(h) ?? cl.style.background) ?? canvasParsed;
       const readable = parsed ? pickReadableText(parsed) : '#111111';
       blocks.push(`${cl.selector} {\n  color: ${readable} !important;\n}`);
       rulesEmitted++;
     }
   }
 
-  // 3d) Targeted word-break repair (Mechanism 3b). Bleeding clusters get
-  // overflow-wrap:anywhere directly on their selector — 'anywhere' breaks long
-  // unbreakable strings regardless of overflow-x:visible (unlike 'break-word'
-  // which only breaks as a last resort). Emitted late so it wins source-order.
-  // Free, deterministic, runs before any structural repair step.
+  // 3d) Targeted word-break repair. Bleeding clusters (long unbreakable strings
+  // in a narrowed container with overflow:visible) get overflow-wrap:break-word
+  // directly on their selector. break-word breaks a word ONLY as a last resort
+  // (when it cannot fit on its own line) and PRESERVES min-content = longest
+  // word, so it fixes genuine unbreakable tokens (URLs, code identifiers) without
+  // destroying normal prose and without re-introducing the column squeeze.
+  // Emitted late so it wins source-order. Free, deterministic, before structural
+  // repair. `anywhere` was used here before — it collapsed min-content to 1 char
+  // and let flex/grid squeeze every column to a few characters (BBC mutilation).
   if (opts.wordBreakTargets?.length) {
     for (const h of new Set(opts.wordBreakTargets)) {
       const cl = byHandle.get(h);
       if (!cl) continue;
-      blocks.push(`${cl.selector} {\n  overflow-wrap: anywhere !important;\n}`);
+      blocks.push(`${cl.selector} {\n  overflow-wrap: break-word !important;\n}`);
       rulesEmitted++;
     }
   }
@@ -331,6 +341,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
     for (const cl of perception.clusters) {
       if (addressed.has(cl.handle)) continue;
       if (!cl.hasSolidBg) continue;               // transparent — shows canvas, no clash
+      if (cl.style.hasBgImage) continue;          // content image — never paint over it
       if (cl.rect.w < 24 || cl.rect.h < 24) continue;  // too small to read as a "strip"
       if (luminanceCompatible(cl.style.background, canvasBg)) continue;  // blends with canvas
       coatSelectors.push(cl.selector);
@@ -425,15 +436,31 @@ function stripKeys(decls: StyleDecls | LayoutDecls, keys: string[]): StyleDecls 
   return out;
 }
 
+/** Keys that would REPLACE a content image (background shorthand resets background-image;
+ *  backgroundImage would swap it). Refused on clusters whose own bg is a url() image. */
+const IMAGE_BG_KEYS = ['background', 'backgroundColor', 'backgroundImage'];
+
+/** Protect content images: on a cluster whose own background is a url() image (a
+ *  thumbnail), drop any background/backgroundImage the model set — a solid
+ *  `background` shorthand would paint over the image. The model shapes images via
+ *  filter/border/radius/shadow/aspect/objectFit instead (prompt-enforced + now
+ *  compiler-enforced). Returns the (possibly stripped) styles bag. */
+function stripImageBg(styles: StyleDecls, hasBgImage: boolean, droppedProps: string[], handle: string): StyleDecls {
+  if (!hasBgImage) return styles;
+  let out = styles;
+  for (const k of IMAGE_BG_KEYS) {
+    if (k in out) {
+      if (out === styles) out = { ...styles };
+      delete out[k];
+      droppedProps.push(`imageBg(${handle}:${k} dropped — content image protected)`);
+    }
+  }
+  return out;
+}
+
 function firstNonEmpty(...vals: (string | undefined)[]): string {
   for (const v of vals) if (v && v.trim()) return v.trim();
   return '';
-}
-
-/** Whether a layout decl bag contains any container-narrowing key (Mech 3). */
-function hasNarrowingKey(layout: LayoutDecls): boolean {
-  for (const k of Object.keys(layout)) if (NARROWING_KEYS.has(k)) return true;
-  return false;
 }
 
 /**

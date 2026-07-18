@@ -68,4 +68,4 @@
 - A known-recolorer fallback model is a worse failure than an honest error. No fallback chain.
 - Color parsing blind to hsl/oklch/var() lets the contrast gate false-pass illegible text. ParseColor handles hsl; var() resolved via perception's cssVarMap.
 - Reasoning models spend heavily on thinking: keep reasoning effort low, bake ALL requirements into ONE system prompt, never rely on paid retry loops.
-- `overflow-wrap: anywhere` (not `break-word`) for targeted repair — it breaks regardless of `overflow-x: visible`.
+- `overflow-wrap: break-word` (NOT `anywhere`) for TARGETED bleed repair only — emitted post-verify on clusters that actually bleed. `anywhere` collapses min-content to 1 char and lets flex/grid squeeze every column to a few characters, breaking every word mid-word (the BBC mutilation). No preventive overflow-wrap is emitted on narrowed containers; min-content = longest word keeps columns readable.

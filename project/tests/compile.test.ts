@@ -27,6 +27,7 @@ function cluster(over: Partial<Cluster>): Cluster {
     style: {
       background: 'rgb(255,255,255)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px',
       boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block',
+      hasBgImage: false,
     },
     ...over,
   };
@@ -35,10 +36,12 @@ function cluster(over: Partial<Cluster>): Cluster {
 function perception(clusters: Cluster[], canvasBg = 'rgb(255,255,255)', regions: Perception['skeleton']['regions'] = []): Perception {
   return {
     builtInMs: 1, nodeCount: clusters.length, cssVars: [], cssVarMap: {},
+    site: { host: 'example.com', title: 'Test' },
     canvas: { bg: canvasBg, color: 'rgb(0,0,0)', fontFamily: 'sans-serif', fontSize: '16px' },
     clusters, skeleton: { regions, contentMaxWidthPx: 800, columnCount: 2 },
     handles: new Set(clusters.map((c) => c.handle)),
     opaqueWrappers: new Set<string>(),
+    scrollables: [],
     viewport: { w: 1280, h: 900 },
     shadowRoots: [],
   };
@@ -336,7 +339,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   // the targeted path reads the handle's OWN painted bg and forces light text.
   const origDark = cluster({
     handle: 'corig', selector: '[data-wm-c="corig"]',
-    style: { background: 'rgb(17,17,17)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block' },
+    style: { background: 'rgb(17,17,17)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: false },
   });
   const r2 = compileSpec(
     { reasoning: '', rules: [{ target: 'corig', styles: { color: '#000000' } }] },
@@ -426,28 +429,34 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 }
 
 // ─────────────────────────────── Mech 3: word-break bleed law ───────────────────────────────
-// (a) Prevention: narrowing a text-bearing container emits overflow-wrap.
-// (b) Targeted repair: wordBreakTargets emits overflow-wrap on the bleeding cluster.
+// (a) NO preventive overflow-wrap: narrowing a container must NOT emit overflow-wrap.
+//     `anywhere` collapsed min-content to 1 char and squeezed columns to a few
+//     characters, breaking every word ("PROTES TS IN UKRAIN E's"). Bleeds are
+//     repaired targeted, post-verify, with break-word (last-resort only).
+// (b) Targeted repair: wordBreakTargets emits overflow-wrap:break-word on the bleeding cluster.
 {
-  // Prevention: text-bearing cluster narrowed -> overflow-wrap emitted
+  // Prevention REMOVED: text-bearing cluster narrowed -> NO overflow-wrap emitted
   const textCluster = cluster({ handle: 'ctxt', selector: '[data-wm-c="ctxt"]', samples: ['some text content'] });
   const pText = perception([textCluster]);
   const rNarrow = compileSpec({ reasoning: '', rules: [{ target: 'ctxt', layout: { maxWidth: '300px' } }] }, pText);
-  assert.ok(rNarrow.css.includes('overflow-wrap: anywhere'), 'word-break: narrowing a text container emits overflow-wrap (prevention)');
+  assert.ok(!rNarrow.css.includes('overflow-wrap'), 'word-break: narrowing a text container does NOT emit overflow-wrap (prevention removed — it was destroying prose)');
 
-  // Non-text cluster narrowed -> overflow-wrap STILL emitted (harmless, inherited by text descendants)
+  // Non-text cluster narrowed -> also NO overflow-wrap
   const imgCluster = cluster({ handle: 'cimg', selector: '[data-wm-c="cimg"]', samples: [], tag: 'img', role: 'img' });
   const pImg = perception([imgCluster]);
   const rImg = compileSpec({ reasoning: '', rules: [{ target: 'cimg', layout: { maxWidth: '300px' } }] }, pImg);
-  assert.ok(rImg.css.includes('overflow-wrap: anywhere'), 'word-break: non-text container also gets overflow-wrap (inherited by descendants)');
+  assert.ok(!rImg.css.includes('overflow-wrap'), 'word-break: non-text container also gets no preventive overflow-wrap');
 
   // Non-narrowing layout (gap only) on a text cluster -> no overflow-wrap
   const rGap = compileSpec({ reasoning: '', rules: [{ target: 'ctxt', layout: { gap: '20px' } }] }, pText);
   assert.ok(!rGap.css.includes('overflow-wrap'), 'word-break: gap-only layout (no narrowing) gets no overflow-wrap');
 
-  // Targeted repair: wordBreakTargets emits overflow-wrap:anywhere on exactly the bleeding cluster
+  // Targeted repair: wordBreakTargets emits overflow-wrap:break-word (NOT anywhere)
+  // on exactly the bleeding cluster. break-word breaks only as last resort and
+  // preserves min-content = longest word (no column squeeze).
   const rRepair = compileSpec({ reasoning: '', rules: [{ target: 'ctxt', styles: { background: '#111' } }] }, pText, { wordBreakTargets: ['ctxt'] });
-  assert.ok(/overflow-wrap: anywhere !important/.test(rRepair.css), 'word-break: targeted repair emits overflow-wrap:anywhere on bleeding cluster');
+  assert.ok(/overflow-wrap: break-word !important/.test(rRepair.css), 'word-break: targeted repair emits overflow-wrap:break-word (not anywhere) on bleeding cluster');
+  assert.ok(!rRepair.css.includes('overflow-wrap: anywhere'), 'word-break: targeted repair must NOT use anywhere (destroys prose)');
 }
 
 // ─────────────────────────────── Mech 4: intent-declared palette ───────────────────────────────
@@ -571,7 +580,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   const header = cluster({
     handle: 'chdr', selector: '[data-wm-c="chdr"]', role: 'banner',
     rect: { w: 1280, h: 64 }, layout: layout({ widthRatio: 1.0 }),
-    style: { background: 'rgb(255,255,255)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block' },
+    style: { background: 'rgb(255,255,255)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: false },
   });
   const main = cluster({ handle: 'cmain', selector: '[data-wm-c="cmain"]', role: 'main', rect: { w: 800, h: 600 }, layout: layout({ widthRatio: 0.62 }) });
   const p = perception([header, main], 'rgb(255,255,255)', [
@@ -596,7 +605,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   const creamHeader = cluster({
     handle: 'chdr2', selector: '[data-wm-c="chdr2"]', role: 'banner',
     rect: { w: 1280, h: 64 }, layout: layout({ widthRatio: 1.0 }),
-    style: { background: 'rgb(250,245,235)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block' },
+    style: { background: 'rgb(250,245,235)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: false },
   });
   const p2 = perception([creamHeader, main], 'rgb(250,245,235)', [
     { role: 'banner', handle: 'chdr2', widthRatio: 1.0, order: 0, rect: { w: 1280, h: 64 } },
@@ -621,6 +630,55 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   };
   const r3 = compileSpec(spec3, p);
   assert.strictEqual(r3.baseCoatCount, 0, 'baseCoat: addressed header NOT base-coated (model handled it)');
+}
+
+// ─────────────────────────────── Content image protection ───────────────────────────────
+// A cluster whose own background is a url() image (a thumbnail) must never receive
+// a solid `background` (the shorthand resets background-image → paints over it),
+// nor a replacement `backgroundImage`. The model shapes images via filter/border/
+// radius/shadow/aspect/objectFit instead. base-coat also skips image clusters.
+{
+  // Image cluster: model sets background + backgroundImage → BOTH dropped
+  const thumb = cluster({
+    handle: 'cthumb', selector: '[data-wm-c="cthumb"]',
+    style: { background: 'rgb(20,20,20)', color: 'rgb(255,255,255)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '14px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: true },
+  });
+  const pImg = perception([thumb]);
+  const rImg = compileSpec(
+    { reasoning: '', canvas: { background: '#0a0a0a', color: '#f5f5f5' },
+      rules: [{ target: 'cthumb', styles: { background: '#ff0000', backgroundImage: 'url("x.png")', filter: 'sepia(0.4)', borderRadius: '8px' } }] },
+    pImg,
+  );
+  const thumbBlock = rImg.css.slice(rImg.css.indexOf('[data-wm-c="cthumb"]'), rImg.css.indexOf('[data-wm-c="cthumb"]') + 300);
+  assert.ok(!/background:\s*#ff0000/.test(thumbBlock), 'image: solid background NOT emitted over a content image');
+  assert.ok(!/background-image:\s*url/.test(thumbBlock), 'image: replacement backgroundImage NOT emitted over a content image');
+  assert.ok(thumbBlock.includes('filter:'), 'image: non-background treatment (filter) still allowed');
+  assert.ok(thumbBlock.includes('border-radius:'), 'image: non-background treatment (radius) still allowed');
+  assert.ok(rImg.droppedProps.some((d) => d.includes('imageBg')), 'image: background drop is logged');
+
+  // Non-image cluster: background IS emitted (shorthand, nukes gradients — correct)
+  const plain = cluster({ handle: 'cplain', selector: '[data-wm-c="cplain"]' });
+  const rPlain = compileSpec(
+    { reasoning: '', canvas: { background: '#0a0a0a', color: '#f5f5f5' },
+      rules: [{ target: 'cplain', styles: { background: '#ff0000' } }] },
+    perception([plain]),
+  );
+  assert.ok(/background:\s*#ff0000/.test(rPlain.css), 'image: non-image cluster keeps its solid background');
+
+  // base-coat skips image clusters (a thumbnail is not a "clashing strip" to repaint)
+  const thumb2 = cluster({
+    handle: 'cthumb2', selector: '[data-wm-c="cthumb2"]', rect: { w: 320, h: 180 }, layout: layout({ widthRatio: 0.25 }),
+    style: { background: 'rgb(255,255,255)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '14px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: true },
+  });
+  const main = cluster({ handle: 'cmain2', selector: '[data-wm-c="cmain2"]', role: 'main', rect: { w: 800, h: 600 }, layout: layout({ widthRatio: 0.62 }) });
+  const pBase = perception([thumb2, main], 'rgb(255,255,255)');
+  const rBase = compileSpec(
+    { reasoning: '', canvas: { background: '#0a0a0a', color: '#f5f5f5' },
+      rules: [{ target: 'cmain2', styles: { background: '#111', color: '#f5f5f5' } }] }, // thumb2 NOT addressed
+    pBase,
+  );
+  const thumb2Block = rBase.css.slice(rBase.css.indexOf('[data-wm-c="cthumb2"]'), rBase.css.indexOf('[data-wm-c="cthumb2"]') + 200);
+  assert.ok(!/background:\s*#/.test(thumb2Block), 'image: base-coat does NOT paint over a content-image cluster');
 }
 
 console.log('compile.test OK — all guarantees hold: paint + layout + validation + opaque-wrapper + hide-channel + forceContrast-floor + accent-trim + viewport-safe + targeted-clamp + container-font + targeted-contrast + completeness + luminance-coverage + word-break + palette-mode + columnCount-clamp + grid-normalization + composition + base-coat');

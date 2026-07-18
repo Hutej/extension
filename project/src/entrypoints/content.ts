@@ -60,6 +60,14 @@ const FAILED = 'webmorphFailed';
 let inFlight: Promise<TransformOutcome> | null = null;
 let activeShadowRoots: ShadowRoot[] = [];
 
+// Dynamic-content defense (req C): the stored spec + opts, used to re-stamp +
+// re-apply the design on inserted content (free, no model call).
+let activeSpec: DesignSpec | null = null;
+let activeOpts: CompileOptions = {};
+let dynamicObserver: MutationObserver | null = null;
+let shadowDynamicObservers: MutationObserver[] = [];
+let restyleTimer: ReturnType<typeof setTimeout> | null = null;
+
 function markApplied(id: string): void {
   delete document.documentElement.dataset[FAILED];
   document.documentElement.dataset[APPLIED] = id;
@@ -75,6 +83,8 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   const t0 = Date.now();
   delete document.documentElement.dataset[APPLIED];
   delete document.documentElement.dataset[FAILED];
+  stopDynamicDefense();
+  activeSpec = null;
 
   clearHandles();
   const perception = perceive();
@@ -153,7 +163,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     verifyMsTotal += performance.now() - tcVerify;
     lastVerify = verify;
     const notBroken = verify.checks.notBlank && verify.checks.noOverflow && verify.checks.noOverlap && verify.checks.contrastOk && verify.checks.contentCollapsed && verify.checks.contentVisible;
-    attempts.push({ spec, css: sanitized, notBroken, changeScore: verify.changeScore, covered: verify.checks.covered, coherent: verify.checks.coherent, changed: verify.checks.changed });
+    attempts.push({ spec, css: sanitized, notBroken, changeScore: verify.changeScore, covered: verify.checks.covered, coherent: verify.checks.coherent, changed: verify.checks.changed, contentCollapsed: verify.checks.contentCollapsed });
     logDebug(`iter ${iter}: rules=${compiled.rulesEmitted} baseCoat=${compiled.baseCoatCount} checks=${JSON.stringify(verify.checks)} change=${verify.changeScore.toFixed(3)} accent=${verify.accentFraction.toFixed(3)} framed=${verify.framedFraction.toFixed(3)} coverage=${verify.coverageFraction.toFixed(3)} modelCov=${verify.modelCoverageFraction.toFixed(3)} bleeds=${verify.bleedTargets.length} squeezes=${verify.squeezeTargets.length} repeatedAccent=${verify.repeatedAccent}${compiled.droppedProps.length ? ' dropped=[' + compiled.droppedProps.slice(0, 12).join(',') + ']' : ''}`);
     logDebug(`  detail: ${verify.details.join(' | ')}`);
 
@@ -208,6 +218,9 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   await saveSiteState(key, state);
 
   startDefenseEverywhere(state.style.css, activeShadowRoots);
+  activeSpec = spec;
+  activeOpts = options;
+  startDynamicDefense();
   ensureEscapeUI(toggleSiteState);
   markApplied(id);
 
@@ -254,6 +267,9 @@ async function reapplyStored(): Promise<boolean> {
   const css = sanitizeCss(compiled.css).css || state.style.css;
   applyStyleEverywhere(css, activeShadowRoots);
   startDefenseEverywhere(css, activeShadowRoots);
+  activeSpec = state.style.spec;
+  activeOpts = opts;
+  startDynamicDefense();
   ensureEscapeUI(toggleSiteState);
   markApplied(state.style.id);
   return true;
@@ -266,13 +282,69 @@ async function toggleSiteState(): Promise<void> {
   state.enabled = !state.enabled;
   await saveSiteState(key, state);
   if (state.enabled) await reapplyStored();
-  else { removeStyleEverywhere(activeShadowRoots); removeEscapeUI(); delete document.documentElement.dataset[APPLIED]; }
+  else { stopDynamicDefense(); activeSpec = null; removeStyleEverywhere(activeShadowRoots); removeEscapeUI(); delete document.documentElement.dataset[APPLIED]; }
 }
 
 async function removeAll(): Promise<void> {
+  stopDynamicDefense();
+  activeSpec = null;
   removeStyleEverywhere(activeShadowRoots); removeEscapeUI();
   delete document.documentElement.dataset[APPLIED];
   await clearSiteState(storageKey());
+}
+
+// ── Dynamic content defense (req C) ────────────────────────────────
+// Signature-based handles are deterministic: new content with the same visual
+// signature gets the SAME handle, so the stored CSS applies once re-stamped.
+// A MutationObserver (light DOM + active shadow roots) debounces a FREE
+// re-perceive + re-compile(stored spec) + re-apply — no model call. New content
+// is either styled (matches an existing family) or base-coated (novel signature).
+// Self-trigger is avoided by ignoring additions of our own data-webmorph-ui nodes.
+function restyleDynamic(): void {
+  if (!activeSpec) return;
+  restyleTimer = null;
+  clearHandles();
+  const perception = perceive();
+  activeShadowRoots = perception.shadowRoots;
+  const compiled = compileSpec(activeSpec, perception, activeOpts);
+  const css = sanitizeCss(compiled.css).css;
+  if (css) applyStyleEverywhere(css, activeShadowRoots);
+  logDebug(`dynamic restyle: ${perception.clusters.length} clusters re-stamped + re-applied`);
+}
+
+function scheduleRestyle(): void {
+  if (restyleTimer) clearTimeout(restyleTimer);
+  restyleTimer = setTimeout(restyleDynamic, 600);
+}
+
+function startDynamicDefense(): void {
+  stopDynamicDefense();
+  // Ignore mutations whose only additions are our own injected elements (style /
+  // escape UI) so re-applying never self-triggers a restyle loop.
+  const hasForeignAdd = (muts: MutationRecord[]): boolean =>
+    muts.some((m) => Array.from(m.addedNodes).some(
+      (n) => !((n instanceof HTMLElement) && n.hasAttribute('data-webmorph-ui')),
+    ));
+  dynamicObserver = new MutationObserver((muts) => { if (hasForeignAdd(muts)) scheduleRestyle(); });
+  dynamicObserver.observe(document.body, { childList: true, subtree: true });
+  for (const root of activeShadowRoots) {
+    const obs = new MutationObserver((muts) => { if (hasForeignAdd(muts)) scheduleRestyle(); });
+    obs.observe(root, { childList: true, subtree: true });
+    shadowDynamicObservers.push(obs);
+  }
+  // Resize (req B): re-compile so containerWidthPx-based font clamps track the new
+  // width. Most fluidity is already in the CSS (clamp/min(100%,…)); this catches
+  // the container-measured clamps. Debounced with the same restyle timer.
+  window.addEventListener('resize', scheduleRestyle);
+}
+
+function stopDynamicDefense(): void {
+  dynamicObserver?.disconnect();
+  dynamicObserver = null;
+  for (const o of shadowDynamicObservers) o.disconnect();
+  shadowDynamicObservers = [];
+  if (restyleTimer) { clearTimeout(restyleTimer); restyleTimer = null; }
+  window.removeEventListener('resize', scheduleRestyle);
 }
 
 // ── SPA navigation ─────────────────────────────────────────────────
@@ -286,6 +358,8 @@ function onRouteChange(): void {
 
 async function handleRouteChange(): Promise<void> {
   if (inFlight) return; // a transform is running — it will handle the current page
+  stopDynamicDefense();
+  activeSpec = null;
   removeStyleEverywhere(activeShadowRoots);
   removeEscapeUI();
   delete document.documentElement.dataset[APPLIED];

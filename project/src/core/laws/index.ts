@@ -315,10 +315,12 @@ export function luminanceCompatible(regionBg: string, canvasBg: string): boolean
 }
 
 /**
- * Layout keys that narrow a text-bearing container (Mechanism 3). When the
- * compiler emits any of these, it also emits overflow-wrap:anywhere + overflow-x:clip
- * cluster — long unbreakable strings (code identifiers, nav labels) would
- * otherwise bleed out of the narrowed block (Flex Intrinsic Overflow Law).
+ * Layout keys that narrow a text-bearing container. The compiler does NOT
+ * preventively emit overflow-wrap on these — that collapsed min-content to 1
+ * char and squeezed every column to a few characters (BBC word-mutilation).
+ * Genuine bleeds from long unbreakable strings are caught post-apply by verify's
+ * bleedTargets and repaired with overflow-wrap:break-word (last-resort, preserves
+ * min-content = longest word). NARROWING_KEYS is retained for reference/future use.
  */
 export const NARROWING_KEYS = new Set(['width', 'maxWidth', 'minWidth', 'gridTemplateColumns', 'columnCount', 'flexBasis', 'flex']);
 

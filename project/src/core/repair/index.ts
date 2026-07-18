@@ -69,7 +69,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // Contrast: force a readable text color — the canvas body floor PLUS the
   // specific handles the sampler flagged (dark text on a dark painted block).
   if (!c.contrastOk && !prev.forceContrast) {
-    return { action: 'recompile', options: { ...prev, forceContrast: true, contrastTargets: verify.contrastTargets }, reason: `force contrast (${verify.contrastTargets.length} flagged handle(s))` };
+    return { action: 'recompile', options: { ...prev, forceContrast: true, contrastTargets: verify.contrastTargets, contrastTargetBgs: verify.contrastTargetBgs }, reason: `force contrast (${verify.contrastTargets.length} flagged handle(s))` };
   }
 
   // Over-accent: strip accent backgrounds from repeated/low-prominence clusters

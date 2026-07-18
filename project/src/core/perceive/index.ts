@@ -28,6 +28,7 @@ export interface ClusterStyle {
   background: string; color: string; border: string; borderRadius: string;
   boxShadow: string; fontFamily: string; fontSize: string; fontWeight: string;
   padding: string; display: string;
+  hasBgImage: boolean;   // own background-image is a url() — a CONTENT image (thumbnail). Gradients don't count.
 }
 
 export interface ClusterLayout {
@@ -69,9 +70,17 @@ export interface PageCanvas {
   bg: string; color: string; fontFamily: string; fontSize: string;
 }
 
+/** Site identity for the design prompt (ruling: the model MAY know where it is;
+ *  CODE must not branch on the domain). host = hostname, title = page <title>. */
+export interface SiteIdentity {
+  host: string;
+  title: string;
+}
+
 export interface Perception {
   builtInMs: number;
   nodeCount: number;
+  site: SiteIdentity;             // domain + page title — context for the design model
   canvas: PageCanvas;
   cssVars: { name: string; value: string }[];
   cssVarMap: Record<string, string>;    // --name → resolved rgb (for pure compile/verify)
@@ -79,6 +88,7 @@ export interface Perception {
   skeleton: LayoutSkeleton;
   handles: Set<string>;
   opaqueWrappers: Set<string>;          // handles of large solid-bg wrappers that hide the canvas
+  scrollables: { handle: string; axis: 'x' | 'y' | 'both' }[];  // scrollable containers (req D)
   viewport: { w: number; h: number };   // for area-fraction math (accent-trim budget)
   shadowRoots: ShadowRoot[];            // open shadow roots for downstream CSS injection
 }
@@ -189,6 +199,7 @@ export function perceive(): Perception {
     const role = getSemanticRole(el);
     const bg = cs.backgroundColor;
     const solidBg = !isTransparent(bg);
+    const hasBgImage = /url\(/i.test(cs.backgroundImage);  // content image (thumbnail) — never paint over it
     const border = normalizeBorder(cs);
     const hasShadow = cs.boxShadow !== 'none';
     const hasText = directTextLength(el) > 0;
@@ -210,6 +221,7 @@ export function perceive(): Perception {
           borderRadius: cs.borderRadius, boxShadow: hasShadow ? cs.boxShadow : 'none',
           fontFamily: firstFamily(cs.fontFamily), fontSize: cs.fontSize, fontWeight: cs.fontWeight,
           padding: cs.padding, display: cs.display,
+          hasBgImage,
         },
       });
     }
@@ -223,16 +235,42 @@ export function perceive(): Perception {
   const cssVars = readColorVars();
   const cssVarMap = resolveVarMap(cssVars);
   const skeleton = buildSkeleton(clusters, vpW);
+  const scrollables = findScrollables(clusters);
 
   return {
     builtInMs: Math.round(performance.now() - t0),
     nodeCount: visited,
+    site: { host: location.hostname, title: (document.title || '').slice(0, 80) },
     canvas, cssVars, cssVarMap, clusters, skeleton,
     handles: new Set(clusters.map((c) => c.handle)),
     opaqueWrappers: new Set(clusters.filter((c) => c.layout.isOpaqueWrapper).map((c) => c.handle)),
+    scrollables,
     viewport: { w: vpW, h: window.innerHeight || 800 },
     shadowRoots,
   };
+}
+
+/** Detect scrollable containers among stamped clusters (req D). A page can have
+ *  several scrollable regions (not just the document); the design model needs to
+ *  know they exist so it styles their contents and never breaks their scroll.
+ *  One representative per handle; only sizable containers (not tiny overflow clips). */
+function findScrollables(clusters: Cluster[]): { handle: string; axis: 'x' | 'y' | 'both' }[] {
+  const out: { handle: string; axis: 'x' | 'y' | 'both' }[] = [];
+  const seen = new Set<string>();
+  for (const cl of clusters) {
+    if (seen.has(cl.handle)) continue;
+    const el = document.querySelector(cl.selector) as HTMLElement | null;
+    if (!el) continue;
+    const r = el.getBoundingClientRect();
+    if (r.width < 100 || r.height < 100) continue;       // ponytail: skip tiny overflow clips
+    const cs = getComputedStyle(el);
+    const sx = cs.overflowX === 'auto' || cs.overflowX === 'scroll';
+    const sy = cs.overflowY === 'auto' || cs.overflowY === 'scroll';
+    if (!sx && !sy) continue;
+    seen.add(cl.handle);
+    out.push({ handle: cl.handle, axis: sx && sy ? 'both' : sx ? 'x' : 'y' });
+  }
+  return out;
 }
 
 // ── Clustering + retention + layout enrichment ─────────────────────
@@ -573,13 +611,16 @@ export function clearHandles(): void {
 
 export function serializePerception(p: Perception): string {
   const lines: string[] = [];
-  lines.push(`PAGE ${p.viewport.w}x${p.viewport.h} bg:${short(p.canvas.bg)} text:${short(p.canvas.color)} font:${p.canvas.fontFamily} ${p.canvas.fontSize}`);
+  lines.push(`PAGE ${p.viewport.w}x${p.viewport.h} site:${p.site.host} "${p.site.title}" bg:${short(p.canvas.bg)} text:${short(p.canvas.color)} font:${p.canvas.fontFamily} ${p.canvas.fontSize}`);
   lines.push(`COLS ${p.skeleton.columnCount} CONTENT ${p.skeleton.contentMaxWidthPx ?? '?'}px`);
   if (p.skeleton.regions.length) {
     lines.push('REGIONS ' + p.skeleton.regions.map((r) => `${r.handle}=${r.role}(${Math.round(r.widthRatio * 100)}%w,${r.rect.w}x${r.rect.h})`).join(' '));
   }
   if (p.cssVars.length) {
     lines.push('VARS ' + p.cssVars.map((v) => `${v.name}:${short(v.value)}`).join(' '));
+  }
+  if (p.scrollables.length) {
+    lines.push('SCROLLABLES ' + p.scrollables.map((s) => `${s.handle}=${s.axis}`).join(' '));
   }
 
   // Two-tier: top N by prominence get full detail; rest get compact one-liners.

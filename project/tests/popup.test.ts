@@ -29,22 +29,23 @@ interface SiteSpec {
 // Swiss grid, glassmorphism, neobrutalism, industrial blueprint, parchment
 // manuscript, magazine spread, bold magazine spread, Japanese zen garden,
 // retro 8-bit pixel arcade, Art Nouveau Mucha poster, tropical resort brochure,
-// vintage travel poster.
+// vintage travel poster, Bauhaus, Soviet constructivist, Memphis, Cottagecore,
+// Frida Kahlo.
 const SITES: SiteSpec[] = [
   { name: 'Wikipedia', url: 'https://en.wikipedia.org/wiki/Main_Page',
-    prompt: 'Bauhaus workshop manifesto — primary red blue yellow geometry, thick black grid lines, clean sans-serif, functional circles and squares, stark asymmetry',
+    prompt: 'Carnival Rio samba — explosive magenta lime and gold, feathered headdress motifs, exuberant confetti textures, bold condensed display headlines, festive rhythmic energy',
     isSPA: false, isShadowDOM: false },
   { name: 'MDN', url: 'https://developer.mozilla.org/en-US/docs/Web/CSS/Reference/Properties',
-    prompt: 'Soviet constructivist poster — dramatic diagonal compositions, red black and cream, bold condensed sans-serif headlines, geometric block layouts',
+    prompt: 'Vorticism — angular machine-age forms, sharp wedges, metallic grey and vermillion, fragmented angular typography, dynamic mechanical energy',
     isSPA: false, isShadowDOM: false },
   { name: 'BBC', url: 'https://www.bbc.com/news',
-    prompt: 'Memphis design group postmodern — bright pink teal and yellow, bold zigzag and squiggle patterns, geometric shapes scattered playfully, asymmetric blocks',
+    prompt: 'Pop Art Lichtenstein comic — bold primary red yellow blue, thick black outlines, Ben-Day dot textures, comic-strip panels, speech-bubble headlines',
     isSPA: false, isShadowDOM: false },
   { name: 'GitHub', url: 'https://github.com/torvalds/linux',
-    prompt: 'Cottagecore botanical journal — muted sage green and lavender, hand-drawn leaf and vine margins, warm serif typography, pressed-flower feel, generous whitespace',
+    prompt: 'Mid-century modern Eames — warm walnut and mustard orange, soft organic geometries, clean grid compositions, friendly geometric patterns, generous whitespace',
     isSPA: true, isShadowDOM: false },
   { name: 'YouTube', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
-    prompt: 'Frida Kahlo Mexican folk art — vibrant terracotta and cobalt blue, ornate talavera tile borders, passionate serif headlines, marigold accent flowers',
+    prompt: 'Vibrant Holi powder festival — clouds of vivid pink green and yellow powder, exuberant color-burst textures, energetic display type, celebratory chaos',
     isSPA: true, isShadowDOM: true },
 ];
 
