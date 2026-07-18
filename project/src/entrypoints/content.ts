@@ -376,6 +376,87 @@ async function handleRouteChange(): Promise<void> {
   await reapplyStored();
 }
 
+// ── Adaptive effort (req E) ─────────────────────────────────────────
+// Simple intents (hide/remove a named thing) take a FAST path: perceive → match
+// the target noun to clusters → hide-only spec → apply. Zero paid model calls,
+// ~1-2s. Ambitious/descriptive intents get the full design pipeline. A heuristic
+// classifier routes obvious cases; ambiguous ones fall through to the full path.
+
+function classifyIntent(intent: string): 'hide' | 'design' {
+  const s = intent.trim().toLowerCase();
+  if (s.length > 120) return 'design';                  // long/descriptive → design
+  // Starts with a hide verb AND has no aesthetic/design keywords → simple hide.
+  if (/^(hide|remove|delete|get rid of)\b/.test(s) &&
+      !/\b(like|style|theme|aesthetic|redesign|make it|transform|look)\b/.test(s)) return 'hide';
+  return 'design';
+}
+
+async function fastHidePath(intent: string): Promise<TransformOutcome> {
+  const t0 = Date.now();
+  delete document.documentElement.dataset[APPLIED];
+  delete document.documentElement.dataset[FAILED];
+  stopDynamicDefense();
+  activeSpec = null;
+
+  clearHandles();
+  const perception = perceive();
+  activeShadowRoots = perception.shadowRoots;
+
+  // Extract target words after the hide verb (length > 3, stopwords removed).
+  const targetWords = intent.toLowerCase()
+    .replace(/.*?\b(hide|remove|delete|get rid of)\b/, '')
+    .replace(/\b(the|a|an|all|please|and|on|my|site|page|element|section)\b/g, '')
+    .split(/[^a-z]+/).filter((w) => w.length > 3);
+  if (!targetWords.length) {
+    markFailed('could not identify what to hide');
+    return { ok: false, message: 'Could not identify what to hide. Try: "hide the footer".', paidCalls: 0, wallMs: Date.now() - t0 };
+  }
+
+  // Match clusters whose role/tag/samples contain any target word.
+  const hideHandles: string[] = [];
+  for (const c of perception.clusters) {
+    const haystack = [c.role ?? '', c.tag, ...c.samples].join(' ').toLowerCase();
+    if (targetWords.some((w) => haystack.includes(w))) hideHandles.push(c.handle);
+  }
+  if (!hideHandles.length) {
+    markFailed('no matching element found');
+    return { ok: false, message: `No element matching "${targetWords.join(' ')}" was found.`, paidCalls: 0, wallMs: Date.now() - t0 };
+  }
+
+  // Hide-only spec — hideRefusal guards primary content/wrappers, so this can't
+  // delete the page. If every match is refused, sanitized CSS is empty.
+  const spec: DesignSpec = { reasoning: `fast hide: ${intent}`, rules: hideHandles.map((h) => ({ target: h, hide: true })) };
+  const compiled = compileSpec(spec, perception, {});
+  const sanitized = sanitizeCss(compiled.css).css;
+  if (!sanitized.trim()) {
+    markFailed('hide refused (protected content)');
+    return { ok: false, message: 'That element is protected and cannot be hidden.', paidCalls: 0, wallMs: Date.now() - t0 };
+  }
+  applyStyleEverywhere(sanitized, activeShadowRoots);
+  await new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+  const key = storageKey();
+  const state = await loadSiteState(key);
+  const id = `hide_${Date.now()}`;
+  state.enabled = true;
+  state.style = { id, intent, spec, css: sanitized, reasoning: spec.reasoning, compileOptions: {}, createdAt: Date.now() };
+  await saveSiteState(key, state);
+  startDefenseEverywhere(sanitized, activeShadowRoots);
+  activeSpec = spec;
+  activeOpts = {};
+  startDynamicDefense();
+  ensureEscapeUI(toggleSiteState);
+  markApplied(id);
+
+  const wallMs = Date.now() - t0;
+  logDebug(`FAST HIDE PATH: ${hideHandles.length} cluster(s) hidden in ${wallMs}ms (0 paid calls)`);
+  return {
+    ok: true, reasoning: spec.reasoning, spec, perceiveMs: perception.builtInMs,
+    clusters: perception.clusters.length, paidCalls: 0, wallMs,
+    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, modelCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, totalMs: wallMs, paidCalls: 0 },
+  };
+}
+
 // ── Entry ──────────────────────────────────────────────────────────
 
 export default defineContentScript({
@@ -401,7 +482,9 @@ export default defineContentScript({
       if (message.action === 'transform' && message.intent) {
         if (!inFlight) {
           const intent = message.intent;
-          inFlight = runStyle(intent).finally(() => { inFlight = null; });
+          // Adaptive effort (req E): simple hide intents take the fast no-model path.
+          const runner = classifyIntent(intent) === 'hide' ? fastHidePath(intent) : runStyle(intent);
+          inFlight = runner.finally(() => { inFlight = null; });
         }
         return inFlight;
       }

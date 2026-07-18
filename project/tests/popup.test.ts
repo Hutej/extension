@@ -126,6 +126,26 @@ async function run() {
     if (sites.indexOf(site) < sites.length - 1) await new Promise((r) => setTimeout(r, 8000));
   }
 
+  // ── Simple-intent fast-path proof (req E) ──
+  // A hide request must take the fast path: applied, 0 paid calls, <15s. NOT judged
+  // as a redesign (changeScore/coverage don't apply to a hide), so handled separately.
+  let simpleFailures = 0;
+  {
+    console.log('\n=== SIMPLE INTENT (fast path) ===');
+    const simpleResult = await transformSite(context, popup, {
+      name: 'Wikipedia-hide', url: 'https://en.wikipedia.org/wiki/Main_Page',
+      prompt: 'hide the footer', isSPA: false, isShadowDOM: false,
+    });
+    console.log(`  fast-path: applied=${simpleResult.applied} paidCalls=${simpleResult.paidCalls} wall=${(simpleResult.wallMs / 1000).toFixed(1)}s`);
+    if (!simpleResult.applied) { console.log('    ✗ FAIL: simple hide intent did not apply'); simpleFailures++; }
+    else {
+      if (simpleResult.paidCalls > 0) { console.log(`    ✗ FAIL: fast path used ${simpleResult.paidCalls} paid call(s) — should be 0`); simpleFailures++; }
+      if (simpleResult.wallMs > 15000) { console.log(`    ✗ FAIL: fast path took ${(simpleResult.wallMs / 1000).toFixed(1)}s — should be <15s`); simpleFailures++; }
+      if (simpleResult.paidCalls === 0 && simpleResult.wallMs <= 15000) console.log('    ✓ fast path: applied, 0 paid calls, <15s');
+    }
+    await new Promise((r) => setTimeout(r, 3000));
+  }
+
   // ── Assertions ──
   console.log('\n=== RESULTS ===');
   let failures = 0;
@@ -151,9 +171,10 @@ async function run() {
   } else {
     console.log(`\n✓ HARNESS PASS: ${appliedCount}/${results.length} sites applied`);
   }
+  if (simpleFailures) console.log(`✗ simple-intent fast path: ${simpleFailures} check(s) failed`);
 
   await context.close();
-  process.exit(failures > 0 ? 1 : 0);
+  process.exit((failures + simpleFailures) > 0 ? 1 : 0);
 }
 
 async function transformSite(context: BrowserContext, popup: Page, site: SiteSpec): Promise<RunResult> {
