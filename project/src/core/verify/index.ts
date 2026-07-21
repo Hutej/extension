@@ -380,7 +380,10 @@ function checkRepeatedAccent(before: LayoutFingerprint): boolean {
   return false;
 }
 
-/** Accent: real painted area of colorful backgrounds ÷ viewport (catches "every link red"). */
+/** Accent: real painted area of colorful backgrounds ÷ viewport (catches "every link red").
+ *  WS5: counts CANVAS-HELD color honestly — a vivid canvas is accent, not "zero accent".
+ *  (Root cause: a design with color only on the canvas read accent=0.000 and passed
+ *  coherence while looking flat. The metric must SEE canvas color.) */
 function measureAccentAreaFraction(): number {
   const vpArea = (window.innerWidth || 1280) * (window.innerHeight || 800);
   let sum = 0;
@@ -392,7 +395,19 @@ function measureAccentAreaFraction(): number {
     if (r.width < 1 || r.height < 1) continue;
     sum += Math.min(r.width * r.height, vpArea);
   }
-  return Math.min(1, sum / vpArea);
+  return accentFractionWithCanvas(sum, readEffectiveCanvasBg(), vpArea);
+}
+
+/**
+ * WS5 pure helper: add the canvas background's saturated area to the accent sum
+ * so a vivid canvas is counted as accent (the flat-while-colorful false pass).
+ * Pure — unit-testable without a DOM. `canvasBg` is a CSS color string.
+ */
+export function accentFractionWithCanvas(clusterAccentArea: number, canvasBg: string, vpArea: number): number {
+  let sum = clusterAccentArea;
+  const c = parseColor(canvasBg);
+  if (c && colorfulness(c) >= 0.35) sum += vpArea;   // vivid canvas = accent
+  return Math.min(1, sum / Math.max(1, vpArea));
 }
 
 /**

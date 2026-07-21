@@ -15,7 +15,7 @@ import type { DesignSpec, StyleDecls, LayoutDecls } from '../spec';
 import type { Perception, Cluster } from '../perceive';
 import { buildDeclarations } from '../capabilities/style/index.ts';
 import { buildLayoutDeclarations } from '../capabilities/structure/index.ts';
-import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, luminanceCompatible, assertNoRawPxSizing } from '../laws/index.ts';
+import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, luminanceCompatible, assertNoRawPxSizing, MIN_CHARS_PER_LINE } from '../laws/index.ts';
 import { parseColor, colorfulness, pickReadableText } from '../../shared/color.ts';
 
 export interface CompileOptions {
@@ -228,6 +228,12 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
         layoutInput = stripKeys(layoutInput, ['columnCount', 'width', 'maxWidth', 'minWidth', 'flexBasis']);
         droppedProps.push(`squeeze(${rule.target})`);
       }
+      // WS5 readable-measure refusal: a text-bearing cluster narrowed below a
+      // readable measure (chars-per-line < floor) is the "sleeps in the washroom"
+      // failure. Refuse the narrowing value instead of emitting a broken column.
+      // The cluster's samples tell us it carries text; the layout value tells us
+      // how narrow. Pure geometry — no aesthetic logic.
+      layoutInput = refuseSubMeasure(layoutInput, cluster, droppedProps, rule.target);
       const r = buildLayoutDeclarations(layoutInput, {
         isConstraintOwner: cl?.isContainer ?? false,
         ownsTarget: cl?.constraintOwnerHandle != null,
@@ -468,6 +474,37 @@ function stripImageBg(styles: StyleDecls, hasBgImage: boolean, droppedProps: str
 function firstNonEmpty(...vals: (string | undefined)[]): string {
   for (const v of vals) if (v && v.trim()) return v.trim();
   return '';
+}
+
+/**
+ * WS5 readable-measure refusal. For a text-bearing cluster (samples hold ≥80 chars),
+ * a width/maxWidth/minWidth whose fixed-px value yields < MIN_CHARS_PER_LINE chars
+ * per line (width ÷ (16×0.5)) would wrap every word — the narrow-column failure.
+ * Refuse the offending sizing keys; the cluster keeps its other layout. Pure
+ * geometry: only fixed px values are checked (%, clamp(), min() are already fluid).
+ * `ponytail: 16px default font + 0.5 avg-char-width ratio — same heuristic as
+ *  verify.findSqueezeTargets; a real font-measure would be tighter, but this
+ *  matches the verify side so the two gates agree`.
+ */
+function refuseSubMeasure(layout: LayoutDecls, cluster: Cluster | undefined, droppedProps: string[], handle: string): LayoutDecls {
+  if (!cluster) return layout;
+  const textLen = cluster.samples.reduce((s, t) => s + (t || '').length, 0);
+  if (textLen < 80) return layout;                 // not a prose container — leave alone
+  let out = layout;
+  for (const k of ['width', 'maxWidth', 'minWidth'] as const) {
+    const v = (layout as Record<string, unknown>)[k];
+    if (typeof v !== 'string') continue;
+    const m = v.trim().match(/^([\d.]+)px$/i);
+    if (!m) continue;                               // fluid values are fine
+    const px = parseFloat(m[1]);
+    const cpl = px / (16 * 0.5);
+    if (cpl < MIN_CHARS_PER_LINE) {
+      if (out === layout) out = { ...layout };
+      delete (out as Record<string, unknown>)[k];
+      droppedProps.push(`measure(${handle}:${k}=${v} — ${cpl.toFixed(1)}cpl < ${MIN_CHARS_PER_LINE})`);
+    }
+  }
+  return out;
 }
 
 /**

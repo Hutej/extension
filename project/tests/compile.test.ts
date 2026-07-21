@@ -7,6 +7,7 @@ import assert from 'node:assert';
 import { compileSpec } from '../src/core/compile/index.ts';
 import { validateSpec, checkCompleteness } from '../src/core/spec/index.ts';
 import { regionAddressed } from '../src/core/verify/index.ts';
+import { accentFractionWithCanvas } from '../src/core/verify/index.ts';
 import { clampColumnCount, normalizeGridTemplate } from '../src/core/laws/index.ts';
 import { assertNoRawPxSizing } from '../src/core/laws/index.ts';
 import type { Perception, Cluster, ClusterLayout } from '../src/core/perceive/index.ts';
@@ -780,5 +781,39 @@ console.log('pixel.test OK — void + invisible-text + squeeze + recolor detecto
   assert.ok(!/(^|[\s{;])width\s*:\s*2000px\s*!important/.test(r.css), 'fluid: no raw px width in emitted CSS');
 }
 console.log('fluid.test OK — fluid-CSS guard holds (no raw-px sizing in emitted output)');
+
+// ─────────────────────────────── WS5: accent accounting (canvas-held color) ───────────────────────────────
+// A vivid canvas IS accent. The old metric counted only cluster backgrounds, so a
+// design with color only on the canvas read accent=0.000 and passed coherence while
+// looking flat. The metric must SEE canvas color. Pure helper.
+{
+  const vp = 1280 * 800;
+  // no cluster accent + neutral canvas -> 0
+  assert.ok(accentFractionWithCanvas(0, 'rgb(255,255,255)', vp) === 0, 'accent: neutral canvas, no cluster accent = 0');
+  // no cluster accent + VIVID canvas -> counts canvas (was the false 0.000)
+  assert.ok(accentFractionWithCanvas(0, 'rgb(230,40,160)', vp) === 1, 'accent: vivid canvas counted as accent');
+  // cluster accent + neutral canvas -> cluster area only
+  assert.ok(accentFractionWithCanvas(0.1 * vp, 'rgb(255,255,255)', vp) === 0.1, 'accent: cluster accent on neutral canvas');
+  // cluster accent + vivid canvas -> both counted, capped at 1
+  assert.ok(accentFractionWithCanvas(0.6 * vp, 'rgb(230,40,160)', vp) === 1, 'accent: cluster + vivid canvas capped at 1');
+  // near-gray canvas (low colorfulness) NOT counted
+  assert.ok(accentFractionWithCanvas(0, 'rgb(240,238,242)', vp) === 0, 'accent: near-gray canvas not counted');
+}
+console.log('accent.test OK — canvas-held color counted (vivid canvas = accent, not 0.000)');
+
+// ─────────────────────────────── WS5: readable-measure refusal ───────────────────────────────
+// A text-bearing cluster narrowed below a readable measure (chars-per-line < floor)
+// is refused by the compiler — the "sleeps in the washroom" narrow-column failure
+// must be impossible to emit, not repaired after.
+{
+  const text = cluster({ handle: 'cmeas', selector: '[data-wm-c="cmeas"]', samples: ['x'.repeat(200)] });
+  const p = perception([text]);
+  const r = compileSpec({ reasoning: '', rules: [{ target: 'cmeas', layout: { maxWidth: '60px' } }] }, p);
+  // 60px / (16*0.5) = 7.5 cpl < 12 -> refused
+  assert.ok(!/max-width:\s*60px/.test(r.css), 'measure: sub-readability maxWidth refused (not emitted as raw 60px)');
+  assert.ok(r.droppedProps.some((d) => d.includes('measure')), 'measure: refusal logged in droppedProps');
+}
+console.log('measure.test OK — sub-readability maxWidth refused by the compiler');
+
 
 
