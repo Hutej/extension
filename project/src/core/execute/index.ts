@@ -31,6 +31,10 @@ export function applyStyleEverywhere(css: string, shadowRoots: ShadowRoot[]): vo
   applyStyle(css);
   for (const root of shadowRoots) injectShadowStyle(root, css);
 }
+// WS4: visible-paint counter is set EXPLICITLY by the runStyle/fastHidePath caller
+// (paint 1 → '1', paint 2 → '2'), NOT incremented here — applyStyleEverywhere is also
+// called by the mutation-defense re-applier (invisible restores), which must not
+// inflate the visible-paint count the harness asserts (≤2).
 
 function injectShadowStyle(root: ShadowRoot, css: string): void {
   root.querySelector(`#${SHADOW_STYLE_ID}`)?.remove();

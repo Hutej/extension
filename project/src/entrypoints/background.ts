@@ -23,6 +23,22 @@ export default defineBackground(() => {
       });
       return true; // async response
     }
+    // WS1: captureVisibleTab relay — only the service worker can capture a tab.
+    // The content script asks for a screenshot of its own tab; we capture the
+    // active tab of the SENDER's window (the harness brings the tab to front first).
+    if (message.action === 'captureVisibleTab') {
+      const windowId = _sender?.tab?.windowId as number | undefined;
+      try {
+        const capture = (wId?: number) => chrome.tabs.captureVisibleTab(wId as number, { format: 'png' }, (dataUrl: string | undefined) => {
+          if (chrome.runtime.lastError || !dataUrl) { sendResponse({ ok: false, message: chrome.runtime.lastError?.message || 'capture failed' }); return; }
+          sendResponse({ ok: true, dataUrl });
+        });
+        capture(windowId);
+      } catch (err) {
+        sendResponse({ ok: false, message: (err as Error).message });
+      }
+      return true; // async response
+    }
     return false;
   });
 });

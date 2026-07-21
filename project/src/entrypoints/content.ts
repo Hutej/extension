@@ -14,6 +14,8 @@ import { perceive, serializePerception, clearHandles, captureLayoutFingerprint }
 import { compileSpec, type CompileOptions } from '@/core/compile';
 import { sanitizeCss } from '@/core/sanitize';
 import { verifyStyle, type VerifyResult } from '@/core/verify';
+import { pixelVerify, type PixelVerifyResult, type PixelInput, type ClusterRect } from '@/core/verify/pixel';
+import { captureAtPositions, screenshotToPixelInput } from '@/core/verify/capture';
 import { planRepair, bestNonBroken, type Attempt } from '@/core/repair';
 import { checkCompleteness } from '@/core/spec';
 import { applyStyle, applyStyleEverywhere, removeStyle, removeStyleEverywhere, startDefense, startDefenseEverywhere, ensureEscapeUI, removeEscapeUI } from '@/core/execute';
@@ -31,8 +33,12 @@ export interface Ledger {
   compileMs: number;
   applyMs: number;
   verifyMs: number;
+  pixelVerifyMs: number;   // WS1: 3-position capture + pixel detectors
+  persistMs: number;      // WS4: storage write
+  unaccountedMs: number;  // WS4: totalMs − sum(stages); a big gap = something unmeasured
   totalMs: number;
   paidCalls: number;
+  paintCount: number;     // WS4: visible repaints (<=2 contract)
 }
 
 export interface TransformOutcome {
@@ -42,6 +48,7 @@ export interface TransformOutcome {
   reasoning?: string;
   spec?: DesignSpec;
   verify?: VerifyResult;
+  pixel?: { passed: boolean; voids: number; invisibleText: number; squeeze: number };
   perceiveMs?: number;
   clusters?: number;
   changeScore?: number;
@@ -51,7 +58,8 @@ export interface TransformOutcome {
   model?: string;        // which model served the request
   usage?: unknown;       // token usage
   paidCalls?: number;    // paid model calls used
-  ledger?: Ledger;       // Round 8: stage-by-stage time breakdown
+  paintCount?: number;   // WS4: visible repaints
+  ledger?: Ledger;       // stage-by-stage time breakdown (structured run report)
 }
 
 const APPLIED = 'webmorphApplied';
@@ -79,10 +87,60 @@ function markFailed(msg: string): void {
 
 // ── Core Phase-1 run ───────────────────────────────────────────────
 
+/** WS1: build ClusterRect[] from the current [data-wm-c] elements for the pixel
+ *  detectors. One representative per handle, with the rendered rect + text + font
+ *  size. Skips our own UI nodes. */
+function buildClusterRects(): ClusterRect[] {
+  const seen = new Set<string>();
+  const out: ClusterRect[] = [];
+  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
+    if (el.hasAttribute('data-webmorph-ui') || !(el instanceof HTMLElement)) continue;
+    const handle = el.getAttribute('data-wm-c')!;
+    if (seen.has(handle)) continue;
+    seen.add(handle);
+    const r = el.getBoundingClientRect();
+    out.push({
+      handle,
+      rect: { x: r.left, y: r.top, w: r.width, h: r.height },
+      text: (el.textContent || '').trim(),
+      fontSize: parseFloat(getComputedStyle(el).fontSize) || 16,
+    });
+  }
+  return out;
+}
+
+/** WS1: capture the visible tab at 3 scroll positions (top / mid / deep) and run
+ *  the pixel detectors. Returns the PixelVerifyResult + the time it took. Asks the
+ *  background service worker for captureVisibleTab (only it can capture a tab).
+ *  Free, deterministic, zero model calls — the centerpiece of WS1. */
+async function captureAndPixelVerify(): Promise<{ result: PixelVerifyResult; ms: number }> {
+  const tc = performance.now();
+  const rects = buildClusterRects();
+  const shot = async (y: number): Promise<PixelInput> => {
+    window.scrollTo(0, y);
+    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+    return new Promise<PixelInput>((resolve) => {
+      chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, (resp: { ok: boolean; dataUrl?: string }) => {
+        if (chrome.runtime.lastError || !resp?.ok || !resp.dataUrl) { resolve({ width: 0, height: 0, data: new Uint8ClampedArray(0) }); return; }
+        screenshotToPixelInput(resp.dataUrl).then(resolve);
+      });
+    });
+  };
+  const h = document.documentElement.scrollHeight || 1;
+  const captures = await captureAtPositions([0, Math.floor(h / 2), Math.floor(h * 0.8)], shot);
+  window.scrollTo(0, 0);
+  const result = pixelVerify(captures, rects);
+  return { result, ms: Math.round(performance.now() - tc) };
+}
+
 async function runStyle(intent: string): Promise<TransformOutcome> {
   const t0 = Date.now();
   delete document.documentElement.dataset[APPLIED];
   delete document.documentElement.dataset[FAILED];
+  // WS4: reset the visible-paint counter at the start of every transform. The
+  // harness asserts paintCount <= 2 (apply + one batched repair). applyStyleEverywhere
+  // increments it.
+  document.documentElement.dataset['webmorphPaintCount'] = '0';
   stopDynamicDefense();
   activeSpec = null;
 
@@ -145,87 +203,147 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   let options: CompileOptions = { paletteMode: spec.paletteMode };
   const attempts: Attempt[] = [];
   let lastVerify: VerifyResult | null = null;
-  let compileMsTotal = 0, applyMsTotal = 0, verifyMsTotal = 0;
+  let lastPixel: PixelVerifyResult | null = null;
+  let compileMsTotal = 0, applyMsTotal = 0, verifyMsTotal = 0, pixelVerifyMsTotal = 0;
 
-  for (let iter = 0; iter < 10; iter++) {
+  // WS4 batched repair: apply once (paint 1) → verify (DOM + pixel) → compute ALL
+  // repairs as a batch → one merged re-apply (paint 2) → STOP. A 3rd visible repaint
+  // is a failing check (the harness asserts paintCount <= 2). No keepBest re-apply
+  // beyond paint 2: if paint 2 is broken we rollback+fail rather than repaint again.
+  let paintCount = 0;
+  const applyOnce = async (curSpec: DesignSpec, opts: CompileOptions): Promise<{ compiled: ReturnType<typeof compileSpec>; sanitized: string; verify: VerifyResult; pixel: PixelVerifyResult }> => {
     const tcCompile = performance.now();
-    const compiled = compileSpec(spec, perception, options);
+    const compiled = compileSpec(curSpec, perception, opts);
     compileMsTotal += performance.now() - tcCompile;
     const sanitized = sanitizeCss(compiled.css).css;
-    if (!sanitized.trim()) { removeStyleEverywhere(activeShadowRoots); markFailed('no styles'); return { ok: false, message: 'Produced no applicable styles.', spec, reasoning: spec.reasoning, paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 }; }
-
+    if (!sanitized.trim()) return Promise.reject(new Error('no styles'));
     const tcApply = performance.now();
     applyStyleEverywhere(sanitized, activeShadowRoots);
     applyMsTotal += performance.now() - tcApply;
+    paintCount++;
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
     const tcVerify = performance.now();
-    const verify = verifyStyle(before, spec.paletteMode, modelAddressed);
+    const verify = verifyStyle(before, curSpec.paletteMode, modelAddressed);
     verifyMsTotal += performance.now() - tcVerify;
-    lastVerify = verify;
-    const notBroken = verify.checks.notBlank && verify.checks.noOverflow && verify.checks.noOverlap && verify.checks.contrastOk && verify.checks.contentCollapsed && verify.checks.contentVisible;
-    attempts.push({ spec, css: sanitized, notBroken, changeScore: verify.changeScore, covered: verify.checks.covered, coherent: verify.checks.coherent, changed: verify.checks.changed, contentCollapsed: verify.checks.contentCollapsed });
-    logDebug(`iter ${iter}: rules=${compiled.rulesEmitted} baseCoat=${compiled.baseCoatCount} checks=${JSON.stringify(verify.checks)} change=${verify.changeScore.toFixed(3)} accent=${verify.accentFraction.toFixed(3)} framed=${verify.framedFraction.toFixed(3)} coverage=${verify.coverageFraction.toFixed(3)} modelCov=${verify.modelCoverageFraction.toFixed(3)} bleeds=${verify.bleedTargets.length} squeezes=${verify.squeezeTargets.length} repeatedAccent=${verify.repeatedAccent}${compiled.droppedProps.length ? ' dropped=[' + compiled.droppedProps.slice(0, 12).join(',') + ']' : ''}`);
-    logDebug(`  detail: ${verify.details.join(' | ')}`);
+    const px = await captureAndPixelVerify();
+    pixelVerifyMsTotal += px.ms;
+    return { compiled, sanitized, verify, pixel: px.result };
+  };
 
-    if (verify.passed) break;
+  // ── Paint 1: initial apply + verify (DOM + pixel) ──
+  let phase1Sanitized = '';
+  let phase1Verify: VerifyResult | null = null;
+  try {
+    const p1 = await applyOnce(spec, options);
+    phase1Sanitized = p1.sanitized; phase1Verify = p1.verify; lastVerify = p1.verify; lastPixel = p1.pixel;
+    attempts.push({ spec, css: p1.sanitized, notBroken: p1.verify.checks.notBlank && p1.verify.checks.noOverflow && p1.verify.checks.noOverlap && p1.verify.checks.contrastOk && p1.verify.checks.contentCollapsed && p1.verify.checks.contentVisible, changeScore: p1.verify.changeScore, covered: p1.verify.checks.covered, coherent: p1.verify.checks.coherent, changed: p1.verify.checks.changed, contentCollapsed: p1.verify.checks.contentCollapsed });
+    logDebug(`paint1: rules=${p1.compiled.rulesEmitted} baseCoat=${p1.compiled.baseCoatCount} checks=${JSON.stringify(p1.verify.checks)} pixel(passed=${p1.pixel.passed} voids=${p1.pixel.voids.length} invisible=${p1.pixel.invisibleText.length} squeeze=${p1.pixel.squeeze.length}) change=${p1.verify.changeScore.toFixed(3)} accent=${p1.verify.accentFraction.toFixed(3)} coverage=${p1.verify.coverageFraction.toFixed(3)} modelCov=${p1.verify.modelCoverageFraction.toFixed(3)}${p1.compiled.droppedProps.length ? ' dropped=[' + p1.compiled.droppedProps.slice(0, 12).join(',') + ']' : ''}`);
+    logDebug(`  detail: ${p1.verify.details.join(' | ')}`);
+    if (!p1.pixel.passed) logDebug(`  pixel critiques: ${p1.pixel.critiques.join(' | ')}`);
+  } catch (e) {
+    removeStyleEverywhere(activeShadowRoots); markFailed('no styles');
+    return { ok: false, message: (e as Error).message || 'Produced no applicable styles.', spec, reasoning: spec.reasoning, paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+  }
 
-    const decision = planRepair(verify, options, reReasonsDone, spec.paletteMode);
+  // WS1: passed := DOM passed AND pixel passed. A by-eye-killer is mechanically
+  // impossible to report as PASS.
+  const phase1Passed = phase1Verify.passed && (lastPixel?.passed ?? true);
+
+  if (!phase1Passed && paintCount < 2) {
+    const decision = planRepair(phase1Verify!, options, reReasonsDone, spec.paletteMode, lastPixel);
     logDebug(`repair -> ${decision.action}: ${decision.reason}`);
 
-    if (decision.action === 'rollback') { removeStyleEverywhere(activeShadowRoots); markFailed('content blanked'); return { ...failVerify(spec, verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 }; }
-
-    if (decision.action === 'keepBest') {
-      const best = bestNonBroken(attempts);
-      if (!best) { removeStyleEverywhere(activeShadowRoots); markFailed('nothing non-broken'); return { ...failVerify(spec, verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 }; }
-      applyStyleEverywhere(best.css, activeShadowRoots);
-      spec = best.spec;
-      break;
+    if (decision.action === 'rollback') {
+      removeStyleEverywhere(activeShadowRoots); markFailed('content blanked');
+      return { ...failVerify(spec, phase1Verify!), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
     }
 
     if (decision.action === 'reReason') {
-      // Latency guard: if the 1st call already consumed >60s (a first call can run
-      // ~116s near its 120s timeout), a 2nd call — even capped — pushes total past the
-      // 130s harness marker. Skip it, keepBest, ship what we have. No timeout, no
-      // wasted 2nd call. The reReason is a prompt-failure signal anyway.
+      // Latency guard: if the 1st call already consumed >60s, a 2nd call pushes
+      // total past the 130s harness marker. Skip it, ship paint 1 if non-broken.
       if (Date.now() - t0 > 60000) {
-        logDebug('reReason skipped — elapsed > 60s (latency budget); keepBest instead');
-        const best = bestNonBroken(attempts);
-        if (best) { applyStyleEverywhere(best.css, activeShadowRoots); spec = best.spec; break; }
-        removeStyleEverywhere(activeShadowRoots); markFailed('latency budget — no revision'); return { ...failVerify(spec, verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+        logDebug('reReason skipped — elapsed > 60s (latency budget); shipping paint 1');
+        if (!(phase1Verify!.checks.notBlank && phase1Verify!.checks.contentCollapsed)) {
+          removeStyleEverywhere(activeShadowRoots); markFailed('latency budget — no revision');
+          return { ...failVerify(spec, phase1Verify!), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+        }
+      } else {
+        // Append the pixel-grounded critiques to the reReason so the model fixes
+        // the by-eye-killers (voids, invisible text, squeeze), not just DOM flags.
+        const critique = decision.critique + (lastPixel && !lastPixel.passed ? '\nPixel verification also found: ' + lastPixel.critiques.join('; ') : '');
+        const failing = Object.entries(phase1Verify!.checks).filter(([, v]) => !v).map(([k]) => k).join(',');
+        logDebug(`PAID SECOND CALL — first-call prompt failed to prevent: ${failing}${lastPixel && !lastPixel.passed ? ' +pixel' : ''}`);
+        reReasonsDone++;
+        const re = await askForSpec(intent, serialized, critique, Math.max(15000, 115000 - (Date.now() - t0)));
+        if (re.callMs != null) modelCalls.push({ ms: re.callMs, promptTokens: (re.usage as { prompt_tokens?: number })?.prompt_tokens });
+        if (re.ok && re.spec) {
+          spec = re.spec; options = { paletteMode: spec.paletteMode };
+          // ── Paint 2: re-apply with the revised spec ──
+          try {
+            const p2 = await applyOnce(spec, options);
+            lastVerify = p2.verify; lastPixel = p2.pixel;
+            attempts.push({ spec, css: p2.sanitized, notBroken: p2.verify.checks.notBlank && p2.verify.checks.noOverflow && p2.verify.checks.noOverlap && p2.verify.checks.contrastOk && p2.verify.checks.contentCollapsed && p2.verify.checks.contentVisible, changeScore: p2.verify.changeScore, covered: p2.verify.checks.covered, coherent: p2.verify.checks.coherent, changed: p2.verify.checks.changed, contentCollapsed: p2.verify.checks.contentCollapsed });
+            logDebug(`paint2(reReason): checks=${JSON.stringify(p2.verify.checks)} pixel(passed=${p2.pixel.passed})`);
+            // If paint 2 is broken, rollback+fail (no 3rd paint to revert).
+            if (!(p2.verify.checks.notBlank && p2.verify.checks.contentCollapsed)) {
+              removeStyleEverywhere(activeShadowRoots); markFailed('revision broke content');
+              return { ...failVerify(spec, p2.verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+            }
+          } catch {
+            // reReason'd spec produced no styles — keep paint 1 if non-broken.
+            if (!(phase1Verify!.checks.notBlank && phase1Verify!.checks.contentCollapsed)) {
+              removeStyleEverywhere(activeShadowRoots); markFailed('revision failed');
+              return { ...failVerify(spec, phase1Verify!), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+            }
+            applyStyleEverywhere(phase1Sanitized, activeShadowRoots); // revert to paint 1
+            logDebug('paint2 produced no styles — reverted to paint 1');
+          }
+        }
       }
-      const failing = Object.entries(verify.checks).filter(([, v]) => !v).map(([k]) => k).join(',');
-      logDebug(`PAID SECOND CALL — first-call prompt failed to prevent: ${failing}`);
-      reReasonsDone++;
-      const re = await askForSpec(intent, serialized, decision.critique, Math.max(15000, 115000 - (Date.now() - t0)));
-      if (re.callMs != null) modelCalls.push({ ms: re.callMs, promptTokens: (re.usage as { prompt_tokens?: number })?.prompt_tokens });
-      if (re.ok && re.spec) { spec = re.spec; options = { paletteMode: spec.paletteMode }; continue; }
-      const best = bestNonBroken(attempts);
-      if (best) { applyStyleEverywhere(best.css, activeShadowRoots); spec = best.spec; break; }
-      removeStyleEverywhere(activeShadowRoots); markFailed('revision failed'); return { ...failVerify(spec, verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+    } else {
+      // Deterministic repair: batch ALL option changes into one CompileOptions,
+      // recompile once, re-apply once (paint 2). No keepBest re-apply beyond this.
+      const batchedOpts = { ...options, ...decision.options };
+      options = batchedOpts;
+      try {
+        const p2 = await applyOnce(spec, options);
+        lastVerify = p2.verify;
+        attempts.push({ spec, css: p2.sanitized, notBroken: p2.verify.checks.notBlank && p2.verify.checks.noOverflow && p2.verify.checks.noOverlap && p2.verify.checks.contrastOk && p2.verify.checks.contentCollapsed && p2.verify.checks.contentVisible, changeScore: p2.verify.changeScore, covered: p2.verify.checks.covered, coherent: p2.verify.checks.coherent, changed: p2.verify.checks.changed, contentCollapsed: p2.verify.checks.contentCollapsed });
+        logDebug(`paint2(repair): checks=${JSON.stringify(p2.verify.checks)} pixel(passed=${p2.pixel.passed}) change=${p2.verify.changeScore.toFixed(3)} accent=${p2.verify.accentFraction.toFixed(3)}`);
+        if (!(p2.verify.checks.notBlank && p2.verify.checks.contentCollapsed)) {
+          // Repair broke content — revert to paint 1 (paint 1 is still on screen?
+          // No — paint 2 overwrote it). Re-applying paint 1 would be a 3rd paint.
+          // Rollback+fail honestly instead.
+          removeStyleEverywhere(activeShadowRoots); markFailed('repair broke content');
+          return { ...failVerify(spec, p2.verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+        }
+      } catch {
+        // repair produced no styles — keep paint 1
+        applyStyleEverywhere(phase1Sanitized, activeShadowRoots);
+        logDebug('paint2(repair) produced no styles — reverted to paint 1');
+      }
     }
-
-    options = decision.options;
   }
 
-  // Ledger — stage-by-stage time breakdown (Round 8: instrument before you fix).
-  const totalMs = Date.now() - t0;
-  const ledger: Ledger = {
-    perceiveMs: perception.builtInMs, serializeChars,
-    modelCalls, compileMs: Math.round(compileMsTotal),
-    applyMs: Math.round(applyMsTotal), verifyMs: Math.round(verifyMsTotal),
-    totalMs, paidCalls: 1 + reReasonsDone,
-  };
-  const modelMsStr = modelCalls.map((c) => `${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ');
-  logDebug(`LEDGER perceive=${ledger.perceiveMs}ms serialize=${serializeChars}chars model=[${modelMsStr}] compile=${ledger.compileMs}ms apply=${ledger.applyMs}ms verify=${ledger.verifyMs}ms total=${totalMs}ms paidCalls=${ledger.paidCalls}`);
+  // WS4: verify the paint budget. <=2 paints is the contract; a 3rd = failing.
+  // Set the dataset explicitly from the internal counter — applyStyleEverywhere no
+  // longer increments it (defense re-applies are invisible restores, not visible
+  // paints), so the harness reads the true visible-paint count.
+  document.documentElement.dataset['webmorphPaintCount'] = String(paintCount);
+  const finalPaintCount = paintCount;
+  if (finalPaintCount > 2) logDebug(`PAINT BUDGET EXCEEDED: ${finalPaintCount} > 2 (visible repair theater)`);
 
-  // Persist + defend + mark applied.
+
+  // Persist + defend + mark applied. (WS4: time the persist stage too.)
   const key = storageKey();
   const state = await loadSiteState(key);
   const id = `style_${Date.now()}`;
   const appliedCss = document.getElementById('webmorph-style')?.textContent ?? attempts[attempts.length - 1]?.css ?? '';
   state.enabled = true;
   state.style = { id, intent, spec, css: appliedCss, reasoning: spec.reasoning, compileOptions: options, createdAt: Date.now() };
+  const tPersist = performance.now();
   await saveSiteState(key, state);
+  const persistMs = Math.round(performance.now() - tPersist);
 
   startDefenseEverywhere(state.style.css, activeShadowRoots);
   activeSpec = spec;
@@ -234,13 +352,31 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   ensureEscapeUI(toggleSiteState);
   markApplied(id);
 
+  // Ledger — stage-by-stage time breakdown (WS4: account to wall-clock, nothing
+  // unexplained). unaccountedMs = totalMs − sum(stages); a big gap means a stage
+  // is eating time we didn't instrument (the ~44s unexplained-overhead case).
+  const totalMs = Date.now() - t0;
+  const stagesMs = perception.builtInMs + modelCalls.reduce((s, c) => s + c.ms, 0) + Math.round(compileMsTotal) + Math.round(applyMsTotal) + Math.round(verifyMsTotal) + Math.round(pixelVerifyMsTotal) + persistMs;
+  const ledger: Ledger = {
+    perceiveMs: perception.builtInMs, serializeChars,
+    modelCalls, compileMs: Math.round(compileMsTotal),
+    applyMs: Math.round(applyMsTotal), verifyMs: Math.round(verifyMsTotal),
+    pixelVerifyMs: Math.round(pixelVerifyMsTotal), persistMs,
+    unaccountedMs: Math.max(0, totalMs - stagesMs),
+    totalMs, paidCalls: 1 + reReasonsDone, paintCount: finalPaintCount,
+  };
+  const modelMsStr = modelCalls.map((c) => `${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ');
+  logDebug(`LEDGER perceive=${ledger.perceiveMs}ms serialize=${serializeChars}chars model=[${modelMsStr}] compile=${ledger.compileMs}ms apply=${ledger.applyMs}ms verify=${ledger.verifyMs}ms pixelVerify=${ledger.pixelVerifyMs}ms persist=${persistMs}ms unaccounted=${ledger.unaccountedMs}ms total=${totalMs}ms paidCalls=${ledger.paidCalls} paints=${finalPaintCount}`);
+  if (ledger.unaccountedMs > 0.15 * totalMs) logDebug(`LEDGER GAP >15%: ${ledger.unaccountedMs}ms unaccounted — investigate`);
+
   return {
     ok: true, reasoning: spec.reasoning, spec, verify: lastVerify || undefined,
+    pixel: lastPixel ? { passed: lastPixel.passed, voids: lastPixel.voids.length, invisibleText: lastPixel.invisibleText.length, squeeze: lastPixel.squeeze.length } : undefined,
     perceiveMs: perception.builtInMs, clusters: perception.clusters.length,
     changeScore: lastVerify?.changeScore, accentFraction: lastVerify?.accentFraction,
     modelCoverageFraction: lastVerify?.modelCoverageFraction,
     wallMs: totalMs, model: specRes.model, usage: specRes.usage,
-    paidCalls: 1 + reReasonsDone, ledger,
+    paidCalls: 1 + reReasonsDone, paintCount: finalPaintCount, ledger,
   };
 }
 
@@ -433,6 +569,7 @@ async function fastHidePath(intent: string): Promise<TransformOutcome> {
     return { ok: false, message: 'That element is protected and cannot be hidden.', paidCalls: 0, wallMs: Date.now() - t0 };
   }
   applyStyleEverywhere(sanitized, activeShadowRoots);
+  document.documentElement.dataset['webmorphPaintCount'] = '1'; // WS4: 1 visible paint (fast path)
   await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
   const key = storageKey();
@@ -453,7 +590,7 @@ async function fastHidePath(intent: string): Promise<TransformOutcome> {
   return {
     ok: true, reasoning: spec.reasoning, spec, perceiveMs: perception.builtInMs,
     clusters: perception.clusters.length, paidCalls: 0, wallMs,
-    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, modelCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, totalMs: wallMs, paidCalls: 0 },
+    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, modelCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: wallMs, paidCalls: 0, paintCount: 1 },
   };
 }
 

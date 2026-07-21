@@ -128,7 +128,41 @@ export function detectRecolor(before: PixelInput, after: PixelInput): boolean {
   return hueShift > RECOLOR_HUE_SHIFT;
 }
 
-// ── helpers ───────────────────────────────────────────────────────
+/** Result of the post-apply pixel verification stage. `critiques` are pixel-grounded
+ *  messages the repair router appends to a reReason so a by-eye-killer is mechanically
+ *  impossible to report as PASS. */
+export interface PixelVerifyResult {
+  voids: string[];          // cluster handles rendering as blank voids
+  invisibleText: string[]; // cluster handles whose text renders invisible
+  squeeze: string[];       // cluster handles squeezed below readable measure
+  passed: boolean;         // true iff all three lists are empty
+  critiques: string[];     // human-readable, for the repair router
+}
+
+/**
+ * WS1 pixelVerify: run all four (well, three rect-based) detectors across the
+ * captured positions and aggregate. Pure: takes captures + cluster rects as data.
+ * The recolor detector is handled separately by the harness (it needs the before
+ * capture, which the product path doesn't keep around per-transform).
+ */
+export function pixelVerify(captures: PixelInput[], rects: ClusterRect[]): PixelVerifyResult {
+  const voids: string[] = [];
+  const invisible: string[] = [];
+  const squeeze: string[] = [];
+  for (const c of captures) {
+    for (const h of detectVoids(c, rects)) if (!voids.includes(h)) voids.push(h);
+    for (const h of detectInvisibleText(c, rects)) if (!invisible.includes(h)) invisible.push(h);
+  }
+  for (const cr of rects) for (const h of detectSqueeze(cr)) if (!squeeze.includes(h)) squeeze.push(h);
+  const passed = voids.length === 0 && invisible.length === 0 && squeeze.length === 0;
+  const critiques = [
+    ...voids.map((h) => `cluster ${h} renders as a blank void — content was there but the surface is now uniform`),
+    ...invisible.map((h) => `cluster ${h} renders invisible — its text has near-zero contrast against its effective background`),
+    ...squeeze.map((h) => `cluster ${h} text is squeezed below a readable measure (chars-per-line < floor) — widen it`),
+  ];
+  return { voids, invisibleText: invisible, squeeze, passed, critiques };
+}
+
 
 /** Per-channel max-min span summed across RGB, sampled over the rect. Pure. */
 function variance(capture: PixelInput, rect: { x: number; y: number; w: number; h: number }): number {

@@ -18,6 +18,7 @@
 
 import type { CompileOptions } from '../compile';
 import type { VerifyResult } from '../verify';
+import type { PixelVerifyResult } from '../verify/pixel';
 import type { DesignSpec } from '../spec';
 import { MAX_REPAIR_ATTEMPTS } from '../config';
 import { MAX_ACCENT_FRACTION } from '../laws';
@@ -40,8 +41,13 @@ export interface Attempt {
   contentCollapsed: boolean;
 }
 
-export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasonsDone: number, paletteMode?: 'restrained' | 'vivid'): RepairDecision {
+export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasonsDone: number, paletteMode?: 'restrained' | 'vivid', pixel?: PixelVerifyResult | null): RepairDecision {
   const c = verify.checks;
+  // WS1: pixel-grounded handles — invisible-text clusters the DOM contrast sampler
+  // missed, and pixel-squeeze below the readable measure. Merged into the
+  // deterministic repair so paint-2 targets what the USER sees, not just DOM flags.
+  const pixelInvisible = pixel?.invisibleText ?? [];
+  const pixelSqueeze = pixel?.squeeze ?? [];
 
   // Broken content is the only rollback path (after trying to strip hides).
   if (!c.notBlank) {
@@ -78,8 +84,12 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
 
   // Contrast: force a readable text color — the canvas body floor PLUS the
   // specific handles the sampler flagged (dark text on a dark painted block).
-  if (!c.contrastOk && !prev.forceContrast) {
-    return { action: 'recompile', options: { ...prev, forceContrast: true, contrastTargets: verify.contrastTargets, contrastTargetBgs: verify.contrastTargetBgs }, reason: `force contrast (${verify.contrastTargets.length} flagged handle(s))` };
+  // WS1: also include pixel-invisible clusters (text rendering with near-zero
+  // variance against its bg) — the DOM sampler can miss them; the pixel detector
+  // catches them by reading rendered pixels. Trigger if EITHER DOM or pixel flags.
+  const contrastHandles = Array.from(new Set([...verify.contrastTargets, ...pixelInvisible]));
+  if ((!c.contrastOk || pixelInvisible.length > 0) && !prev.forceContrast) {
+    return { action: 'recompile', options: { ...prev, forceContrast: true, contrastTargets: contrastHandles, contrastTargetBgs: verify.contrastTargetBgs }, reason: `force contrast (${contrastHandles.length} handle(s): ${verify.contrastTargets.length} DOM + ${pixelInvisible.length} pixel)` };
   }
 
   // Over-accent: strip accent backgrounds from repeated/low-prominence clusters
@@ -98,6 +108,12 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // then blanket dropLayout (last resort). Overflow-specific repairs run
   // ONLY when !noOverflow — when !noOverlap alone, skip straight to keepBest
   // (overlap is caused by layout shifting, not by sizing growth).
+  // WS1: pixel-squeeze (below readable measure) triggers the squeeze repair even
+  // when there is no geometric overflow — the BBC one-word-per-line failure has
+  // no overflow but is visibly broken. pixelSqueeze feeds the same target list.
+  if (pixelSqueeze.length && !prev.squeezeTargets) {
+    return { action: 'recompile', options: { ...prev, squeezeTargets: pixelSqueeze }, reason: `pixel squeeze repair on ${pixelSqueeze.length} cluster(s): ${pixelSqueeze.slice(0, 6).join(',')}` };
+  }
   if (!c.noOverflow || !c.noOverlap) {
     if (!c.noOverflow) {
       if (verify.squeezeTargets.length && !prev.squeezeTargets) {
