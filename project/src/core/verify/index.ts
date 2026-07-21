@@ -165,7 +165,7 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
 
   // layoutReshaped is enforced: a recolor (columns + content width unchanged) fails
   // passed, so the loop doesn't break and the regenerative reReason fires with the
-  // "reshape the structure" critique. Calibrated from 3 grid runs: Wikipedia/GitHub
+  // "reshape the structure" critique. Calibrated from 3 grid runs: two recolor-prone
   // recolors showed layoutReshaped=false while passing every other check.
   const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible && layoutReshaped;
   return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible, layoutReshaped }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, collapseTargets: [...collapsedRegions], contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), repeatedAccent, details };

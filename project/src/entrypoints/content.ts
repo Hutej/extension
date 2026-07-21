@@ -183,7 +183,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     }
 
     if (decision.action === 'reReason') {
-      // Latency guard: if the 1st call already consumed >60s (YouTube's 1st call ran
+      // Latency guard: if the 1st call already consumed >60s (a first call can run
       // ~116s near its 120s timeout), a 2nd call — even capped — pushes total past the
       // 130s harness marker. Skip it, keepBest, ship what we have. No timeout, no
       // wasted 2nd call. The reReason is a prompt-failure signal anyway.

@@ -301,8 +301,8 @@ export const PERCEPTIBLE_COLOR_DELTA = 24;
  * it reads as a foreign strip (a white header on a near-black canvas). Half the
  * WCAG luminance range (0..1) is the midpoint: anything past halfway across the
  * brightness scale is on the opposite end from the canvas. A text-color-only
- * delta on a clashing background does NOT count as "addressed" — the Wikipedia
- * white-strip false pass. Pure math, no aesthetic logic.
+ * delta on a clashing background does NOT count as "addressed" — the white-strip
+ * false pass. Pure math, no aesthetic logic.
  */
 export const LUMINANCE_CLASH_THRESHOLD = 0.5;
 
@@ -317,7 +317,7 @@ export function luminanceCompatible(regionBg: string, canvasBg: string): boolean
 /**
  * Layout keys that narrow a text-bearing container. The compiler does NOT
  * preventively emit overflow-wrap on these — that collapsed min-content to 1
- * char and squeezed every column to a few characters (BBC word-mutilation).
+ * char and squeezed every column to a few characters (the word-mutilation bug).
  * Genuine bleeds from long unbreakable strings are caught post-apply by verify's
  * bleedTargets and repaired with overflow-wrap:break-word (last-resort, preserves
  * min-content = longest word). NARROWING_KEYS is retained for reference/future use.
@@ -328,7 +328,7 @@ export const NARROWING_KEYS = new Set(['width', 'maxWidth', 'minWidth', 'gridTem
  * Minimum pixels per CSS column (Fix 3). columnCount is only accepted if
  * containerWidth ÷ count ≥ this — otherwise it's clamped to the max that fits.
  * ~120px is roughly 15ch at 8px average char width: text narrower than this
- * wraps every word, producing the one-character-per-line failure (Wikipedia).
+ * wraps every word, producing the one-character-per-line failure.
  * Pure geometry, no aesthetic logic.
  */
 export const MIN_COLUMN_PX = 120;
@@ -355,7 +355,7 @@ export function clampColumnCount(requested: number, containerWidthPx?: number): 
 
 /**
  * Normalize a grid-template-columns value to be overflow-safe by construction
- * (Fix 3). Prevents the BBC 1.97× blow-out at the CSS level, not via repair:
+ * (Fix 3). Prevents the 1.97× column blow-out at the CSS level, not via repair:
  *  - fr units → minmax(0, Xfr) so min-content can't force overflow
  *  - fixed px tracks wider than the container → min(Xpx, 100%)
  *  - minmax(min, max) with min > 0 → minmax(0, max) so min never forces overflow

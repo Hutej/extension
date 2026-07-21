@@ -3,8 +3,8 @@
  *
  * Phase 1 applies a single compiled stylesheet, appended LAST in <head> so it
  * wins the cascade, and defends it against frameworks that wipe <head> on
- * re-render. Round 7: also injects + defends per open shadow root so Shadow-DOM
- * content (YouTube, custom elements) gets the redesign.
+ * re-render. Round 7: also injects + defends per open shadow root so shadow-DOM
+ * content (custom elements, video portals, etc.) gets the redesign.
  */
 
 import { STYLE_ELEMENT_ID } from '../laws';

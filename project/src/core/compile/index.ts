@@ -302,7 +302,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
   // destroying normal prose and without re-introducing the column squeeze.
   // Emitted late so it wins source-order. Free, deterministic, before structural
   // repair. `anywhere` was used here before — it collapsed min-content to 1 char
-  // and let flex/grid squeeze every column to a few characters (BBC mutilation).
+  // and let flex/grid squeeze every column to a few characters (word-mutilation bug).
   if (opts.wordBreakTargets?.length) {
     for (const h of new Set(opts.wordBreakTargets)) {
       const cl = byHandle.get(h);

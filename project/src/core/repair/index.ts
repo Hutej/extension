@@ -65,8 +65,8 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
     // Collapse unfixable (often a parent's layout squeezed the region). DON'T return
     // keepBest here — fall through so contrast/accent/overflow repairs can still fix
     // what's fixable. The keepBest at the end of planRepair catches the rest. This
-    // prevents a single unfixable collapse from blocking every other repair (the BBC
-    // case: accent=1.000 + low contrast went unfixed because collapse monopolized).
+    // prevents a single unfixable collapse from blocking every other repair (the
+    // collapse-monopoly case: accent=1.000 + low contrast went unfixed because collapse monopolized).
   }
 
   // ── Deterministic fixes: each targets ONLY the check it can actually fix, and

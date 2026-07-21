@@ -112,7 +112,7 @@ export async function requestStyleSpec({ intent, perception, apiKey, critique, t
   const model = AI_CONFIG.styleModel;
   const reasoning = isReasoningModel(model);
   // A reReason passes a reduced timeout so the 2nd call can't push total past the
-  // ~120s budget (YouTube timeout root cause: an unbounded 2nd call after a ~50s 1st).
+  // ~120s budget (the long first-call timeout root cause: an unbounded 2nd call after a ~50s 1st).
   const timeout = callTimeout ?? (reasoning ? AI_CONFIG.timeoutMs : AI_CONFIG.fallbackTimeoutMs);
   let useResponseFormat = true;
   let useReasoningEffort = true;
