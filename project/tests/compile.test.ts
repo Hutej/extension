@@ -682,3 +682,75 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 }
 
 console.log('compile.test OK — all guarantees hold: paint + layout + validation + opaque-wrapper + hide-channel + forceContrast-floor + accent-trim + viewport-safe + targeted-clamp + container-font + targeted-contrast + completeness + luminance-coverage + word-break + palette-mode + columnCount-clamp + grid-normalization + composition + base-coat');
+
+// ─────────────────────────────── WS1: pure pixel detectors ───────────────────────────────
+// Rendered-pixel verification — the only thing the user judges. Pure (no DOM) so
+// unit-testable. The content script supplies real captures via captureVisibleTab;
+// the harness via page.screenshot. These four detectors feed the repair router with
+// pixel-grounded critiques so a by-eye-killer is mechanically impossible to report PASS.
+import { detectVoids, detectInvisibleText, detectSqueeze, detectRecolor, type PixelInput, type ClusterRect } from '../src/core/verify/pixel.ts';
+
+function img(solid: [number, number, number], w: number, h: number): PixelInput {
+  const data = new Uint8ClampedArray(w * h * 4);
+  for (let i = 0; i < w * h; i++) { data[i*4]=solid[0]; data[i*4+1]=solid[1]; data[i*4+2]=solid[2]; data[i*4+3]=255; }
+  return { width: w, height: h, data };
+}
+// paint a striped "text" pattern inside a rect so variance > 0. Period 3 (not a
+// divisor of the detector's step=4 sampling) so the sample doesn't alias to one color.
+function imgText(bg: [number,number,number], fg: [number,number,number], w: number, h: number, rect: {x:number;y:number;w:number;h:number}): PixelInput {
+  const d = img(bg, w, h);
+  for (let y = rect.y; y < rect.y+rect.h; y++) for (let x = rect.x; x < rect.x+rect.w; x++) {
+    if (x % 3 === 0) { const i = (y*w+x)*4; d.data[i]=fg[0]; d.data[i+1]=fg[1]; d.data[i+2]=fg[2]; }
+  }
+  return d;
+}
+
+// VOID: large uniform empty cluster -> flagged
+{
+  const p = img([255,255,255], 800, 600);
+  const cr: ClusterRect = { handle: 'c1', rect: {x:100,y:100,w:400,h:300}, text: '' };
+  assert.ok(detectVoids(p, [cr]).includes('c1'), 'pixel: uniform large empty cluster = void');
+}
+// VOID: text-bearing cluster is NOT a void (variance from text)
+{
+  const p = imgText([255,255,255],[0,0,0], 800, 600, {x:100,y:100,w:400,h:300});
+  const cr: ClusterRect = { handle: 'c2', rect: {x:100,y:100,w:400,h:300}, text: 'x'.repeat(200) };
+  assert.ok(!detectVoids(p, [cr]).includes('c2'), 'pixel: text-bearing cluster not a void');
+}
+// INVISIBLE TEXT: zero-variance text rect (text same color as bg) -> flagged
+{
+  const p = img([20,20,20], 400, 200); // solid dark — "text" is same color = invisible
+  const cr: ClusterRect = { handle: 'c3', rect: {x:10,y:10,w:380,h:180}, text: 'x'.repeat(60) };
+  assert.ok(detectInvisibleText(p, [cr]).includes('c3'), 'pixel: zero-variance text rect = invisible');
+}
+// INVISIBLE TEXT: real variance -> not flagged
+{
+  const p = imgText([20,20,20],[240,240,240], 400, 200, {x:10,y:10,w:380,h:180});
+  const cr: ClusterRect = { handle: 'c4', rect: {x:10,y:10,w:380,h:180}, text: 'x'.repeat(60) };
+  assert.ok(!detectInvisibleText(p, [cr]).includes('c4'), 'pixel: visible text not flagged');
+}
+// SQUEEZE: rect width < MIN_CPL * fontSize * 0.5 -> squeezed
+{
+  const c5: ClusterRect = { handle: 'c5', rect: {x:0,y:0,w:40,h:200}, text: 'x'.repeat(120), fontSize: 16 };
+  assert.ok(detectSqueeze(c5).includes('c5'), 'pixel: 5 cpl cluster = squeezed');
+  const c6: ClusterRect = { handle: 'c6', rect: {x:0,y:0,w:600,h:200}, text: 'x'.repeat(120), fontSize: 16 };
+  assert.ok(!detectSqueeze(c6).includes('c6'), 'pixel: 75 cpl cluster not squeezed');
+  // short text -> not squeezed (avoid false positive on labels)
+  const c7: ClusterRect = { handle: 'c7', rect: {x:0,y:0,w:40,h:40}, text: 'hi', fontSize: 16 };
+  assert.ok(!detectSqueeze(c7).includes('c7'), 'pixel: short label not squeezed');
+}
+// RECOLOR: same structure (solid) + hue-only shift -> recolor true
+{
+  const before = img([200,50,50], 64, 64);
+  const after  = img([50,50,200], 64, 64);  // same solid (same edges), hue shifted
+  assert.strictEqual(detectRecolor(before, after), true, 'pixel: same structure + hue shift = recolor');
+}
+// RECOLOR: structure changed (text added) -> not recolor
+{
+  const before2 = img([200,50,50], 64, 64);
+  const after2  = imgText([200,50,50],[255,255,255],64,64,{x:10,y:10,w:40,h:40});
+  assert.strictEqual(detectRecolor(before2, after2), false, 'pixel: structure changed = not recolor');
+}
+
+console.log('pixel.test OK — void + invisible-text + squeeze + recolor detectors hold');
+
