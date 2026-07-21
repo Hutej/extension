@@ -82,6 +82,15 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // repairs (padding/sizing/layout) run ONLY for overflow/overlap failures — they
   // can never reduce accent, so they must not be spent on a coherence failure.
 
+  // WS1: when pixel-invisible text is SEVERE (>=6 clusters), a deterministic
+  // force-contrast text-color bump is insufficient — the bg/text combo is the
+  // problem, not just the text color, and force-contrast would consume the one
+  // paint-2 repair leaving no recourse. Escalate to reReason (within the 1-reReason
+  // budget) with the pixel critiques so the model redesigns the surfaces.
+  if (pixelInvisible.length >= 6 && reReasonsDone < MAX_REPAIR_ATTEMPTS) {
+    return { action: 'reReason', options: prev, critique: `${critiqueFor(verify)} ALSO: Pixel verification found ${pixelInvisible.length} cluster(s) with INVISIBLE TEXT (near-zero contrast against the effective background): ${pixelInvisible.slice(0, 8).join(', ')}. A text-color bump cannot fix this — you must change the BACKGROUND of these clusters (or the text color) so the text is visibly readable against its surface.`, reason: `pixel-invisible severe (${pixelInvisible.length}) — escalate to reReason` };
+  }
+
   // Contrast: force a readable text color — the canvas body floor PLUS the
   // specific handles the sampler flagged (dark text on a dark painted block).
   // WS1: also include pixel-invisible clusters (text rendering with near-zero
