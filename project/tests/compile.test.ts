@@ -8,6 +8,7 @@ import { compileSpec } from '../src/core/compile/index.ts';
 import { validateSpec, checkCompleteness } from '../src/core/spec/index.ts';
 import { regionAddressed } from '../src/core/verify/index.ts';
 import { clampColumnCount, normalizeGridTemplate } from '../src/core/laws/index.ts';
+import { assertNoRawPxSizing } from '../src/core/laws/index.ts';
 import type { Perception, Cluster, ClusterLayout } from '../src/core/perceive/index.ts';
 import type { DesignSpec } from '../src/core/spec/index.ts';
 
@@ -753,4 +754,31 @@ function imgText(bg: [number,number,number], fg: [number,number,number], w: numb
 }
 
 console.log('pixel.test OK — void + invisible-text + squeeze + recolor detectors hold');
+
+// ─────────────────────────────── WS2: fluid-CSS guard ───────────────────────────────
+// Emitted sizing CSS must use fluid units. The compiler wraps fixed px in
+// min(X,100%) by construction; the guard is the post-compile net that flags any
+// UNWRAPPED raw fixed length (px/pt/cm/in/mm/pc) in width/max-width/min-width.
+{
+  // wrapped values are fluid -> NOT flagged
+  assert.deepStrictEqual(assertNoRawPxSizing('width: min(2000px, 100%) !important;'), [], 'fluid: min(X,100%) not flagged');
+  assert.deepStrictEqual(assertNoRawPxSizing('max-width: clamp(20rem, 90vw, 70rem) !important;'), [], 'fluid: clamp() not flagged');
+  assert.deepStrictEqual(assertNoRawPxSizing('width: 80% !important;'), [], 'fluid: % not flagged');
+  assert.deepStrictEqual(assertNoRawPxSizing('width: auto !important;'), [], 'fluid: auto not flagged');
+  // raw fixed lengths -> flagged
+  assert.ok(assertNoRawPxSizing('width: 2000px !important;').includes('width: 2000px'), 'fluid: raw px width flagged');
+  assert.ok(assertNoRawPxSizing('max-width: 960px !important;').includes('max-width: 960px'), 'fluid: raw px maxWidth flagged');
+  assert.ok(assertNoRawPxSizing('min-width: 320px !important;').includes('min-width: 320px'), 'fluid: raw px minWidth flagged');
+  // vw is fluid (viewport-relative) -> NOT flagged
+  assert.deepStrictEqual(assertNoRawPxSizing('width: 90vw !important;'), [], 'fluid: vw is fluid, not flagged');
+}
+// Compile-level: a fixed px width is fluidized (already guaranteed, restated for WS2)
+{
+  const p = perception([cluster({ handle: 'cvp0', selector: '[data-wm-c="cvp0"]', layout: layout({ isContainer: true }) })]);
+  const r = compileSpec({ reasoning: '', rules: [{ target: 'cvp0', layout: { width: '2000px' } }] }, p);
+  assert.ok(r.css.includes('width: min(2000px, 100%)'), 'fluid: compile fluidizes fixed px width');
+  assert.ok(!/(^|[\s{;])width\s*:\s*2000px\s*!important/.test(r.css), 'fluid: no raw px width in emitted CSS');
+}
+console.log('fluid.test OK — fluid-CSS guard holds (no raw-px sizing in emitted output)');
+
 

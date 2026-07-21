@@ -390,6 +390,35 @@ function splitTracks(val: string): string[] {
   return tracks;
 }
 
+/**
+ * WS2 fluid guard: a sizing declaration (width/max-width/min-width) whose value is a
+ * RAW fixed length (px/pt/cm/in/mm/pc/vw) — NOT wrapped in min()/clamp()/calc()/
+ * max() — would freeze the design at one viewport measurement. The compiler already
+ * wraps fixed px in min(X,100%) by construction (structure/index.ts); this guard is
+ * the post-compile safety net that catches any leak from any path. Pure: takes the
+ * emitted CSS as data, returns the offending `prop: value` substrings.
+ *
+ * `vw` is fluid (viewport-relative) so it is NOT flagged — only true fixed lengths
+ * that could exceed a different viewport are. Values already inside min()/clamp()/
+ * calc()/max() are fine (the `100%`/`vw` operand makes them responsive).
+ */
+export function assertNoRawPxSizing(css: string): string[] {
+  const leaks: string[] = [];
+  // match  `width| max-width | min-width` : <raw length> !important  (not wrapped)
+  // a wrapped value starts with min(/clamp(/calc(/max( — those are excluded.
+  const re = /(?:^|[\s{;])(width|max-width|min-width)\s*:\s*([^;}]+?)\s*!important/g;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(css)) !== null) {
+    const val = m[2].trim();
+    // wrapped = starts with a fluid function -> responsive, skip
+    if (/^(min|clamp|calc|max)\s*\(/i.test(val)) continue;
+    if (/^(auto|inherit|initial|unset|none|fit-content|min-content|max-content|-content-box|border-box)/i.test(val)) continue;
+    if (/^[\d.]+(px|pt|cm|in|mm|pc)$/.test(val)) leaks.push(`${m[1]}: ${val}`);
+  }
+  return leaks;
+}
+
+
 function normalizeTrack(track: string, containerWidthPx?: number): string {
   const t = track.trim();
   // minmax(min, max) — relax the min to 0 so min-content can't force overflow

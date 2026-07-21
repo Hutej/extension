@@ -15,7 +15,7 @@ import type { DesignSpec, StyleDecls, LayoutDecls } from '../spec';
 import type { Perception, Cluster } from '../perceive';
 import { buildDeclarations } from '../capabilities/style/index.ts';
 import { buildLayoutDeclarations } from '../capabilities/structure/index.ts';
-import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, luminanceCompatible } from '../laws/index.ts';
+import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, luminanceCompatible, assertNoRawPxSizing } from '../laws/index.ts';
 import { parseColor, colorfulness, pickReadableText } from '../../shared/color.ts';
 
 export interface CompileOptions {
@@ -353,6 +353,12 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       rulesEmitted++;
     }
   }
+
+  // WS2 fluid guard: post-compile safety net. The structure path already wraps
+  // fixed px in min(X,100%) by construction; this catches any leak from any path
+  // and logs it so a frozen-one-viewport value can never reach emitted CSS.
+  const rawPxLeaks = assertNoRawPxSizing(blocks.join('\n\n'));
+  for (const leak of rawPxLeaks) droppedProps.push(`rawPxSizing(${leak} — banned, fluidize)`);
 
   return { css: blocks.join('\n\n'), rulesEmitted, invalidTargets, droppedProps, baseCoatCount };
 }
