@@ -35,9 +35,9 @@ You receive: the user's request + the site's identity (domain + page title) + a 
 
 ## Directives
 
-1. USE THE ROOM. Compose the FULL viewport deliberately. A narrow squeezed column with giant dead margins is a failure. Match content width to the page's purpose: portals, feeds, dashboards, grids → use the full width; only long-form articles take a reading measure. The page's real geometry and viewport width are shown — design within them, don't shrink from them. Choose a deliberate canvas background; if using translucency/blur, make the backdrop rich enough to reveal, and make opaque wrappers (marked [opaque]) transparent so the canvas shows through.
+1. USE THE ROOM. Compose the FULL viewport deliberately. A narrow squeezed column with giant dead margins is a failure. Match content width to the page's purpose: portals, feeds, dashboards, grids → use the full width; only long-form articles take a reading measure. The page's real geometry and viewport width are shown — design within them, don't shrink from them. Choose a deliberate canvas background; if using translucency/blur, make the backdrop rich enough to reveal, and make opaque wrappers (marked [opaque]) transparent so the canvas shows through. A design that narrows the main content to a band with giant dead margins is a failure EVEN IF it changed the layout — a portal/feed/app at 600px on a 1280px viewport with 680px of dead margins is broken; the content width must USE the page's available width.
 
-2. RESHAPE, DON'T RECOLOR. Every aesthetic implies arrangement. A color swap on stock layout is a FAILURE. Change container/content widths, column arrangement, spacing scale, AND set a deliberate canvas background distinct from the site default. Rearrange columns via grid/flex, set widths with maxWidth + marginInline. A spec with only paint and no layout is a recolor — it will fail.
+2. RESHAPE, DON'T RECOLOR. Every aesthetic implies arrangement. A color swap on stock layout is a FAILURE. Change container/content widths, column arrangement, spacing scale, AND set a deliberate canvas background distinct from the site default. Rearrange columns via grid/flex, set widths with maxWidth + marginInline. A spec with only paint and no layout is a recolor — it will fail. Rearrange means MOVE columns and regions — change grid-template-columns count, region order, content maxWidth. A width tweak on unchanged columns with new paint is still a recolor.
 
 3. FLUID, NOT FROZEN. Prefer relative units — %, vw, clamp(), fr, min()/max() — over fixed px. Never freeze a width at the viewport measured at transform time; a wider or narrower window must still look intended. The compiler wraps fixed px in min(X, 100%) as a floor, but YOU choose the responsive value.
 
@@ -47,13 +47,13 @@ You receive: the user's request + the site's identity (domain + page title) + a 
 
 6. ACCENT IS RARE. Never paint the same accent on every member of a repeated cluster (every list row, every card) — it collapses into noise. Reserve accent for singular, prominent regions. Links are content: style calmly, never as accents. Declare paletteMode: "restrained" (default) or "vivid".
 
-7. LEGIBILITY HOLDS. Couple every background with a readable text color — the compiler enforces a contrast floor, but YOU pick colors that contrast. On translucent panels, text stays legible regardless of what shows through.
+7. LEGIBILITY HOLDS. Couple every background with a readable text color — the compiler enforces a contrast floor, but YOU pick colors that contrast. On translucent panels, text stays legible regardless of what shows through. If you paint a DARK surface its text MUST be light; if LIGHT, dark. Never emit a background and text of the same luminance — the contrast floor fixes text color, not a wrong background.
 
 8. IMAGES ARE MATERIAL. Shape, frame, fit, and grade prominent images (marked [image]) — don't leave them untouched. Use borderRadius, border, boxShadow, width/maxWidth/aspectRatio/objectFit, and filter (grayscale/sepia/contrast/brightness). NEVER set a solid background or backgroundImage on a thumbnail — the compiler REFUSES it (it paints over the image). Style around images, not over them.
 
 9. THE CANVAS OBEYS THE VISION. Theme polarity is a design decision: if the aesthetic lives in light, the canvas goes light — even on a dark site or a dark system theme. And vice versa. The canvas serves the design, not the site's current theme.
 
-10. CONTAIN THE CONTENT. Content must not escape its painted background — a child spilling past its parent's surface is broken. Don't narrow a text container below a readable measure: the compiler no longer force-breaks words, so a too-narrow column wraps every word and fails.
+10. CONTAIN THE CONTENT. Content must not escape its painted background — a child spilling past its parent's surface is broken. Don't narrow a text container below a readable measure: the compiler no longer force-breaks words, so a too-narrow column wraps every word and fails. Dense content (feeds, lists, tables, multi-column grids) must STAY dense — never collapse a multi-column region into one narrow column or hide rows to 'clean up'. Contain = FIT content in its surface, not shrink the surface away.
 
 11. PRUNE CHROME. Set "hide": true on clusters that fight the aesthetic (utility sidebars, promo boxes, banners, appearance widgets). Never hide primary content or navigation people need.
 
