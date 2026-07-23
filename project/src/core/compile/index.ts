@@ -15,7 +15,7 @@ import type { DesignSpec, StyleDecls, LayoutDecls } from '../spec';
 import type { Perception, Cluster } from '../perceive';
 import { buildDeclarations } from '../capabilities/style/index.ts';
 import { buildLayoutDeclarations } from '../capabilities/structure/index.ts';
-import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, luminanceCompatible, assertNoRawPxSizing, MIN_CHARS_PER_LINE } from '../laws/index.ts';
+import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, luminanceCompatible, assertNoRawPxSizing, MIN_CHARS_PER_LINE, MIN_CONTENT_WIDTH_FRACTION } from '../laws/index.ts';
 import { parseColor, colorfulness, pickReadableText } from '../../shared/color.ts';
 
 export interface CompileOptions {
@@ -88,7 +88,23 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       decls.push(...r.decls);
     }
     if (spec.canvasLayout && !opts.dropLayout) {
-      const r = buildLayoutDeclarations(spec.canvasLayout, { isConstraintOwner: true, ownsTarget: false, dropSizing: opts.dropSizing });
+      // Refuse page-narrowing: on a wide page (content ≥70% of viewport), the
+      // model's maxWidth can't be below 65% of the page's natural content width —
+      // that leaves a dead-margin band. Clamp the floor UP so the content uses the room.
+      let canvasLayout = spec.canvasLayout;
+      const cmw = perception.skeleton.contentMaxWidthPx;
+      if (cmw != null && cmw >= perception.viewport.w * 0.7 && canvasLayout.maxWidth) {
+        const pxVals = [...canvasLayout.maxWidth.matchAll(/(\d+(?:\.\d+)?)\s*px/gi)].map((m) => parseFloat(m[1]));
+        const modelPx = pxVals.length ? Math.max(...pxVals) : null;
+        if (modelPx != null) {
+          const floor = Math.round(cmw * MIN_CONTENT_WIDTH_FRACTION);
+          if (modelPx < floor) {
+            canvasLayout = { ...canvasLayout, maxWidth: `min(100%, ${floor}px)` };
+            droppedProps.push(`refusePageNarrowing: canvasLayout.maxWidth ${modelPx}px -> ${floor}px (floor = ${Math.round(MIN_CONTENT_WIDTH_FRACTION * 100)}% of ${cmw}px content on a wide page)`);
+          }
+        }
+      }
+      const r = buildLayoutDeclarations(canvasLayout, { isConstraintOwner: true, ownsTarget: false, dropSizing: opts.dropSizing });
       droppedProps.push(...r.dropped);
       decls.push(...r.decls);
     }

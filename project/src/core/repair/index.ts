@@ -88,7 +88,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // paint-2 repair leaving no recourse. Escalate to reReason (within the 1-reReason
   // budget) with the pixel critiques so the model redesigns the surfaces.
   if (pixelInvisible.length >= 6 && reReasonsDone < MAX_REPAIR_ATTEMPTS) {
-    return { action: 'reReason', options: prev, critique: `${critiqueFor(verify)} ALSO: Pixel verification found ${pixelInvisible.length} cluster(s) with INVISIBLE TEXT (near-zero contrast against the effective background): ${pixelInvisible.slice(0, 8).join(', ')}. A text-color bump cannot fix this — you must change the BACKGROUND of these clusters (or the text color) so the text is visibly readable against its surface.`, reason: `pixel-invisible severe (${pixelInvisible.length}) — escalate to reReason` };
+    return { action: 'reReason', options: prev, critique: critiqueFor(verify, pixel), reason: `pixel-invisible severe (${pixelInvisible.length}) — escalate to reReason` };
   }
 
   // Contrast: force a readable text color — the canvas body floor PLUS the
@@ -150,16 +150,18 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
 
   // ── Regenerative tier: quality failures a deterministic pass can't fix
   // (flat / still-incoherent after trim / over-framed / under-covered / no reshape).
-  if (!c.changed || !c.coherent || !c.covered || !c.layoutReshaped) {
+  if (!c.changed || !c.coherent || !c.covered || !c.layoutReshaped || !c.usesRoom) {
     if (reReasonsDone >= MAX_REPAIR_ATTEMPTS) return { action: 'keepBest', options: prev, reason: 'reReason budget exhausted' };
-    return { action: 'reReason', options: prev, critique: critiqueFor(verify), reason: 'regenerate for quality' };
+    return { action: 'reReason', options: prev, critique: critiqueFor(verify, pixel), reason: 'regenerate for quality' };
   }
 
   return { action: 'keepBest', options: prev, reason: 'no further repair' };
 }
 
-function critiqueFor(verify: VerifyResult): string {
+function critiqueFor(verify: VerifyResult, pixel?: PixelVerifyResult | null): string {
   // Collect ALL quality failures — the model needs to fix everything, not just the first.
+  // This is the UNIFIED critique builder: every reReason return point calls this so the
+  // single reReason budget carries ALL failing reasons (build req 1 — bundle critiques).
   const parts: string[] = [];
   if (!verify.checks.changed) {
     parts.push(`Your previous design changed almost NO layout (changeScore=${verify.changeScore.toFixed(2)}). A recolor is not a redesign. You MUST alter arrangement AND the page background: change container/content widths (maxWidth + marginInline:auto), columns/spacing scale, type scale, AND set a deliberate canvas background distinct from the site default.`);
@@ -178,6 +180,21 @@ function critiqueFor(verify: VerifyResult): string {
   }
   if (verify.framedFraction > 0.45) {
     parts.push(`Your previous design framed almost everything (${(verify.framedFraction * 100).toFixed(0)}% carries heavy borders). Frames belong on a FEW primary containers only — make the page BACKGROUND carry the aesthetic instead of bordering every cluster.`);
+  }
+  // USE THE ROOM — dead-margin band. A wide page narrowed below 60% of its
+  // original content width leaves dead margins. layoutReshaped won't catch this
+  // (it measures delta, not utilization) — the usesRoom check does.
+  if (!verify.checks.usesRoom && verify.contentWidthBefore != null && verify.contentWidthAfter != null) {
+    const pct = ((verify.contentWidthAfter / verify.contentWidthBefore) * 100).toFixed(0);
+    parts.push(`Your previous design narrowed the main content to ${Math.round(verify.contentWidthAfter)}px (${pct}% of the page's ${Math.round(verify.contentWidthBefore)}px available width) — leaving dead margins. USE THE ROOM: widen the content to use the page's available width; only long-form articles take a reading measure.`);
+  }
+  // Pixel-invisible: text rendering with near-zero contrast against its bg.
+  // The DOM contrast sampler can miss this; the pixel detector catches it by
+  // reading rendered pixels. Severe (>=6) means a text-color bump is insufficient.
+  const pi = pixel?.invisibleText ?? [];
+  if (pi.length > 0) {
+    const severe = pi.length >= 6;
+    parts.push(`Pixel verification found ${pi.length} cluster(s) with INVISIBLE TEXT (near-zero contrast against the effective background): ${pi.slice(0, 8).join(', ')}.${severe ? ' A text-color bump cannot fix this — you must change the BACKGROUND of these clusters (or the text color) so the text is visibly readable against its surface.' : ' Fix the background or text color of these clusters so the text is readable against its surface.'}`);
   }
   return parts.join(' ALSO: ') || 'The previous design failed quality checks. Review the page perception and produce a complete, coherent redesign.';
 }

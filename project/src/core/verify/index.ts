@@ -20,7 +20,7 @@ const OVERLAP_TOLERANCE = 2; // allow minor noise / a couple of self-inflicted-b
 
 export interface VerifyResult {
   passed: boolean;
-  checks: { notBlank: boolean; noOverflow: boolean; noOverlap: boolean; contrastOk: boolean; changed: boolean; coherent: boolean; covered: boolean; contentCollapsed: boolean; contentVisible: boolean; layoutReshaped: boolean };
+  checks: { notBlank: boolean; noOverflow: boolean; noOverlap: boolean; contrastOk: boolean; changed: boolean; coherent: boolean; covered: boolean; contentCollapsed: boolean; contentVisible: boolean; layoutReshaped: boolean; usesRoom: boolean };
   changeScore: number;
   layoutReshapedScore: number;   // structural-change signal (columns + content width + region widths)
   accentFraction: number;
@@ -33,6 +33,8 @@ export interface VerifyResult {
   collapseTargets: string[];   // handles of regions that collapsed (>100px→<20px) — for targeted repair
   contrastTargets: string[];
   contrastTargetBgs: Record<string, string>;   // handle -> effective bg the flagged text sits on
+  contentWidthBefore: number | null;           // contentMaxWidthPx before apply (usesRoom critique)
+  contentWidthAfter: number | null;            // contentMaxWidthPx after apply (usesRoom critique)
   repeatedAccent: boolean;
   details: string[];
 }
@@ -167,8 +169,23 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   // passed, so the loop doesn't break and the regenerative reReason fires with the
   // "reshape the structure" critique. Calibrated from 3 grid runs: two recolor-prone
   // recolors showed layoutReshaped=false while passing every other check.
-  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible && layoutReshaped;
-  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible, layoutReshaped }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, collapseTargets: [...collapsedRegions], contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), repeatedAccent, details };
+  // USE THE ROOM: a wide page (content ≥70% of viewport) that the design narrowed
+  // below 60% of its original content width leaves a dead-margin band — the
+  // empty-band failure. layoutReshaped measures delta, not utilization; this check
+  // catches a design that "reshaped" (changed width) while still leaving dead margins.
+  const vpW = window.innerWidth;
+  const beforeW = before.contentMaxWidthPx;
+  const afterW = after.contentMaxWidthPx;
+  const wasWide = beforeW != null && beforeW >= vpW * 0.7;
+  const narrowedHard = beforeW != null && afterW != null && afterW < beforeW * 0.6;
+  const usesRoom = !(wasWide && narrowedHard);
+  if (!usesRoom) {
+    const pct = afterW != null ? ((afterW / beforeW!) * 100).toFixed(0) : '?';
+    details.push(`dead-margin band: content narrowed ${Math.round(beforeW!)}px -> ${afterW != null ? Math.round(afterW) : '?'}px (${pct}% of original) on a wide page — content does not use the room`);
+  }
+
+  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible && layoutReshaped && usesRoom;
+  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible, layoutReshaped, usesRoom }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, collapseTargets: [...collapsedRegions], contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), contentWidthBefore: beforeW, contentWidthAfter: afterW, repeatedAccent, details };
 }
 
 /**

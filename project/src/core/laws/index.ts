@@ -342,6 +342,14 @@ export const MIN_COLUMN_PX = 120;
 export const MIN_CHARS_PER_LINE = 12;
 
 /**
+ * Minimum content-width fraction on a wide page. A wide page (content ≥70% of
+ * the viewport) that the design narrows below 65% of its natural content width
+ * leaves a dead-margin band — the empty-band failure. The compile-law clamps the
+ * model's maxWidth UP to this floor so the content can't shrink from the room.
+ */
+export const MIN_CONTENT_WIDTH_FRACTION = 0.65;
+
+/**
  * Clamp columnCount to fit the container. Pure: takes the requested
  * count and container width as data so it's unit-testable without a DOM.
  * Returns the clamped count and logs the original if clamped.
