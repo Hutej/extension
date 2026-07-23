@@ -109,27 +109,33 @@ function buildClusterRects(): ClusterRect[] {
   return out;
 }
 
+/** Capture the visible tab at scroll position y. Scrolls, waits two rAF, captures
+ *  via the background service worker (only it can captureVisibleTab). Returns an
+ *  empty PixelInput on error. Module-level so the before-capture (recolor detector)
+ *  and the post-apply capture share the same path. */
+async function captureShotAt(y: number): Promise<PixelInput> {
+  window.scrollTo(0, y);
+  await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+  return new Promise<PixelInput>((resolve) => {
+    chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, (resp: { ok: boolean; dataUrl?: string }) => {
+      if (chrome.runtime.lastError || !resp?.ok || !resp.dataUrl) { resolve({ width: 0, height: 0, data: new Uint8ClampedArray(0) }); return; }
+      screenshotToPixelInput(resp.dataUrl).then(resolve);
+    });
+  });
+}
+
 /** Capture the visible tab at 3 scroll positions (top / mid / deep) and run
  *  the pixel detectors. Returns the PixelVerifyResult + the time it took. Asks the
  *  background service worker for captureVisibleTab (only it can capture a tab).
- *  Free, deterministic, zero model calls. */
-async function captureAndPixelVerify(): Promise<{ result: PixelVerifyResult; ms: number }> {
+ *  Free, deterministic, zero model calls. When a `before` is supplied, the recolor
+ *  detector compares it to captures[0] (the scrollY=0 after-shot). */
+async function captureAndPixelVerify(before?: PixelInput): Promise<{ result: PixelVerifyResult; ms: number }> {
   const tc = performance.now();
   const rects = buildClusterRects();
-  const shot = async (y: number): Promise<PixelInput> => {
-    window.scrollTo(0, y);
-    await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
-    return new Promise<PixelInput>((resolve) => {
-      chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, (resp: { ok: boolean; dataUrl?: string }) => {
-        if (chrome.runtime.lastError || !resp?.ok || !resp.dataUrl) { resolve({ width: 0, height: 0, data: new Uint8ClampedArray(0) }); return; }
-        screenshotToPixelInput(resp.dataUrl).then(resolve);
-      });
-    });
-  };
   const h = document.documentElement.scrollHeight || 1;
-  const captures = await captureAtPositions([0, Math.floor(h / 2), Math.floor(h * 0.8)], shot);
+  const captures = await captureAtPositions([0, Math.floor(h / 2), Math.floor(h * 0.8)], captureShotAt);
   window.scrollTo(0, 0);
-  const result = pixelVerify(captures, rects);
+  const result = pixelVerify(captures, rects, before);
   return { result, ms: Math.round(performance.now() - tc) };
 }
 
@@ -151,6 +157,12 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   const serializeChars = serialized.length;
   const before = captureLayoutFingerprint();
   logDebug(`perceived ${perception.nodeCount} nodes -> ${perception.clusters.length} clusters (${perception.builtInMs}ms) ${perception.shadowRoots.length} shadow roots serialize=${serializeChars}chars`);
+
+  // Before-capture for the recolor detector: capture the original page at scroll 0
+  // BEFORE any style is applied. Threaded through applyOnce → captureAndPixelVerify
+  // → pixelVerify so detectRecolor compares before/after edge maps. 0 paid calls,
+  // 0 paintCount — a read, not a paint.
+  const beforeTop = await captureShotAt(0);
 
   const modelCalls: { ms: number; promptTokens?: number }[] = [];
 
@@ -216,7 +228,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     const tcVerify = performance.now();
     const verify = verifyStyle(before, curSpec.paletteMode, modelAddressed);
     verifyMsTotal += performance.now() - tcVerify;
-    const px = await captureAndPixelVerify();
+    const px = await captureAndPixelVerify(beforeTop);
     pixelVerifyMsTotal += px.ms;
     return { compiled, sanitized, verify, pixel: px.result };
   };

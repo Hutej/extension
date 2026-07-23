@@ -135,17 +135,19 @@ export interface PixelVerifyResult {
   voids: string[];          // cluster handles rendering as blank voids
   invisibleText: string[]; // cluster handles whose text renders invisible
   squeeze: string[];       // cluster handles squeezed below readable measure
-  passed: boolean;         // true iff all three lists are empty
+  recolor: boolean;         // true if before/after reads as a recolor (stock structure, hue-only shift)
+  passed: boolean;         // true iff all three lists are empty AND no recolor
   critiques: string[];     // human-readable, for the repair router
 }
 
 /**
  * Run the rect-based detectors (void / invisible-text / squeeze) across the
  * captured positions and aggregate. Pure: takes captures + cluster rects as data.
- * The recolor detector is handled separately by the harness (it needs the before
- * capture, which the product path doesn't keep around per-transform).
+ * When a `before` capture is supplied, also runs the recolor detector (compares
+ * the before to captures[0], the scrollY=0 after-shot) — the product path captures
+ * a before at runStyle start; the harness captures one before apply.
  */
-export function pixelVerify(captures: PixelInput[], rects: ClusterRect[]): PixelVerifyResult {
+export function pixelVerify(captures: PixelInput[], rects: ClusterRect[], before?: PixelInput): PixelVerifyResult {
   const voids: string[] = [];
   const invisible: string[] = [];
   const squeeze: string[] = [];
@@ -154,13 +156,17 @@ export function pixelVerify(captures: PixelInput[], rects: ClusterRect[]): Pixel
     for (const h of detectInvisibleText(c, rects)) if (!invisible.includes(h)) invisible.push(h);
   }
   for (const cr of rects) for (const h of detectSqueeze(cr)) if (!squeeze.includes(h)) squeeze.push(h);
-  const passed = voids.length === 0 && invisible.length === 0 && squeeze.length === 0;
+  // Recolor: stock structure + hue-only shift = a recolor, mechanically. Only when
+  // a before-capture is supplied. captures[0] = the scrollY=0 after-shot.
+  const recolor = before && captures.length > 0 ? detectRecolor(before, captures[0]) : false;
+  const passed = voids.length === 0 && invisible.length === 0 && squeeze.length === 0 && !recolor;
   const critiques = [
     ...voids.map((h) => `cluster ${h} renders as a blank void — content was there but the surface is now uniform`),
     ...invisible.map((h) => `cluster ${h} renders invisible — its text has near-zero contrast against its effective background`),
     ...squeeze.map((h) => `cluster ${h} text is squeezed below a readable measure (chars-per-line < floor) — widen it`),
   ];
-  return { voids, invisibleText: invisible, squeeze, passed, critiques };
+  if (recolor) critiques.push('The redesign reads as a RECOLOR — the edge/structure map is near-identical to the original and only the hue shifted. A recolor is a FAILURE. You MUST change the structural layout: column count, content/region widths, spacing, arrangement — not just paint.');
+  return { voids, invisibleText: invisible, squeeze, recolor, passed, critiques };
 }
 
 

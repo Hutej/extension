@@ -150,7 +150,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
 
   // ── Regenerative tier: quality failures a deterministic pass can't fix
   // (flat / still-incoherent after trim / over-framed / under-covered / no reshape).
-  if (!c.changed || !c.coherent || !c.covered || !c.layoutReshaped || !c.usesRoom) {
+  if (!c.changed || !c.coherent || !c.covered || !c.layoutReshaped || !c.usesRoom || (pixel?.recolor ?? false)) {
     if (reReasonsDone >= MAX_REPAIR_ATTEMPTS) return { action: 'keepBest', options: prev, reason: 'reReason budget exhausted' };
     return { action: 'reReason', options: prev, critique: critiqueFor(verify, pixel), reason: 'regenerate for quality' };
   }
@@ -195,6 +195,10 @@ function critiqueFor(verify: VerifyResult, pixel?: PixelVerifyResult | null): st
   if (pi.length > 0) {
     const severe = pi.length >= 6;
     parts.push(`Pixel verification found ${pi.length} cluster(s) with INVISIBLE TEXT (near-zero contrast against the effective background): ${pi.slice(0, 8).join(', ')}.${severe ? ' A text-color bump cannot fix this — you must change the BACKGROUND of these clusters (or the text color) so the text is visibly readable against its surface.' : ' Fix the background or text color of these clusters so the text is readable against its surface.'}`);
+  }
+  // Recolor: the pixel detector found the redesign is a hue-only shift on stock structure.
+  if (pixel?.recolor) {
+    parts.push('The redesign reads as a RECOLOR — the edge/structure map is near-identical to the original and only the hue shifted. A recolor is a FAILURE. You MUST change the structural layout: column count, content/region widths, spacing, arrangement — not just paint.');
   }
   return parts.join(' ALSO: ') || 'The previous design failed quality checks. Review the page perception and produce a complete, coherent redesign.';
 }
