@@ -98,7 +98,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // catches them by reading rendered pixels. Trigger if EITHER DOM or pixel flags.
   const contrastHandles = Array.from(new Set([...verify.contrastTargets, ...pixelInvisible]));
   if ((!c.contrastOk || pixelInvisible.length > 0) && !prev.forceContrast) {
-    return { action: 'recompile', options: { ...prev, forceContrast: true, contrastTargets: contrastHandles, contrastTargetBgs: verify.contrastTargetBgs }, reason: `force contrast (${contrastHandles.length} handle(s): ${verify.contrastTargets.length} DOM + ${pixelInvisible.length} pixel)` };
+    return { action: 'recompile', options: { ...prev, forceContrast: true, contrastTargets: contrastHandles, contrastTargetBgs: verify.contrastTargetBgs, pixelInvisibleTargets: pixelInvisible }, reason: `force contrast (${contrastHandles.length} handle(s): ${verify.contrastTargets.length} DOM + ${pixelInvisible.length} pixel — ${pixelInvisible.length} get a readable bg+text pair)` };
   }
 
   // Over-accent: strip accent backgrounds from repeated/low-prominence clusters

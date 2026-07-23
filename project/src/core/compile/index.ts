@@ -28,6 +28,7 @@ export interface CompileOptions {
   clampTargets?: string[]; // targeted overflow repair: strip growth-sizing on ONLY these offending clusters
   contrastTargets?: string[]; // targeted contrast repair: force readable text on ONLY these flagged handles
   contrastTargetBgs?: Record<string, string>; // effective bg each flagged handle's text sits on (from verify's parent-chain walk)
+  pixelInvisibleTargets?: string[]; // pixel-invisible clusters: force a readable bg+text PAIR (not just text) — guards hasBgImage
   wordBreakTargets?: string[]; // targeted bleed repair: overflow-wrap on ONLY these bleeding clusters
   clipOverflowTargets?: string[]; // targeted bleed repair: overflow-x:clip on clusters where word-break didn't fix the bleed
   squeezeTargets?: string[];  // targeted squeeze repair: drop columnCount + relax width on ONLY these squeezed clusters
@@ -297,7 +298,11 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       if (bg) specBg.set(rule.target, bg);
     }
     const canvasParsed = parseColor(canvasBg);
+    // pixel-invisible handles get a full bg+text pair below — skip them here so the
+    // text-only bump doesn't double-emit (the bg-aware block wins source-order anyway).
+    const pixelInvisSet = new Set(opts.pixelInvisibleTargets ?? []);
     for (const h of new Set(opts.contrastTargets)) {
+      if (pixelInvisSet.has(h)) continue;
       const cl = byHandle.get(h);
       if (!cl) continue;
       // Priority: the EFFECTIVE bg verify's parent-chain walk captured (the real
@@ -307,6 +312,24 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       const readable = parsed ? pickReadableText(parsed) : '#111111';
       blocks.push(`${cl.selector} {\n  color: ${readable} !important;\n}`);
       rulesEmitted++;
+    }
+    // BG-aware contrast: for pixel-invisible clusters (text invisible against its
+    // bg), a text-only bump is insufficient when the bg itself is the cause (the
+    // model painted a dark surface and left text dark). Set a readable bg+text PAIR —
+    // derive a solid tone from the canvas bg (matches the design) and pick a text
+    // color readable against it. Guard: skip clusters with background images (thumbnails)
+    // so content images are never painted over.
+    if (opts.pixelInvisibleTargets?.length) {
+      const baseTone = deriveBaseTone(canvasBg);
+      const baseParsed = parseColor(baseTone);
+      const readableBg = baseParsed ? baseTone : '#ffffff';
+      const readableText = baseParsed ? pickReadableText(baseParsed) : '#111111';
+      for (const h of new Set(opts.pixelInvisibleTargets)) {
+        const cl = byHandle.get(h);
+        if (!cl || cl.style.hasBgImage) continue;
+        blocks.push(`${cl.selector} {\n  background: ${readableBg} !important;\n  color: ${readableText} !important;\n}`);
+        rulesEmitted++;
+      }
     }
   }
 
