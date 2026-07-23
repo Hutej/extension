@@ -58,6 +58,12 @@ export function buildLayoutDeclarations(input: LayoutDecls, opts: LayoutBuildOpt
     if ((cssProp === 'width' || cssProp === 'max-width' || cssProp === 'min-width') && isFixedLength(val)) {
       val = `min(${val}, 100%)`;
     }
+    // A fixed px/vw min-height/max-height can never exceed the viewport: min(X, 100vh).
+    // (min returns the smaller — a 800px max-height in a 600px viewport → 600px; the
+    // ceiling adapts down, never clips content.)
+    if ((cssProp === 'min-height' || cssProp === 'max-height') && isFixedLength(val)) {
+      val = `min(${val}, 100vh)`;
+    }
     // Display type is clamped to fit its OWN container block (not just the
     // viewport) so oversized headings can't bleed out of a narrow card.
     if (cssProp === 'font-size') val = clampDisplayFont(val, opts.containerWidthPx);

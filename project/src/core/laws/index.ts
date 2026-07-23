@@ -399,31 +399,34 @@ function splitTracks(val: string): string[] {
 }
 
 /**
- * Fluid guard: a sizing declaration (width/max-width/min-width) whose value is a
- * RAW fixed length (px/pt/cm/in/mm/pc/vw) — NOT wrapped in min()/clamp()/calc()/
- * max() — would freeze the design at one viewport measurement. The compiler already
- * wraps fixed px in min(X,100%) by construction (structure/index.ts); this guard is
- * the post-compile safety net that catches any leak from any path. Pure: takes the
- * emitted CSS as data, returns the offending `prop: value` substrings.
- *
- * `vw` is fluid (viewport-relative) so it is NOT flagged — only true fixed lengths
- * that could exceed a different viewport are. Values already inside min()/clamp()/
- * calc()/max() are fine (the `100%`/`vw` operand makes them responsive).
+ * Fluid guard + rewriter: a sizing declaration (width/max-width/min-width/
+ * min-height/max-height) whose value is a RAW fixed length (px/pt/cm/in/mm/pc) —
+ * NOT wrapped in min()/clamp()/calc()/max() — would freeze the design at one
+ * viewport measurement. The compiler already wraps fixed px in min(X,100%) /
+ * min(X,100vh) by construction (structure/index.ts); this guard is the post-compile
+ * safety net that catches and REWRITES any leak from any path. Bare `height` is
+ * logged but NOT rewritten (the model can't set it — not in LAYOUT_PROPS — and
+ * rewriting a deliberate height could break layout). `vw`/`vh` are already
+ * viewport-relative and are not matched. Pure: takes the emitted CSS as data,
+ * returns the rewritten CSS + the offending `prop: value` log entries.
  */
-export function assertNoRawPxSizing(css: string): string[] {
+export function fluidizeRawPxSizing(css: string): { css: string; leaks: string[] } {
   const leaks: string[] = [];
-  // match  `width| max-width | min-width` : <raw length> !important  (not wrapped)
-  // a wrapped value starts with min(/clamp(/calc(/max( — those are excluded.
-  const re = /(?:^|[\s{;])(width|max-width|min-width)\s*:\s*([^;}]+?)\s*!important/g;
-  let m: RegExpExecArray | null;
-  while ((m = re.exec(css)) !== null) {
-    const val = m[2].trim();
-    // wrapped = starts with a fluid function -> responsive, skip
-    if (/^(min|clamp|calc|max)\s*\(/i.test(val)) continue;
-    if (/^(auto|inherit|initial|unset|none|fit-content|min-content|max-content|-content-box|border-box)/i.test(val)) continue;
-    if (/^[\d.]+(px|pt|cm|in|mm|pc)$/.test(val)) leaks.push(`${m[1]}: ${val}`);
-  }
-  return leaks;
+  // Match a raw fixed-length sizing declaration (not wrapped — a wrapped value
+  // starts with min(/clamp(/calc(/max( which doesn't match the digit-first pattern).
+  const re = /(^|[\s{;])(width|max-width|min-width|height|min-height|max-height)\s*:\s*([\d.]+(?:px|pt|cm|in|mm|pc))\s*(!important)?/g;
+  const out = css.replace(re, (full, prefix, prop, val, important) => {
+    if (prop === 'height') {
+      // bare height is not in LAYOUT_PROPS — log only, don't rewrite.
+      leaks.push(`${prop}: ${val}`);
+      return full;
+    }
+    const ceiling = prop === 'min-height' || prop === 'max-height' ? '100vh' : '100%';
+    const replacement = `min(${val}, ${ceiling})`;
+    leaks.push(`${prop}: ${val} -> ${replacement}`);
+    return `${prefix}${prop}: ${replacement}${important ? ' ' + important : ''}`;
+  });
+  return { css: out, leaks };
 }
 
 

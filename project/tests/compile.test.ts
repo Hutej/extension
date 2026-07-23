@@ -9,7 +9,7 @@ import { validateSpec, checkCompleteness } from '../src/core/spec/index.ts';
 import { regionAddressed } from '../src/core/verify/index.ts';
 import { accentFractionWithCanvas } from '../src/core/verify/index.ts';
 import { clampColumnCount, normalizeGridTemplate } from '../src/core/laws/index.ts';
-import { assertNoRawPxSizing } from '../src/core/laws/index.ts';
+import { fluidizeRawPxSizing } from '../src/core/laws/index.ts';
 import type { Perception, Cluster, ClusterLayout } from '../src/core/perceive/index.ts';
 import type { DesignSpec } from '../src/core/spec/index.ts';
 
@@ -758,22 +758,36 @@ console.log('pixel.test OK — void + invisible-text + squeeze + recolor detecto
 
 // ─────────────────────────────── WS2: fluid-CSS guard ───────────────────────────────
 // Emitted sizing CSS must use fluid units. The compiler wraps fixed px in
-// min(X,100%) by construction; the guard is the post-compile net that flags any
-// UNWRAPPED raw fixed length (px/pt/cm/in/mm/pc) in width/max-width/min-width.
+// min(X,100%)/min(X,100vh) by construction; the guard REWRITES any UNWRAPPED
+// raw fixed length (px/pt/cm/in/mm/pc) and logs it. Bare `height` is logged only.
 {
-  // wrapped values are fluid -> NOT flagged
-  assert.deepStrictEqual(assertNoRawPxSizing('width: min(2000px, 100%) !important;'), [], 'fluid: min(X,100%) not flagged');
-  assert.deepStrictEqual(assertNoRawPxSizing('max-width: clamp(20rem, 90vw, 70rem) !important;'), [], 'fluid: clamp() not flagged');
-  assert.deepStrictEqual(assertNoRawPxSizing('width: 80% !important;'), [], 'fluid: % not flagged');
-  assert.deepStrictEqual(assertNoRawPxSizing('width: auto !important;'), [], 'fluid: auto not flagged');
-  // raw fixed lengths -> flagged
-  assert.ok(assertNoRawPxSizing('width: 2000px !important;').includes('width: 2000px'), 'fluid: raw px width flagged');
-  assert.ok(assertNoRawPxSizing('max-width: 960px !important;').includes('max-width: 960px'), 'fluid: raw px maxWidth flagged');
-  assert.ok(assertNoRawPxSizing('min-width: 320px !important;').includes('min-width: 320px'), 'fluid: raw px minWidth flagged');
+  const f = fluidizeRawPxSizing;
+  // wrapped values are fluid -> NOT rewritten, no leaks
+  assert.deepStrictEqual(f('width: min(2000px, 100%) !important;').leaks, [], 'fluid: min(X,100%) not flagged');
+  assert.deepStrictEqual(f('max-width: clamp(20rem, 90vw, 70rem) !important;').leaks, [], 'fluid: clamp() not flagged');
+  assert.deepStrictEqual(f('width: 80% !important;').leaks, [], 'fluid: % not flagged');
+  assert.deepStrictEqual(f('width: auto !important;').leaks, [], 'fluid: auto not flagged');
+  // raw fixed widths -> rewritten to min(X, 100%) + logged
+  const w = f('width: 2000px !important;');
+  assert.ok(w.leaks.some((l) => l.includes('width: 2000px')), 'fluid: raw px width flagged');
+  assert.ok(w.css.includes('min(2000px, 100%)'), 'fluid: raw px width rewritten');
+  const mw = f('max-width: 960px !important;');
+  assert.ok(mw.leaks.some((l) => l.includes('max-width: 960px')), 'fluid: raw px maxWidth flagged');
+  assert.ok(mw.css.includes('min(960px, 100%)'), 'fluid: raw px maxWidth rewritten');
+  const mnw = f('min-width: 320px !important;');
+  assert.ok(mnw.leaks.some((l) => l.includes('min-width: 320px')), 'fluid: raw px minWidth flagged');
+  assert.ok(mnw.css.includes('min(320px, 100%)'), 'fluid: raw px minWidth rewritten');
+  // height-family -> min(X, 100vh)
+  assert.ok(f('min-height: 600px !important;').css.includes('min(600px, 100vh)'), 'fluid: raw px minHeight rewritten to 100vh');
+  assert.ok(f('max-height: 800px !important;').css.includes('min(800px, 100vh)'), 'fluid: raw px maxHeight rewritten to 100vh');
+  // bare height -> logged, NOT rewritten
+  const h = f('height: 400px !important;');
+  assert.ok(h.leaks.some((l) => l.includes('height: 400px')), 'fluid: bare height logged');
+  assert.ok(!h.css.includes('min(400px'), 'fluid: bare height NOT rewritten');
   // vw is fluid (viewport-relative) -> NOT flagged
-  assert.deepStrictEqual(assertNoRawPxSizing('width: 90vw !important;'), [], 'fluid: vw is fluid, not flagged');
+  assert.deepStrictEqual(f('width: 90vw !important;').leaks, [], 'fluid: vw is fluid, not flagged');
 }
-// Compile-level: a fixed px width is fluidized (already guaranteed, restated for WS2)
+// Compile-level: a fixed px width is fluidized (already guaranteed, restated)
 {
   const p = perception([cluster({ handle: 'cvp0', selector: '[data-wm-c="cvp0"]', layout: layout({ isContainer: true }) })]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cvp0', layout: { width: '2000px' } }] }, p);
