@@ -6,7 +6,8 @@
 
 export const AI_CONFIG = {
   // Design intelligence. The DesignSpec IS the product — strongest reasoning model.
-  styleModel: 'gpt-5.1',
+  // WM_MODEL env override (for the bake-off; production default unchanged).
+  styleModel: process.env.WM_MODEL ?? 'gpt-5.1',
   // No fallback: a known-recolorer fallback is a worse failure than an honest error.
   styleFallbackModel: undefined as string | undefined,
   // Non-reasoning fallback temperature (unused now — no fallback).
