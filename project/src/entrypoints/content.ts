@@ -544,17 +544,22 @@ async function handleRouteChange(): Promise<void> {
 }
 
 // ── Adaptive effort ─────────────────────────────────────────────────
-// Simple intents (hide/remove a named thing) take a FAST path: perceive → match
-// the target noun to clusters → hide-only spec → apply. Zero paid model calls,
-// ~1-2s. Ambitious/descriptive intents get the full design pipeline. A heuristic
-// classifier routes obvious cases; ambiguous ones fall through to the full path.
+// Simple intents (hide/remove a named thing, move X to a direction) take a FAST
+// path: perceive → match the target noun to clusters → apply. Zero paid model
+// calls, ~1-2s. Ambitious/descriptive intents get the full design pipeline. A
+// heuristic classifier routes obvious cases; ambiguous ones fall through to the
+// full path.
 
-function classifyIntent(intent: string): 'hide' | 'design' {
+function classifyIntent(intent: string): 'hide' | 'move' | 'design' {
   const s = intent.trim().toLowerCase();
   if (s.length > 120) return 'design';                  // long/descriptive → design
   // Starts with a hide verb AND has no aesthetic/design keywords → simple hide.
   if (/^(hide|remove|delete|get rid of)\b/.test(s) &&
       !/\b(like|style|theme|aesthetic|redesign|make it|transform|look)\b/.test(s)) return 'hide';
+  // Starts with a move verb + a direction, no aesthetic keywords → simple move.
+  if (/^(move|shift|relocate|push|send)\b/.test(s) &&
+      /\b(to (the )?(top|bottom|up|down|beginning|start|end|finish))\b/.test(s) &&
+      !/\b(like|style|theme|aesthetic|redesign|make it|transform|look)\b/.test(s)) return 'move';
   return 'design';
 }
 
@@ -626,6 +631,92 @@ async function fastHidePath(intent: string): Promise<TransformOutcome> {
   };
 }
 
+/** Fast move path — CSS-only reposition via sticky/order, NO DOM relocation.
+ *  "move the X to top/bottom" → position: sticky; "to beginning/end" → order.
+ *  Ambiguous or no match → falls back to the full design pipeline. 0 paid calls. */
+async function fastMovePath(intent: string): Promise<TransformOutcome> {
+  const t0 = Date.now();
+  delete document.documentElement.dataset[APPLIED];
+  delete document.documentElement.dataset[FAILED];
+  stopDynamicDefense();
+  activeSpec = null;
+  removeStyleEverywhere(activeShadowRoots);
+  lastAppliedCss = '';
+
+  clearHandles();
+  const perception = perceive();
+  activeShadowRoots = perception.shadowRoots;
+
+  // Extract the direction from the intent.
+  const s = intent.toLowerCase();
+  const isTop = /\b(to (the )?top|up)\b/.test(s);
+  const isBottom = /\b(to (the )?bottom|down)\b/.test(s);
+  const isBeginning = /\b(to (the )?(beginning|start))\b/.test(s);
+  const isEnd = /\b(to (the )?(end|finish))\b/.test(s);
+  if (!isTop && !isBottom && !isBeginning && !isEnd) return runStyle(intent);
+
+  // Extract the target noun (remove the move verb, direction words, stopwords).
+  const targetWords = s
+    .replace(/.*?\b(move|shift|relocate|push|send)\b/, '')
+    .replace(/\b(to (the )?(top|bottom|up|down|beginning|start|end|finish))\b/g, '')
+    .replace(/\b(the|a|an|all|please|and|on|my|site|page|element|section)\b/g, '')
+    .split(/[^a-z]+/).filter((w) => w.length > 3);
+  if (!targetWords.length) return runStyle(intent);
+
+  // Match clusters whose role/tag/samples contain any target word.
+  const moveHandles: string[] = [];
+  for (const c of perception.clusters) {
+    const haystack = [c.role ?? '', c.tag, ...c.samples].join(' ').toLowerCase();
+    if (targetWords.some((w) => haystack.includes(w))) moveHandles.push(c.handle);
+  }
+  if (!moveHandles.length) return runStyle(intent);
+
+  // Emit CSS by direction. Sticky positioning is raw CSS (position is NOT in
+  // LAYOUT_PROPS — adding it would expose the footgun to the model's allowed-keys
+  // list). Order goes through compileSpec (order IS in LAYOUT_PROPS).
+  let sanitized: string;
+  let spec: DesignSpec;
+  if (isTop || isBottom) {
+    const stickyVal = isTop ? 'top: 0' : 'bottom: 0';
+    const selectors = moveHandles.map((h) => `[data-wm-c="${h}"]`);
+    const rawCss = `${selectors.join(',\n')} {\n  position: sticky;\n  ${stickyVal};\n}`;
+    sanitized = sanitizeCss(rawCss).css;
+    spec = { reasoning: `fast move: ${intent}`, rules: moveHandles.map((h) => ({ target: h, styles: {} })) };
+  } else {
+    spec = { reasoning: `fast move: ${intent}`, rules: moveHandles.map((h) => ({ target: h, layout: { order: isBeginning ? '-1' : '999' } })) };
+    const compiled = compileSpec(spec, perception, {});
+    sanitized = sanitizeCss(compiled.css).css;
+  }
+  if (!sanitized.trim()) return runStyle(intent);
+
+  applyStyleEverywhere(sanitized, activeShadowRoots);
+  lastAppliedCss = sanitized;
+  document.documentElement.dataset['webmorphPaintCount'] = '1';
+  await new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+  const key = storageKey();
+  const state = await loadSiteState(key);
+  const id = `move_${Date.now()}`;
+  state.enabled = true;
+  state.style = { id, intent, spec, css: sanitized, reasoning: spec.reasoning, compileOptions: {}, createdAt: Date.now() };
+  await saveSiteState(key, state);
+  startDefenseEverywhere(sanitized, activeShadowRoots);
+  activeSpec = spec;
+  activeOpts = {};
+  startDynamicDefense();
+  ensureEscapeUI(toggleSiteState);
+  markApplied(id);
+
+  const wallMs = Date.now() - t0;
+  const dirLabel = isTop ? 'to top' : isBottom ? 'to bottom' : isBeginning ? 'to beginning' : 'to end';
+  logDebug(`FAST MOVE PATH: ${moveHandles.length} cluster(s) moved ${dirLabel} in ${wallMs}ms (0 paid calls)`);
+  return {
+    ok: true, reasoning: spec.reasoning, spec, perceiveMs: perception.builtInMs,
+    clusters: perception.clusters.length, paidCalls: 0, wallMs,
+    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, serializeCharsBefore: 0, modelCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: wallMs, paidCalls: 0, paintCount: 1 },
+  };
+}
+
 // ── Entry ──────────────────────────────────────────────────────────
 
 export default defineContentScript({
@@ -651,8 +742,9 @@ export default defineContentScript({
       if (message.action === 'transform' && message.intent) {
         if (!inFlight) {
           const intent = message.intent;
-          // Adaptive effort: simple hide intents take the fast no-model path.
-          const runner = classifyIntent(intent) === 'hide' ? fastHidePath(intent) : runStyle(intent);
+          // Adaptive effort: simple hide/move intents take the fast no-model path.
+          const kind = classifyIntent(intent);
+          const runner = kind === 'hide' ? fastHidePath(intent) : kind === 'move' ? fastMovePath(intent) : runStyle(intent);
           inFlight = runner.finally(() => { inFlight = null; });
         }
         return inFlight;
