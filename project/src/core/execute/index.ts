@@ -3,7 +3,7 @@
  *
  * Phase 1 applies a single compiled stylesheet, appended LAST in <head> so it
  * wins the cascade, and defends it against frameworks that wipe <head> on
- * re-render. Round 7: also injects + defends per open shadow root so shadow-DOM
+ * re-render. Also injects + defends per open shadow root so shadow-DOM
  * content (custom elements, video portals, etc.) gets the redesign.
  */
 
@@ -31,7 +31,7 @@ export function applyStyleEverywhere(css: string, shadowRoots: ShadowRoot[]): vo
   applyStyle(css);
   for (const root of shadowRoots) injectShadowStyle(root, css);
 }
-// WS4: visible-paint counter is set EXPLICITLY by the runStyle/fastHidePath caller
+// The visible-paint counter is set EXPLICITLY by the runStyle/fastHidePath caller
 // (paint 1 → '1', paint 2 → '2'), NOT incremented here — applyStyleEverywhere is also
 // called by the mutation-defense re-applier (invisible restores), which must not
 // inflate the visible-paint count the harness asserts (≤2).

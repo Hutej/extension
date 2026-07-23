@@ -28,11 +28,11 @@ export interface CompileOptions {
   clampTargets?: string[]; // targeted overflow repair: strip growth-sizing on ONLY these offending clusters
   contrastTargets?: string[]; // targeted contrast repair: force readable text on ONLY these flagged handles
   contrastTargetBgs?: Record<string, string>; // effective bg each flagged handle's text sits on (from verify's parent-chain walk)
-  wordBreakTargets?: string[]; // targeted bleed repair: overflow-wrap on ONLY these bleeding clusters (Mech 3)
+  wordBreakTargets?: string[]; // targeted bleed repair: overflow-wrap on ONLY these bleeding clusters
   clipOverflowTargets?: string[]; // targeted bleed repair: overflow-x:clip on clusters where word-break didn't fix the bleed
-  squeezeTargets?: string[];  // targeted squeeze repair: drop columnCount + relax width on ONLY these squeezed clusters (Fix 3)
+  squeezeTargets?: string[];  // targeted squeeze repair: drop columnCount + relax width on ONLY these squeezed clusters
   collapseTargets?: string[]; // targeted collapse repair: drop layout on ONLY these collapsed regions (preserves the rest of the design)
-  paletteMode?: 'restrained' | 'vivid'; // declared palette intent — vivid lifts the area cap (Mech 4)
+  paletteMode?: 'restrained' | 'vivid'; // declared palette intent — vivid lifts the area cap
 }
 
 const ACCENT_STRIP_KEYS = ['background', 'backgroundColor', 'backgroundImage', 'color'];
@@ -228,7 +228,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
         layoutInput = stripKeys(layoutInput, ['columnCount', 'width', 'maxWidth', 'minWidth', 'flexBasis']);
         droppedProps.push(`squeeze(${rule.target})`);
       }
-      // WS5 readable-measure refusal: a text-bearing cluster narrowed below a
+      // Readable-measure refusal: a text-bearing cluster narrowed below a
       // readable measure (chars-per-line < floor) is the "sleeps in the washroom"
       // failure. Refuse the narrowing value instead of emitting a broken column.
       // The cluster's samples tell us it carries text; the layout value tells us
@@ -268,7 +268,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
     rulesEmitted += hideSelectors.length;
   }
 
-  // 3c) Targeted contrast repair (Fix 2). The sampler flagged these SPECIFIC
+  // 3c) Targeted contrast repair. The sampler flagged these SPECIFIC
   // handles as still low-contrast after the body floor — a text element sitting
   // on a dark block the model painted, whose own color stayed dark. Force a
   // readable text color computed against that cluster's ACTUAL painted background
@@ -360,7 +360,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
     }
   }
 
-  // WS2 fluid guard: post-compile safety net. The structure path already wraps
+  // Fluid guard: post-compile safety net. The structure path already wraps
   // fixed px in min(X,100%) by construction; this catches any leak from any path
   // and logs it so a frozen-one-viewport value can never reach emitted CSS.
   const rawPxLeaks = assertNoRawPxSizing(blocks.join('\n\n'));
@@ -477,7 +477,7 @@ function firstNonEmpty(...vals: (string | undefined)[]): string {
 }
 
 /**
- * WS5 readable-measure refusal. For a text-bearing cluster (samples hold ≥80 chars),
+ * Readable-measure refusal. For a text-bearing cluster (samples hold ≥80 chars),
  * a width/maxWidth/minWidth whose fixed-px value yields < MIN_CHARS_PER_LINE chars
  * per line (width ÷ (16×0.5)) would wrap every word — the narrow-column failure.
  * Refuse the offending sizing keys; the cluster keeps its other layout. Pure
@@ -508,7 +508,7 @@ function refuseSubMeasure(layout: LayoutDecls, cluster: Cluster | undefined, dro
 }
 
 /**
- * Derive a solid base-coat tone from the canvas background (Fix 4). If the canvas
+ * Derive a solid base-coat tone from the canvas background. If the canvas
  * is a solid color, use it directly. If it's a gradient/keyword, extract the first
  * parseable color — the base coat just needs to be luminance-compatible with the
  * canvas, not an exact match.

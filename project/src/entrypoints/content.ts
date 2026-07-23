@@ -1,11 +1,11 @@
 /**
- * content — the Phase-1 pipeline orchestrator, running in the page.
+ * content — the page transform orchestrator, running in the page.
  *
  *   perceive -> (background: reason -> DesignSpec) -> compile -> apply CSS
  *            -> verify(before) -> repair loop (recompile / re-reason / keepBest)
  *            -> persist
  *
- * Round 7: shadow-aware (inject + defend per open shadow root), SPA navigation
+ * Shadow-aware (inject + defend per open shadow root), SPA-navigation aware
  * (hook pushState/popstate, re-perceive + re-compile on route change), per-URL
  * persistence (origin + normalized pathname).
  */
@@ -33,12 +33,12 @@ export interface Ledger {
   compileMs: number;
   applyMs: number;
   verifyMs: number;
-  pixelVerifyMs: number;   // WS1: 3-position capture + pixel detectors
-  persistMs: number;      // WS4: storage write
-  unaccountedMs: number;  // WS4: totalMs − sum(stages); a big gap = something unmeasured
+  pixelVerifyMs: number;   // rendered-pixel capture + detectors
+  persistMs: number;      // storage write
+  unaccountedMs: number;  // totalMs − sum(stages); a big gap = something unmeasured
   totalMs: number;
   paidCalls: number;
-  paintCount: number;     // WS4: visible repaints (<=2 contract)
+  paintCount: number;     // visible repaints (the ≤2 contract)
 }
 
 export interface TransformOutcome {
@@ -58,7 +58,7 @@ export interface TransformOutcome {
   model?: string;        // which model served the request
   usage?: unknown;       // token usage
   paidCalls?: number;    // paid model calls used
-  paintCount?: number;   // WS4: visible repaints
+  paintCount?: number;   // visible repaints
   ledger?: Ledger;       // stage-by-stage time breakdown (structured run report)
 }
 
@@ -68,7 +68,7 @@ const FAILED = 'webmorphFailed';
 let inFlight: Promise<TransformOutcome> | null = null;
 let activeShadowRoots: ShadowRoot[] = [];
 
-// Dynamic-content defense (req C): the stored spec + opts, used to re-stamp +
+// Dynamic-content defense: the stored spec + opts, used to re-stamp +
 // re-apply the design on inserted content (free, no model call).
 let activeSpec: DesignSpec | null = null;
 let activeOpts: CompileOptions = {};
@@ -87,7 +87,7 @@ function markFailed(msg: string): void {
 
 // ── Core Phase-1 run ───────────────────────────────────────────────
 
-/** WS1: build ClusterRect[] from the current [data-wm-c] elements for the pixel
+/** Build ClusterRect[] from the current [data-wm-c] elements for the pixel
  *  detectors. One representative per handle, with the rendered rect + text + font
  *  size. Skips our own UI nodes. */
 function buildClusterRects(): ClusterRect[] {
@@ -109,10 +109,10 @@ function buildClusterRects(): ClusterRect[] {
   return out;
 }
 
-/** WS1: capture the visible tab at 3 scroll positions (top / mid / deep) and run
+/** Capture the visible tab at 3 scroll positions (top / mid / deep) and run
  *  the pixel detectors. Returns the PixelVerifyResult + the time it took. Asks the
  *  background service worker for captureVisibleTab (only it can capture a tab).
- *  Free, deterministic, zero model calls — the centerpiece of WS1. */
+ *  Free, deterministic, zero model calls. */
 async function captureAndPixelVerify(): Promise<{ result: PixelVerifyResult; ms: number }> {
   const tc = performance.now();
   const rects = buildClusterRects();
@@ -137,7 +137,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   const t0 = Date.now();
   delete document.documentElement.dataset[APPLIED];
   delete document.documentElement.dataset[FAILED];
-  // WS4: reset the visible-paint counter at the start of every transform. The
+  // Reset the visible-paint counter at the start of every transform. The
   // harness asserts paintCount <= 2 (apply + one batched repair). applyStyleEverywhere
   // increments it.
   document.documentElement.dataset['webmorphPaintCount'] = '0';
@@ -206,7 +206,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   let lastPixel: PixelVerifyResult | null = null;
   let compileMsTotal = 0, applyMsTotal = 0, verifyMsTotal = 0, pixelVerifyMsTotal = 0;
 
-  // WS4 batched repair: apply once (paint 1) → verify (DOM + pixel) → compute ALL
+  // Batched repair: apply once (paint 1) → verify (DOM + pixel) → compute ALL
   // repairs as a batch → one merged re-apply (paint 2) → STOP. A 3rd visible repaint
   // is a failing check (the harness asserts paintCount <= 2). No keepBest re-apply
   // beyond paint 2: if paint 2 is broken we rollback+fail rather than repaint again.
@@ -245,7 +245,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     return { ok: false, message: (e as Error).message || 'Produced no applicable styles.', spec, reasoning: spec.reasoning, paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
   }
 
-  // WS1: passed := DOM passed AND pixel passed. A by-eye-killer is mechanically
+  // passed := DOM passed AND pixel passed. A by-eye-killer is mechanically
   // impossible to report as PASS.
   const phase1Passed = phase1Verify.passed && (lastPixel?.passed ?? true);
 
@@ -325,7 +325,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     }
   }
 
-  // WS4: verify the paint budget. <=2 paints is the contract; a 3rd = failing.
+  // Verify the paint budget. <=2 paints is the contract; a 3rd = failing.
   // Set the dataset explicitly from the internal counter — applyStyleEverywhere no
   // longer increments it (defense re-applies are invisible restores, not visible
   // paints), so the harness reads the true visible-paint count.
@@ -334,7 +334,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   if (finalPaintCount > 2) logDebug(`PAINT BUDGET EXCEEDED: ${finalPaintCount} > 2 (visible repair theater)`);
 
 
-  // Persist + defend + mark applied. (WS4: time the persist stage too.)
+  // Persist + defend + mark applied. Time the persist stage too.
   const key = storageKey();
   const state = await loadSiteState(key);
   const id = `style_${Date.now()}`;
@@ -352,7 +352,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   ensureEscapeUI(toggleSiteState);
   markApplied(id);
 
-  // Ledger — stage-by-stage time breakdown (WS4: account to wall-clock, nothing
+  // Ledger — stage-by-stage time breakdown (account to wall-clock, nothing
   // unexplained). unaccountedMs = totalMs − sum(stages); a big gap means a stage
   // is eating time we didn't instrument (the ~44s unexplained-overhead case).
   const totalMs = Date.now() - t0;
@@ -439,7 +439,7 @@ async function removeAll(): Promise<void> {
   await clearSiteState(storageKey());
 }
 
-// ── Dynamic content defense (req C) ────────────────────────────────
+// ── Dynamic content defense ────────────────────────────────────────
 // Signature-based handles are deterministic: new content with the same visual
 // signature gets the SAME handle, so the stored CSS applies once re-stamped.
 // A MutationObserver (light DOM + active shadow roots) debounces a FREE
@@ -478,7 +478,7 @@ function startDynamicDefense(): void {
     obs.observe(root, { childList: true, subtree: true });
     shadowDynamicObservers.push(obs);
   }
-  // Resize (req B): re-compile so containerWidthPx-based font clamps track the new
+  // Resize: re-compile so containerWidthPx-based font clamps track the new
   // width. Most fluidity is already in the CSS (clamp/min(100%,…)); this catches
   // the container-measured clamps. Debounced with the same restyle timer.
   window.addEventListener('resize', scheduleRestyle);
@@ -512,7 +512,7 @@ async function handleRouteChange(): Promise<void> {
   await reapplyStored();
 }
 
-// ── Adaptive effort (req E) ─────────────────────────────────────────
+// ── Adaptive effort ─────────────────────────────────────────────────
 // Simple intents (hide/remove a named thing) take a FAST path: perceive → match
 // the target noun to clusters → hide-only spec → apply. Zero paid model calls,
 // ~1-2s. Ambitious/descriptive intents get the full design pipeline. A heuristic
@@ -569,7 +569,7 @@ async function fastHidePath(intent: string): Promise<TransformOutcome> {
     return { ok: false, message: 'That element is protected and cannot be hidden.', paidCalls: 0, wallMs: Date.now() - t0 };
   }
   applyStyleEverywhere(sanitized, activeShadowRoots);
-  document.documentElement.dataset['webmorphPaintCount'] = '1'; // WS4: 1 visible paint (fast path)
+  document.documentElement.dataset['webmorphPaintCount'] = '1'; // 1 visible paint (fast path)
   await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
   const key = storageKey();
@@ -619,7 +619,7 @@ export default defineContentScript({
       if (message.action === 'transform' && message.intent) {
         if (!inFlight) {
           const intent = message.intent;
-          // Adaptive effort (req E): simple hide intents take the fast no-model path.
+          // Adaptive effort: simple hide intents take the fast no-model path.
           const runner = classifyIntent(intent) === 'hide' ? fastHidePath(intent) : runStyle(intent);
           inFlight = runner.finally(() => { inFlight = null; });
         }

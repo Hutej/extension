@@ -1,7 +1,7 @@
 /**
  * core/persist — save a site's transform, re-identify, re-apply on reload.
  *
- * Round 7: persist the ACTUALLY APPLIED CSS (not a re-compiled version) +
+ * Persist the ACTUALLY APPLIED CSS (not a re-compiled version) +
  * compileOptions (so SPA re-compile has repair options). Per-URL scoping
  * (origin + normalized pathname) with origin-level fallback.
  */

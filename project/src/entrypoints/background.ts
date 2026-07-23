@@ -23,7 +23,7 @@ export default defineBackground(() => {
       });
       return true; // async response
     }
-    // WS1: captureVisibleTab relay — only the service worker can capture a tab.
+    // captureVisibleTab relay — only the service worker can capture a tab.
     // The content script asks for a screenshot of its own tab; we capture the
     // active tab of the SENDER's window (the harness brings the tab to front first).
     if (message.action === 'captureVisibleTab') {

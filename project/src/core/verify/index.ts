@@ -22,7 +22,7 @@ export interface VerifyResult {
   passed: boolean;
   checks: { notBlank: boolean; noOverflow: boolean; noOverlap: boolean; contrastOk: boolean; changed: boolean; coherent: boolean; covered: boolean; contentCollapsed: boolean; contentVisible: boolean; layoutReshaped: boolean };
   changeScore: number;
-  layoutReshapedScore: number;   // Round 9: structural-change signal (columns + content width + region widths)
+  layoutReshapedScore: number;   // structural-change signal (columns + content width + region widths)
   accentFraction: number;
   framedFraction: number;
   coverageFraction: number;         // total: model + base-coat + hide
@@ -102,7 +102,7 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   if (!noOverlap) details.push(`new region overlaps: ${before.overlapCount} -> ${after.overlapCount}`);
 
   // 4) Contrast sane. Collect the specific cluster handles that carry flagged
-  // low-contrast text so forceContrast can fix exactly those (Fix 2).
+  // low-contrast text so forceContrast can fix exactly those.
   const contrastFlags = new Set<string>();
   const contrastTargetBgs = new Map<string, string>();
   const contrastOk = checkContrast(details, contrastFlags, contrastTargetBgs);
@@ -115,7 +115,7 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   // and padding shifts, so a recolor can pass it. This measures the two signals
   // that distinguish a real redesign from a recolor: did the column count change,
   // did the content width change materially, did major regions change width?
-  // Round 9: LOG ONLY this run — calibrate the threshold from real data before
+  // LOG ONLY this run — calibrate the threshold from real data before
   // adding it to `passed` (enforce second).
   const columnsReshaped = before.columnCount !== after.columnCount;
   const wBefore = before.contentMaxWidthPx, wAfter = after.contentMaxWidthPx;
@@ -215,7 +215,7 @@ function findBleedTargets(): string[] {
 
 /**
  * Cluster handles whose text is squeezed — effective chars-per-line falls below
- * MIN_CHARS_PER_LINE (Fix 3). Text that "fits" but wraps every word (one-char-
+ * MIN_CHARS_PER_LINE. Text that "fits" but wraps every word (one-char-
  * per-line, or 3-4 chars per line) is invisible to bleed checks but visibly
  * broken. Measured via clientWidth / (fontSize × 0.5) — no per-node layout thrash.
  * Only flags clusters with substantial text (not empty containers or tiny labels).
@@ -381,7 +381,7 @@ function checkRepeatedAccent(before: LayoutFingerprint): boolean {
 }
 
 /** Accent: real painted area of colorful backgrounds ÷ viewport (catches "every link red").
- *  WS5: counts CANVAS-HELD color honestly — a vivid canvas is accent, not "zero accent".
+ *  Counts CANVAS-HELD color honestly — a vivid canvas is accent, not "zero accent".
  *  (Root cause: a design with color only on the canvas read accent=0.000 and passed
  *  coherence while looking flat. The metric must SEE canvas color.) */
 function measureAccentAreaFraction(): number {
@@ -399,7 +399,7 @@ function measureAccentAreaFraction(): number {
 }
 
 /**
- * WS5 pure helper: add the canvas background's saturated area to the accent sum
+ * Pure helper: add the canvas background's saturated area to the accent sum
  * so a vivid canvas is counted as accent (the flat-while-colorful false pass).
  * Pure — unit-testable without a DOM. `canvasBg` is a CSS color string.
  */

@@ -62,7 +62,7 @@ export function buildLayoutDeclarations(input: LayoutDecls, opts: LayoutBuildOpt
     // viewport) so oversized headings can't bleed out of a narrow card.
     if (cssProp === 'font-size') val = clampDisplayFont(val, opts.containerWidthPx);
 
-    // Fix 3 — columnCount: only accept if containerWidth ÷ count ≥ MIN_COLUMN_PX.
+    // columnCount: only accept if containerWidth ÷ count ≥ MIN_COLUMN_PX.
     // Otherwise clamp to the max count that fits (1 if none). Kills the one-char-
     // per-line failure (columnCount:2 in a ~150px column).
     if (cssProp === 'column-count') {
@@ -74,7 +74,7 @@ export function buildLayoutDeclarations(input: LayoutDecls, opts: LayoutBuildOpt
       }
     }
 
-    // Fix 3 — grid-template-columns: normalize to overflow-safe form by
+    // grid-template-columns: normalize to overflow-safe form by
     // construction. Bare 'fr' → minmax(0, Xfr) so min-content can't force
     // overflow; fixed px tracks wider than container → min(Xpx, 100%).
     // This makes the 1.97× column blow-out impossible to emit, not repaired after.

@@ -186,7 +186,7 @@ export const FONT_CONTAINER_RATIO = 0.15;
 /**
  * Make display type viewport/container-safe. Body text (< LARGE_FONT_PX) passes
  * through untouched. Large type is clamped so it can never overflow its block:
- * the ceiling is a fraction of the container width when known (Fix 1), else a
+ * the ceiling is a fraction of the container width when known, else a
  * viewport fraction. A value that already fits its container is left as-is.
  */
 export function clampDisplayFont(val: string, containerWidthPx?: number): string {
@@ -217,7 +217,7 @@ function fontLengthToPx(v: string): number | null {
   }
 }
 
-/** Verify thresholds. Round 7: strict — calibrated to enforce all-or-nothing, not ship-something. */
+/** Verify thresholds. Strict — calibrated to enforce all-or-nothing, not ship-something. */
 export const MIN_CONTRAST_RATIO = 4.5;
 export const MAX_OVERFLOW_RATIO = 1.02;       // was 1.28 — 28% overflow was a visible scrollbar
 export const CONTRAST_SAMPLE_COUNT = 50;       // was 12 — body text must pass, not just headings
@@ -225,7 +225,7 @@ export const CONTRAST_MAX_FAILURES = 2;        // ≤2 fail out of 50 samples
 export const CONTRAST_TOP_FAIL_COUNT = 10;     // top-N largest text that must ALL pass
 
 /**
- * Change/coherence thresholds. Round 7: tightened to reject near-recolors.
+ * Change/coherence thresholds. Tightened to reject near-recolors.
  * Genuine redesigns land ~0.6; 0.25 sends recolors (~0.0) and flat specs back.
  */
 export const MIN_CHANGE_SCORE = 0.25;
@@ -276,7 +276,7 @@ export const MAX_HIDDEN_HEIGHT_PX = 500;   // ...that are also tall
 export const MAX_HIDDEN_MEMBERS = 40;      // refuse hiding huge repeated clusters (likely content)
 
 /**
- * Coverage gate (verify). Round 7: 0.85 was 0.5 — a page where 50% of regions
+ * Coverage gate (verify). 0.85 (was 0.5) — a page where 50% of regions
  * still look original is NOT a redesign. 0.85 enforces all-or-nothing.
  * Split: total (model + base-coat + hide) ≥ 0.85, model-only ≥ 0.40.
  * The model coverage gate prevents the base-coat-only escape (a lazy spec that
@@ -325,7 +325,7 @@ export function luminanceCompatible(regionBg: string, canvasBg: string): boolean
 export const NARROWING_KEYS = new Set(['width', 'maxWidth', 'minWidth', 'gridTemplateColumns', 'columnCount', 'flexBasis', 'flex']);
 
 /**
- * Minimum pixels per CSS column (Fix 3). columnCount is only accepted if
+ * Minimum pixels per CSS column. columnCount is only accepted if
  * containerWidth ÷ count ≥ this — otherwise it's clamped to the max that fits.
  * ~120px is roughly 15ch at 8px average char width: text narrower than this
  * wraps every word, producing the one-character-per-line failure.
@@ -334,7 +334,7 @@ export const NARROWING_KEYS = new Set(['width', 'maxWidth', 'minWidth', 'gridTem
 export const MIN_COLUMN_PX = 120;
 
 /**
- * Minimum chars-per-line before text is "squeezed" (Fix 3). A text container
+ * Minimum chars-per-line before text is "squeezed". A text container
  * whose effective chars-per-line falls below this wraps every word — invisible
  * to bleed checks (text stays in-bounds) but visibly broken. Measured via
  * clientWidth / (fontSize × 0.5) — no per-node layout thrash.
@@ -342,7 +342,7 @@ export const MIN_COLUMN_PX = 120;
 export const MIN_CHARS_PER_LINE = 12;
 
 /**
- * Clamp columnCount to fit the container (Fix 3). Pure: takes the requested
+ * Clamp columnCount to fit the container. Pure: takes the requested
  * count and container width as data so it's unit-testable without a DOM.
  * Returns the clamped count and logs the original if clamped.
  */
@@ -354,8 +354,8 @@ export function clampColumnCount(requested: number, containerWidthPx?: number): 
 }
 
 /**
- * Normalize a grid-template-columns value to be overflow-safe by construction
- * (Fix 3). Prevents the 1.97× column blow-out at the CSS level, not via repair:
+ * Normalize a grid-template-columns value to be overflow-safe by construction.
+ * Prevents the 1.97× column blow-out at the CSS level, not via repair:
  *  - fr units → minmax(0, Xfr) so min-content can't force overflow
  *  - fixed px tracks wider than the container → min(Xpx, 100%)
  *  - minmax(min, max) with min > 0 → minmax(0, max) so min never forces overflow
@@ -391,7 +391,7 @@ function splitTracks(val: string): string[] {
 }
 
 /**
- * WS2 fluid guard: a sizing declaration (width/max-width/min-width) whose value is a
+ * Fluid guard: a sizing declaration (width/max-width/min-width) whose value is a
  * RAW fixed length (px/pt/cm/in/mm/pc/vw) — NOT wrapped in min()/clamp()/calc()/
  * max() — would freeze the design at one viewport measurement. The compiler already
  * wraps fixed px in min(X,100%) by construction (structure/index.ts); this guard is

@@ -1,6 +1,6 @@
 /**
  * core/config — model + pipeline settings.
- * Round 7: no fallback chain (honest error > recolor), raised maxTokens,
+ * No fallback chain (honest error > recolor), raised maxTokens,
  * DEBUG gated on dev env.
  */
 

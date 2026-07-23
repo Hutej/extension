@@ -4,7 +4,7 @@
  * geometry + text, let visually-similar elements CLUSTER themselves, and stamp
  * each emergent cluster with a stable signature-hash handle.
  *
- * Round 7 rewrite: no node cap (see the whole page), coarsened signature
+ * Full-page rewrite: no node cap (see the whole page), coarsened signature
  * buckets (merge families), hierarchical tree serialization (model sees
  * parent-child nesting), two-tier detail (every handle listed, attention
  * focused), shadow-root tracking for downstream CSS injection, pre-resolved

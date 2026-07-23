@@ -4,7 +4,7 @@
  * OPEN-ENDED (any tokens/values) but STRUCTURED (validated shape, real handles).
  * The compiler — not the AI — decides which declarations are safe to emit.
  *
- * Round 7: removed `keep` (was a loophole that codified partial redesigns —
+ * Removed `keep` (was a loophole that codified partial redesigns —
  * the model could "keep" any cluster it didn't want to redesign and completeness
  * passed while the cluster stayed original). Removed `moves` (dead feature —
  * validated and planned but never executed). The base-coat harmonizer now

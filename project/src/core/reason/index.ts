@@ -2,9 +2,9 @@
  * core/reason — LLM transport + prompt. The ONLY place that talks to the model.
  * Owns retry/backoff/timeout/error-mapping; returns a validated DesignSpec.
  *
- * Round 7: simplified system prompt (8 directives, ~40 lines — was 15+ paragraphs).
- * Removed gpt-4o fallback (a known recolorer — honest error is better than a
- * recolor). No fallback chain: the primary model gets one shot.
+ * Simplified system prompt (12 directives). Removed the gpt-4o fallback (a known
+ * recolorer — honest error is better than a recolor). No fallback chain: the
+ * primary model gets one shot.
  */
 
 import { AI_CONFIG, logDebug } from '../config';

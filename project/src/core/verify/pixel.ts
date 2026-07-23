@@ -1,15 +1,15 @@
 /**
  * core/verify/pixel — pure rendered-pixel detectors. No DOM.
  *
- * After `apply`, verification must read RENDERED PIXELS — the only thing the user
- * judges. These four deterministic detectors (void / invisible-text / squeeze /
- * recolor) operate on a `PixelInput` (an ImageData-shaped buffer) + cluster rects,
- * so they are unit-testable without a browser. The content script supplies real
- * captures via chrome.tabs.captureVisibleTab (see capture.ts); the harness supplies
- * them via page.screenshot.
+ * After `apply`, verification reads RENDERED PIXELS — what the user actually sees.
+ * These deterministic detectors (void / invisible-text / squeeze / recolor) operate
+ * on a `PixelInput` (an ImageData-shaped buffer) + cluster rects, so they are
+ * unit-testable without a browser. The content script supplies real captures via
+ * chrome.tabs.captureVisibleTab (see capture.ts); the harness supplies them via
+ * page.screenshot.
  *
- * All Tier-1, deterministic, zero model calls. A cheap vision model as Tier-2 is
- * built only if Tier-1 insufficiency is proven with data (flag-and-stop).
+ * All deterministic, zero model calls. A vision model is added only if these
+ * detectors are proven insufficient with data.
  */
 
 /** An ImageData-shaped buffer (subset). Pure data — no DOM dependency. */
@@ -129,8 +129,8 @@ export function detectRecolor(before: PixelInput, after: PixelInput): boolean {
 }
 
 /** Result of the post-apply pixel verification stage. `critiques` are pixel-grounded
- *  messages the repair router appends to a reReason so a by-eye-killer is mechanically
- *  impossible to report as PASS. */
+ *  messages the repair router appends to a regeneration request so a visibly-broken
+ *  design is mechanically impossible to report as passing. */
 export interface PixelVerifyResult {
   voids: string[];          // cluster handles rendering as blank voids
   invisibleText: string[]; // cluster handles whose text renders invisible
@@ -140,7 +140,7 @@ export interface PixelVerifyResult {
 }
 
 /**
- * WS1 pixelVerify: run all four (well, three rect-based) detectors across the
+ * Run the rect-based detectors (void / invisible-text / squeeze) across the
  * captured positions and aggregate. Pure: takes captures + cluster rects as data.
  * The recolor detector is handled separately by the harness (it needs the before
  * capture, which the product path doesn't keep around per-transform).

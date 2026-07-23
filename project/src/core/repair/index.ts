@@ -43,7 +43,7 @@ export interface Attempt {
 
 export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasonsDone: number, paletteMode?: 'restrained' | 'vivid', pixel?: PixelVerifyResult | null): RepairDecision {
   const c = verify.checks;
-  // WS1: pixel-grounded handles — invisible-text clusters the DOM contrast sampler
+  // Pixel-grounded handles — invisible-text clusters the DOM contrast sampler
   // missed, and pixel-squeeze below the readable measure. Merged into the
   // deterministic repair so paint-2 targets what the USER sees, not just DOM flags.
   const pixelInvisible = pixel?.invisibleText ?? [];
@@ -82,7 +82,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // repairs (padding/sizing/layout) run ONLY for overflow/overlap failures — they
   // can never reduce accent, so they must not be spent on a coherence failure.
 
-  // WS1: when pixel-invisible text is SEVERE (>=6 clusters), a deterministic
+  // When pixel-invisible text is SEVERE (>=6 clusters), a deterministic
   // force-contrast text-color bump is insufficient — the bg/text combo is the
   // problem, not just the text color, and force-contrast would consume the one
   // paint-2 repair leaving no recourse. Escalate to reReason (within the 1-reReason
@@ -93,7 +93,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
 
   // Contrast: force a readable text color — the canvas body floor PLUS the
   // specific handles the sampler flagged (dark text on a dark painted block).
-  // WS1: also include pixel-invisible clusters (text rendering with near-zero
+  // Also include pixel-invisible clusters (text rendering with near-zero
   // variance against its bg) — the DOM sampler can miss them; the pixel detector
   // catches them by reading rendered pixels. Trigger if EITHER DOM or pixel flags.
   const contrastHandles = Array.from(new Set([...verify.contrastTargets, ...pixelInvisible]));
@@ -117,8 +117,8 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // then blanket dropLayout (last resort). Overflow-specific repairs run
   // ONLY when !noOverflow — when !noOverlap alone, skip straight to keepBest
   // (overlap is caused by layout shifting, not by sizing growth).
-  // WS1: pixel-squeeze (below readable measure) triggers the squeeze repair even
-  // when there is no geometric overflow — the BBC one-word-per-line failure has
+  // Pixel-squeeze (below readable measure) triggers the squeeze repair even
+  // when there is no geometric overflow — a one-word-per-line failure has
   // no overflow but is visibly broken. pixelSqueeze feeds the same target list.
   if (pixelSqueeze.length && !prev.squeezeTargets) {
     return { action: 'recompile', options: { ...prev, squeezeTargets: pixelSqueeze }, reason: `pixel squeeze repair on ${pixelSqueeze.length} cluster(s): ${pixelSqueeze.slice(0, 6).join(',')}` };

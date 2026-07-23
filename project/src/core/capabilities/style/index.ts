@@ -32,7 +32,7 @@ export interface BuildOptions {
    *  can't be dark-on-dark on the redesigned canvas. */
   contrastBg?: string;
   /** The cluster's measured block width — display type in the styles bag is
-   *  clamped to fit it, just like the layout bag (Fix 1: oversized type set via
+   *  clamped to fit it, just like the layout bag (oversized type set via
    *  "styles" used to escape the clamp). */
   containerWidthPx?: number;
   /** CSS variable map from perception (--name → resolved rgb). Used to resolve

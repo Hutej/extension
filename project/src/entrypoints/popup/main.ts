@@ -1,6 +1,6 @@
 /**
  * popup/main — WebMorph popup UI. Drives the transform via the content script.
- * Round 7: product-quality — error taxonomy, elapsed timer, metrics, getSiteInfo
+ * Product-quality — error taxonomy, elapsed timer, metrics, getSiteInfo
  * (no tabs permission needed).
  */
 
