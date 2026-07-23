@@ -67,6 +67,7 @@ const FAILED = 'webmorphFailed';
 
 let inFlight: Promise<TransformOutcome> | null = null;
 let activeShadowRoots: ShadowRoot[] = [];
+let lastAppliedCss = '';   // last applied CSS — for immediate shadow-root injection on dynamic content
 
 // Dynamic-content defense: the stored spec + opts, used to re-stamp +
 // re-apply the design on inserted content (free, no model call).
@@ -342,6 +343,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   const state = await loadSiteState(key);
   const id = `style_${Date.now()}`;
   const appliedCss = document.getElementById('webmorph-style')?.textContent ?? attempts[attempts.length - 1]?.css ?? '';
+  lastAppliedCss = appliedCss;
   state.enabled = true;
   state.style = { id, intent, spec, css: appliedCss, reasoning: spec.reasoning, compileOptions: options, createdAt: Date.now() };
   const tPersist = performance.now();
@@ -457,7 +459,7 @@ function restyleDynamic(): void {
   activeShadowRoots = perception.shadowRoots;
   const compiled = compileSpec(activeSpec, perception, activeOpts);
   const css = sanitizeCss(compiled.css).css;
-  if (css) applyStyleEverywhere(css, activeShadowRoots);
+  if (css) { applyStyleEverywhere(css, activeShadowRoots); lastAppliedCss = css; }
   logDebug(`dynamic restyle: ${perception.clusters.length} clusters re-stamped + re-applied`);
 }
 
@@ -474,7 +476,26 @@ function startDynamicDefense(): void {
     muts.some((m) => Array.from(m.addedNodes).some(
       (n) => !((n instanceof HTMLElement) && n.hasAttribute('data-webmorph-ui')),
     ));
-  dynamicObserver = new MutationObserver((muts) => { if (hasForeignAdd(muts)) scheduleRestyle(); });
+  dynamicObserver = new MutationObserver((muts) => {
+    if (!hasForeignAdd(muts)) return;
+    // Scan for newly-added elements with shadow roots not yet tracked — inject
+    // the design CSS immediately so scroll-loaded custom elements (cards, video
+    // portals) arrive styled with no 600ms flash. 0 paintCount (defense path).
+    for (const m of muts) {
+      for (const n of Array.from(m.addedNodes)) {
+        if (!(n instanceof HTMLElement)) continue;
+        const sr = n.shadowRoot;
+        if (sr && !activeShadowRoots.includes(sr)) {
+          activeShadowRoots.push(sr);
+          const obs = new MutationObserver((muts) => { if (hasForeignAdd(muts)) scheduleRestyle(); });
+          obs.observe(sr, { childList: true, subtree: true });
+          shadowDynamicObservers.push(obs);
+          if (lastAppliedCss) applyStyleEverywhere(lastAppliedCss, [sr]);
+        }
+      }
+    }
+    scheduleRestyle();
+  });
   dynamicObserver.observe(document.body, { childList: true, subtree: true });
   for (const root of activeShadowRoots) {
     const obs = new MutationObserver((muts) => { if (hasForeignAdd(muts)) scheduleRestyle(); });
@@ -572,6 +593,7 @@ async function fastHidePath(intent: string): Promise<TransformOutcome> {
     return { ok: false, message: 'That element is protected and cannot be hidden.', paidCalls: 0, wallMs: Date.now() - t0 };
   }
   applyStyleEverywhere(sanitized, activeShadowRoots);
+  lastAppliedCss = sanitized;
   document.documentElement.dataset['webmorphPaintCount'] = '1'; // 1 visible paint (fast path)
   await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
