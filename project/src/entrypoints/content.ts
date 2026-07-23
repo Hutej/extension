@@ -167,23 +167,14 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
 
   let reReasonsDone = 0;
 
-  // Completeness contract — BEFORE apply.
+  // Completeness contract — BEFORE apply. Log only, do NOT spend a paid re-ask
+  // here — the shared MAX_REPAIR_ATTEMPTS=1 budget must stay intact for post-apply
+  // pixel/quality repair (the by-eye-killer path). Base-coat harmonizes unaccounted
+  // clusters; the post-apply !c.covered gate catches under-coverage with the budget.
   {
     const comp = checkCompleteness(spec, perception.handles);
     if (!comp.ok) {
       logDebug(`INCOMPLETE SPEC — ${comp.reason}`);
-      if (reReasonsDone < MAX_REPAIR_ATTEMPTS && Date.now() - t0 < 60000) {
-        reReasonsDone++;
-        logDebug('PAID SECOND CALL — completeness gate failed');
-        const critique = comp.reason + ' Unaccounted clusters will be base-coated as a safety net, but you must actively design the major clusters.';
-        const re = await askForSpec(intent, serialized, critique, Math.max(15000, 115000 - (Date.now() - t0)));
-        if (re.callMs != null) modelCalls.push({ ms: re.callMs, promptTokens: (re.usage as { prompt_tokens?: number })?.prompt_tokens });
-        if (re.ok && re.spec) {
-          spec = re.spec;
-          const comp2 = checkCompleteness(spec, perception.handles);
-          logDebug(`revised spec: ${comp2.ok ? 'complete' : comp2.reason ?? 'still incomplete — proceeding to verify'}`);
-        }
-      }
     } else {
       logDebug(`completeness OK — ${perception.handles.size} clusters, ${comp.unaccounted.length} base-coated`);
     }
