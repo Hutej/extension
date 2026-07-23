@@ -179,8 +179,15 @@ async function zoomCheck(page: Page): Promise<boolean> {
       const el = document.querySelector('[data-wm-c]') as HTMLElement | null;
       return el ? el.offsetWidth > 0 && el.offsetHeight > 0 : false;
     });
+    // At 125% zoom, also run the pixel audit — invisible text + voids must be zero.
+    // (80% zoom pixel is covered by multiConditionPixelCheck.)
+    let pixelOk = true;
+    if (z === '1.25') {
+      const px = await pixelAudit(page);
+      pixelOk = px.voids === 0 && px.invisibleText === 0;
+    }
     await page.evaluate(() => { (document.body.style as unknown as { zoom: string }).zoom = ''; });
-    if (overflow || !hasContent) return false;
+    if (overflow || !hasContent || !pixelOk) return false;
   }
   await page.waitForTimeout(200);
   return true;
@@ -325,7 +332,13 @@ async function multiConditionPixelCheck(page: Page): Promise<boolean> {
   const b = await pixelAudit(page);
   await page.evaluate(() => { (document.body.style as unknown as { zoom: string }).zoom = ''; });
   await page.waitForTimeout(200);
-  return a.voids === 0 && a.invisibleText === 0 && b.voids === 0 && b.invisibleText === 0;
+  // 125% zoom — invisible text + voids must be zero (the 125% pixel audit).
+  await page.evaluate(() => { (document.body.style as unknown as { zoom: string }).zoom = '1.25'; });
+  await page.waitForTimeout(400);
+  const c = await pixelAudit(page);
+  await page.evaluate(() => { (document.body.style as unknown as { zoom: string }).zoom = ''; });
+  await page.waitForTimeout(200);
+  return a.voids === 0 && a.invisibleText === 0 && b.voids === 0 && b.invisibleText === 0 && c.voids === 0 && c.invisibleText === 0;
 }
 
 /** Run all post-apply checks, return a PostApplyChecks object. */
