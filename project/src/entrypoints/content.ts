@@ -150,6 +150,11 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   document.documentElement.dataset['webmorphPaintCount'] = '0';
   stopDynamicDefense();
   activeSpec = null;
+  // Clear any stale style from a previous transform or reapplyStored before the
+  // new transform begins — ensures the before-capture (A1) sees the true original
+  // AND no stale style survives a model failure (the BBC harness/live discrepancy).
+  removeStyleEverywhere(activeShadowRoots);
+  lastAppliedCss = '';
 
   clearHandles();
   const perception = perceive();
@@ -171,6 +176,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   if (specRes.callMs != null) modelCalls.push({ ms: specRes.callMs, promptTokens: (specRes.usage as { prompt_tokens?: number })?.prompt_tokens });
   if (!specRes.ok || !specRes.spec) {
     logDebug(`LEDGER perceive=${perception.builtInMs}ms serialize=${serializeChars}chars model=[${modelCalls.map((c) => `${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] total=${Date.now() - t0}ms paidCalls=${modelCalls.length} — FAILED ${specRes.kind ?? ''}`);
+    removeStyleEverywhere(activeShadowRoots);
     markFailed(specRes.message || 'engine failed');
     return { ok: false, kind: specRes.kind, message: specRes.message || 'Design engine failed.', paidCalls: modelCalls.length, wallMs: Date.now() - t0 };
   }
