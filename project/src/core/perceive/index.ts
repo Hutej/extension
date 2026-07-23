@@ -21,6 +21,10 @@ const MAX_TIME_MS = 6000;           // budget — no node cap, time is the only 
 const MAX_DEPTH = 30;               // safety net (not a truncation — 30 is very deep)
 const CLUSTER_ATTR = 'data-wm-c';
 const TIER1_FULL_DETAIL_COUNT = 80; // top clusters by prominence get full serialization
+const SERIALIZE_BUDGET = 12000;   // char budget for the serialized perception (demote/drop tail when over)
+
+/** Last serialization budget stats — read by content.ts for the ledger. */
+export let lastSerializeBudget = { before: 0, after: 0 };
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -610,22 +614,24 @@ export function clearHandles(): void {
 // ── Serialize for the AI — hierarchical tree, two-tier detail ───────
 
 export function serializePerception(p: Perception): string {
-  const lines: string[] = [];
-  lines.push(`PAGE ${p.viewport.w}x${p.viewport.h} site:${p.site.host} "${p.site.title}" bg:${short(p.canvas.bg)} text:${short(p.canvas.color)} font:${p.canvas.fontFamily} ${p.canvas.fontSize}`);
-  lines.push(`COLS ${p.skeleton.columnCount} CONTENT ${p.skeleton.contentMaxWidthPx ?? '?'}px`);
+  const header: string[] = [];
+  header.push(`PAGE ${p.viewport.w}x${p.viewport.h} site:${p.site.host} "${p.site.title}" bg:${short(p.canvas.bg)} text:${short(p.canvas.color)} font:${p.canvas.fontFamily} ${p.canvas.fontSize}`);
+  header.push(`COLS ${p.skeleton.columnCount} CONTENT ${p.skeleton.contentMaxWidthPx ?? '?'}px`);
   if (p.skeleton.regions.length) {
-    lines.push('REGIONS ' + p.skeleton.regions.map((r) => `${r.handle}=${r.role}(${Math.round(r.widthRatio * 100)}%w,${r.rect.w}x${r.rect.h})`).join(' '));
+    header.push('REGIONS ' + p.skeleton.regions.map((r) => `${r.handle}=${r.role}(${Math.round(r.widthRatio * 100)}%w,${r.rect.w}x${r.rect.h})`).join(' '));
   }
   if (p.cssVars.length) {
-    lines.push('VARS ' + p.cssVars.map((v) => `${v.name}:${short(v.value)}`).join(' '));
+    header.push('VARS ' + p.cssVars.map((v) => `${v.name}:${short(v.value)}`).join(' '));
   }
   if (p.scrollables.length) {
-    lines.push('SCROLLABLES ' + p.scrollables.map((s) => `${s.handle}=${s.axis}`).join(' '));
+    header.push('SCROLLABLES ' + p.scrollables.map((s) => `${s.handle}=${s.axis}`).join(' '));
   }
 
   // Two-tier: top N by prominence get full detail; rest get compact one-liners.
   const byProminence = [...p.clusters].sort((a, b) => b.prominence - a.prominence);
   const tier1 = new Set(byProminence.slice(0, TIER1_FULL_DETAIL_COUNT).map((c) => c.handle));
+  // Top-prominence clusters are never dropped (always keep the most important content).
+  const topHandles = new Set(byProminence.slice(0, Math.min(5, byProminence.length)).map((c) => c.handle));
 
   // Build parent → children map for tree serialization.
   const childrenOf = new Map<string | null, Cluster[]>();
@@ -636,19 +642,61 @@ export function serializePerception(p: Perception): string {
   }
   for (const arr of childrenOf.values()) arr.sort((a, b) => b.prominence - a.prominence);
 
-  lines.push('TREE:');
-  const serialize = (handle: string | null, depth: number): void => {
+  // Build entry list from the tree walk — structured so we can demote/drop on budget.
+  interface Entry { cluster: Cluster; isFull: boolean; line: string; depth: number; dropped: boolean; }
+  const entries: Entry[] = [];
+  const walk = (handle: string | null, depth: number): void => {
     const children = childrenOf.get(handle);
     if (!children) return;
     for (const c of children) {
-      const indent = '  '.repeat(Math.min(depth, 6));
-      lines.push(indent + (tier1.has(c.handle) ? formatFull(c) : formatCompact(c)));
-      serialize(c.handle, depth + 1);
+      const isFull = tier1.has(c.handle);
+      entries.push({ cluster: c, isFull, line: isFull ? formatFull(c) : formatCompact(c), depth, dropped: false });
+      walk(c.handle, depth + 1);
     }
   };
-  serialize(null, 0);
+  walk(null, 0);
 
-  return lines.join('\n');
+  const assemble = (): string => {
+    const tree: string[] = ['TREE:'];
+    for (const e of entries) {
+      if (e.dropped) continue;
+      tree.push('  '.repeat(Math.min(e.depth, 6)) + e.line);
+    }
+    return [...header, ...tree].join('\n');
+  };
+
+  let result = assemble();
+  const before = result.length;
+  lastSerializeBudget = { before, after: before };
+
+  // Serialization budget: if over SERIALIZE_BUDGET, demote least-prominent full
+  // entries to compact (formatFull→formatCompact shrinks the string), then drop
+  // least-prominent compact entries (by prominence ascending). Top-prominence
+  // clusters are always kept. YouTube 13.4K → ≤12K is the test case.
+  if (before > SERIALIZE_BUDGET) {
+    // Phase 1: demote full entries to compact (least-prominent first).
+    const fullEntries = entries
+      .filter((e) => e.isFull && !topHandles.has(e.cluster.handle))
+      .sort((a, b) => a.cluster.prominence - b.cluster.prominence);
+    for (const e of fullEntries) {
+      if (result.length <= SERIALIZE_BUDGET) break;
+      e.isFull = false;
+      e.line = formatCompact(e.cluster);
+      result = assemble();
+    }
+    // Phase 2: drop compact entries (least-prominent first).
+    const compactEntries = entries
+      .filter((e) => !e.isFull && !topHandles.has(e.cluster.handle))
+      .sort((a, b) => a.cluster.prominence - b.cluster.prominence);
+    for (const e of compactEntries) {
+      if (result.length <= SERIALIZE_BUDGET) break;
+      e.dropped = true;
+      result = assemble();
+    }
+    lastSerializeBudget = { before, after: result.length };
+  }
+
+  return result;
 }
 
 function formatFull(c: Cluster): string {

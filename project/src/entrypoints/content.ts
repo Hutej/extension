@@ -10,7 +10,7 @@
  * persistence (origin + normalized pathname).
  */
 
-import { perceive, serializePerception, clearHandles, captureLayoutFingerprint } from '@/core/perceive';
+import { perceive, serializePerception, clearHandles, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
 import { compileSpec, type CompileOptions } from '@/core/compile';
 import { sanitizeCss } from '@/core/sanitize';
 import { verifyStyle, type VerifyResult } from '@/core/verify';
@@ -29,6 +29,7 @@ interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?
 export interface Ledger {
   perceiveMs: number;
   serializeChars: number;
+  serializeCharsBefore: number;  // pre-budget char count (demote/drop tail to fit the budget)
   modelCalls: { ms: number; promptTokens?: number }[];
   compileMs: number;
   applyMs: number;
@@ -369,7 +370,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   const totalMs = Date.now() - t0;
   const stagesMs = perception.builtInMs + modelCalls.reduce((s, c) => s + c.ms, 0) + Math.round(compileMsTotal) + Math.round(applyMsTotal) + Math.round(verifyMsTotal) + Math.round(pixelVerifyMsTotal) + persistMs;
   const ledger: Ledger = {
-    perceiveMs: perception.builtInMs, serializeChars,
+    perceiveMs: perception.builtInMs, serializeChars, serializeCharsBefore: lastSerializeBudget.before,
     modelCalls, compileMs: Math.round(compileMsTotal),
     applyMs: Math.round(applyMsTotal), verifyMs: Math.round(verifyMsTotal),
     pixelVerifyMs: Math.round(pixelVerifyMsTotal), persistMs,
@@ -377,7 +378,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     totalMs, paidCalls: 1 + reReasonsDone, paintCount: finalPaintCount,
   };
   const modelMsStr = modelCalls.map((c) => `${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ');
-  logDebug(`LEDGER perceive=${ledger.perceiveMs}ms serialize=${serializeChars}chars model=[${modelMsStr}] compile=${ledger.compileMs}ms apply=${ledger.applyMs}ms verify=${ledger.verifyMs}ms pixelVerify=${ledger.pixelVerifyMs}ms persist=${persistMs}ms unaccounted=${ledger.unaccountedMs}ms total=${totalMs}ms paidCalls=${ledger.paidCalls} paints=${finalPaintCount}`);
+  logDebug(`LEDGER perceive=${ledger.perceiveMs}ms serialize=${serializeChars}chars${lastSerializeBudget.before > lastSerializeBudget.after ? `(budget ${lastSerializeBudget.before}->${lastSerializeBudget.after})` : ''} model=[${modelMsStr}] compile=${ledger.compileMs}ms apply=${ledger.applyMs}ms verify=${ledger.verifyMs}ms pixelVerify=${ledger.pixelVerifyMs}ms persist=${persistMs}ms unaccounted=${ledger.unaccountedMs}ms total=${totalMs}ms paidCalls=${ledger.paidCalls} paints=${finalPaintCount}`);
   if (ledger.unaccountedMs > 0.15 * totalMs) logDebug(`LEDGER GAP >15%: ${ledger.unaccountedMs}ms unaccounted — investigate`);
 
   return {
@@ -621,7 +622,7 @@ async function fastHidePath(intent: string): Promise<TransformOutcome> {
   return {
     ok: true, reasoning: spec.reasoning, spec, perceiveMs: perception.builtInMs,
     clusters: perception.clusters.length, paidCalls: 0, wallMs,
-    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, modelCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: wallMs, paidCalls: 0, paintCount: 1 },
+    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, serializeCharsBefore: 0, modelCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: wallMs, paidCalls: 0, paintCount: 1 },
   };
 }
 
