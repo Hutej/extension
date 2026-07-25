@@ -6,3 +6,7 @@ experiments
 .env
 .kiro
 .mimocode
+tests
+AGENTS.md
+CLAUDE.md
+.claude
