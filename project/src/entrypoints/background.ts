@@ -1,9 +1,22 @@
 /**
  * background — thin AI transport. Holds the API key, forwards the perception to
- * core/reason, returns a validated StyleSpec. No page logic lives here.
+ * core/reason (role-dispatched), returns a validated StyleSpec. No page logic.
+ *
+ * The `role` field selects the prompt + model: 'architect' / 'painter' / 'critic'
+ * for the split design path, 'design' for the single-call restyle-only path.
  */
 
-import { requestStyleSpec } from '@/core/reason';
+import { requestStyleSpec, requestArchitectSpec, requestPainterSpec, requestCriticCorrection, type Role } from '@/core/reason';
+
+async function dispatchRole(role: Role, intent: string, perception: string, apiKey: string, critique?: string, timeoutMs?: number) {
+  const req = { intent, perception, apiKey, critique, timeoutMs };
+  switch (role) {
+    case 'architect': return requestArchitectSpec(req);
+    case 'painter': return requestPainterSpec(req);
+    case 'critic': return requestCriticCorrection(req);
+    default: return requestStyleSpec(req);
+  }
+}
 
 export default defineBackground(() => {
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -15,7 +28,7 @@ export default defineBackground(() => {
           return;
         }
         try {
-          const res = await requestStyleSpec({ intent: message.intent, perception: message.perception, apiKey, critique: message.critique, timeoutMs: message.timeoutMs });
+          const res = await dispatchRole(message.role as Role, message.intent, message.perception, apiKey, message.critique, message.timeoutMs);
           sendResponse(res);
         } catch (err) {
           sendResponse({ ok: false, kind: 'unknown', message: (err as Error).message || 'Design engine error.' });

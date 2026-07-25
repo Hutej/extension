@@ -20,12 +20,15 @@ export interface PixelInput {
 }
 
 /** A cluster's rendered rect + enough text info to judge it. `fontSize` is the
- *  rendered font size in px (used by the squeeze detector). */
+ *  rendered font size in px (used by the squeeze detector). `role` is the
+ *  semantic role (used by the invisible-text detector to scan side-rail labels —
+ *  short text on a nav/aside cluster that the >=20-char skip would otherwise miss). */
 export interface ClusterRect {
   handle: string;
   rect: { x: number; y: number; w: number; h: number };
   text: string;
   fontSize?: number;
+  role?: string | null;
 }
 
 /** Minimum rendered chars-per-line before text is "squeezed" (matches the DOM-side
@@ -74,7 +77,14 @@ export function detectVoids(capture: PixelInput, rects: ClusterRect[]): string[]
 export function detectInvisibleText(capture: PixelInput, rects: ClusterRect[]): string[] {
   const out: string[] = [];
   for (const cr of rects) {
-    if (cr.text.trim().length <= 20) continue;        // need real text, not a label
+    const textLen = cr.text.trim().length;
+    // Side-rail labels (nav/aside) are SHORT — the >=20-char skip would let an
+    // invisible side-rail label through. For a rail cluster, scan even short text
+    // (the invisible-right-rail-labels bug on a code-hosting site). A rail cluster
+    // has role navigation/complementary or is an aside/nav.
+    const isRail = cr.role === 'navigation' || cr.role === 'complementary' || cr.role === 'nav' || cr.role === 'aside' || cr.role === 'menu' || cr.role === 'menuitem';
+    if (!isRail && textLen <= 20) continue;        // need real text, not a label
+    if (isRail && textLen === 0) continue;          // empty rail cluster — nothing to read
     if (cr.rect.w < 50 || cr.rect.h < 50) continue;
     if (variance(capture, cr.rect) < INVISIBLE_VARIANCE) out.push(cr.handle);
   }

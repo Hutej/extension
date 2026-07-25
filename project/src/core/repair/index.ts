@@ -20,7 +20,6 @@ import type { CompileOptions } from '../compile';
 import type { VerifyResult } from '../verify';
 import type { PixelVerifyResult } from '../verify/pixel';
 import type { DesignSpec } from '../spec';
-import { MAX_REPAIR_ATTEMPTS } from '../config';
 import { MAX_ACCENT_FRACTION } from '../laws';
 
 export interface RepairDecision {
@@ -41,7 +40,7 @@ export interface Attempt {
   contentCollapsed: boolean;
 }
 
-export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasonsDone: number, paletteMode?: 'restrained' | 'vivid', pixel?: PixelVerifyResult | null): RepairDecision {
+export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasonsDone: number, paletteMode?: 'restrained' | 'vivid', pixel?: PixelVerifyResult | null, canReReason: boolean = true): RepairDecision {
   const c = verify.checks;
   // Pixel-grounded handles — invisible-text clusters the DOM contrast sampler
   // missed, and pixel-squeeze below the readable measure. Merged into the
@@ -84,11 +83,15 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
 
   // When pixel-invisible text is SEVERE (>=6 clusters), a deterministic
   // force-contrast text-color bump is insufficient — the bg/text combo is the
-  // problem, not just the text color, and force-contrast would consume the one
-  // paint-2 repair leaving no recourse. Escalate to reReason (within the 1-reReason
-  // budget) with the pixel critiques so the model redesigns the surfaces.
-  if (pixelInvisible.length >= 6 && reReasonsDone < MAX_REPAIR_ATTEMPTS) {
-    return { action: 'reReason', options: prev, critique: critiqueFor(verify, pixel), reason: `pixel-invisible severe (${pixelInvisible.length}) — escalate to reReason` };
+  // problem, not just the text color. Escalate to a Critic repair round (if the
+  // time budget still allows one) with the pixel critiques so the surfaces are
+  // redesigned. Carry the deterministic forceContrast + bg-aware pair options TOO
+  // so paint 2 gets BOTH the Critic's redesign AND the deterministic backstop (the
+  // Critic is a model call — it may not fix every invisible cluster; the deterministic
+  // bg+text pair guarantees the pixel-invisible ones are readable regardless of zoom).
+  if (pixelInvisible.length >= 6 && canReReason) {
+    const contrastHandles = Array.from(new Set([...verify.contrastTargets, ...pixelInvisible]));
+    return { action: 'reReason', options: { ...prev, forceContrast: true, contrastTargets: contrastHandles, contrastTargetBgs: verify.contrastTargetBgs, pixelInvisibleTargets: pixelInvisible }, critique: critiqueFor(verify, pixel), reason: `pixel-invisible severe (${pixelInvisible.length}) — escalate to Critic + deterministic forceContrast` };
   }
 
   // Contrast: force a readable text color — the canvas body floor PLUS the
@@ -150,8 +153,9 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
 
   // ── Regenerative tier: quality failures a deterministic pass can't fix
   // (flat / still-incoherent after trim / over-framed / under-covered / no reshape).
+  // The caller gates on the wall-clock budget (canReReason); no call-count cap.
   if (!c.changed || !c.coherent || !c.covered || !c.layoutReshaped || !c.usesRoom || (pixel?.recolor ?? false)) {
-    if (reReasonsDone >= MAX_REPAIR_ATTEMPTS) return { action: 'keepBest', options: prev, reason: 'reReason budget exhausted' };
+    if (!canReReason) return { action: 'keepBest', options: prev, reason: 'time budget exhausted' };
     return { action: 'reReason', options: prev, critique: critiqueFor(verify, pixel), reason: 'regenerate for quality' };
   }
 

@@ -14,7 +14,7 @@ import {
   MIN_CHANGE_SCORE, MAX_ACCENT_FRACTION, MAX_FRAMED_FRACTION, MIN_COVERAGE_FRACTION, MIN_MODEL_COVERAGE_FRACTION, PERCEPTIBLE_COLOR_DELTA,
   luminanceCompatible, MIN_CHARS_PER_LINE,
 } from '../laws/index.ts';
-import { parseColor, contrastRatio, colorfulness, colorDistance, type RGBA } from '../../shared/color.ts';
+import { parseColor, contrastRatio, colorfulness, colorDistance, extractGradientStops, type RGBA } from '../../shared/color.ts';
 
 const OVERLAP_TOLERANCE = 2; // allow minor noise / a couple of self-inflicted-but-benign overlaps
 
@@ -39,7 +39,7 @@ export interface VerifyResult {
   details: string[];
 }
 
-export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained' | 'vivid', modelAddressed?: Set<string>): VerifyResult {
+export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained' | 'vivid', modelAddressed?: Set<string>, skipReshapeChecks?: boolean, removedHandles?: Set<string>): VerifyResult {
   const details: string[] = [];
   const after = captureLayoutFingerprint();
 
@@ -63,6 +63,10 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   const collapsedRegions: string[] = [];
   for (const ra of before.regions) {
     if (ra.h < 100) continue;
+    // Exempt clusters intentionally removed by an op (risk 5: a remove deletes
+    // the handle from the after-fingerprint; without this, contentCollapsed
+    // false-fails on a legitimate structural removal).
+    if (removedHandles?.has(ra.handle)) continue;
     const rb = afterByHandle.get(ra.handle);
     if (!rb || rb.h < 20) collapsedRegions.push(ra.handle);
   }
@@ -169,22 +173,30 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   // passed, so the loop doesn't break and the regenerative reReason fires with the
   // "reshape the structure" critique. Calibrated from 3 grid runs: two recolor-prone
   // recolors showed layoutReshaped=false while passing every other check.
-  // USE THE ROOM: a wide page (content ≥70% of viewport) that the design narrowed
-  // below 60% of its original content width leaves a dead-margin band — the
-  // empty-band failure. layoutReshaped measures delta, not utilization; this check
-  // catches a design that "reshaped" (changed width) while still leaving dead margins.
+  // USE THE ROOM: a wide page (content ≥70% of viewport) that narrows at all
+  // beyond a small tolerance reads as "the whole site shrank" — dead margins
+  // are visible to the eye long before 60%. Flag anything below 90% of the
+  // original content width. layoutReshaped measures delta, not utilization;
+  // this check catches dead margins directly.
   const vpW = window.innerWidth;
   const beforeW = before.contentMaxWidthPx;
   const afterW = after.contentMaxWidthPx;
   const wasWide = beforeW != null && beforeW >= vpW * 0.7;
-  const narrowedHard = beforeW != null && afterW != null && afterW < beforeW * 0.6;
+  const narrowedHard = beforeW != null && afterW != null && afterW < beforeW * 0.9;
   const usesRoom = !(wasWide && narrowedHard);
   if (!usesRoom) {
     const pct = afterW != null ? ((afterW / beforeW!) * 100).toFixed(0) : '?';
     details.push(`dead-margin band: content narrowed ${Math.round(beforeW!)}px -> ${afterW != null ? Math.round(afterW) : '?'}px (${pct}% of original) on a wide page — content does not use the room`);
   }
 
-  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible && layoutReshaped && usesRoom;
+  // A restyle-only (pure palette) request isn't claiming to be a redesign, so the
+  // "is this a real redesign" checks (layoutReshaped + usesRoom) are computed for the
+  // report but NOT enforced in `passed` when skipReshapeChecks is set. The by-eye-
+  // safety bars (notBlank, noOverflow, noOverlap, contrastOk, covered,
+  // contentCollapsed, contentVisible) still hold — a palette change must not break
+  // the page. The recolor pixel detector is skipped at the call site (no `before`).
+  const enforcedReshape = skipReshapeChecks ? true : (layoutReshaped && usesRoom);
+  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible && enforcedReshape;
   return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible, layoutReshaped, usesRoom }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, collapseTargets: [...collapsedRegions], contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), contentWidthBefore: beforeW, contentWidthAfter: afterW, repeatedAccent, details };
 }
 
@@ -470,7 +482,14 @@ function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<s
     const isLarge = fs >= 18 || (fs >= 14 && parseInt(getComputedStyle(el).fontWeight) >= 700);
     const threshold = isLarge ? 3.0 : MIN_CONTRAST_RATIO;
     const eb = effectiveBackground(el);
-    if (contrastRatio(fg, eb) < threshold) {
+    // Gradient-aware: if a gradient bar sits in the effective-background chain, the
+    // text must clear the floor against EVERY stop (links over a light→dark gradient
+    // are invisible at the light end). A fail against the worst stop = a fail.
+    const gradStops = gradientStopsInChain(el);
+    const worstStop = gradStops.length ? gradStops.reduce((a, b) => (contrastRatio(fg, b) < contrastRatio(fg, a) ? b : a)) : null;
+    const failsSolid = contrastRatio(fg, eb) < threshold;
+    const failsGradient = worstStop != null && contrastRatio(fg, worstStop) < threshold;
+    if (failsSolid || failsGradient) {
       failed++;
       if (checked <= CONTRAST_TOP_FAIL_COUNT) failedTop++;
       const h = el.closest('[data-wm-c]')?.getAttribute('data-wm-c');
@@ -504,6 +523,25 @@ function effectiveBackground(el: Element): RGBA {
     cur = cur.parentElement;
   }
   return [255, 255, 255, 1];
+}
+
+/** Walk the parent chain and collect gradient stops from any backgroundImage
+ *  gradient that sits behind the text (a gradient bar in an ancestor). Text over
+ *  a gradient must clear the contrast floor against EVERY stop, not just the
+ *  effective solid background. Stops from nested gradients are flattened. */
+function gradientStopsInChain(el: Element): RGBA[] {
+  const stops: RGBA[] = [];
+  let cur: Element | null = el;
+  let hops = 0;
+  while (cur && hops < 12) {
+    const cs = getComputedStyle(cur);
+    if (cs && cs.backgroundImage && cs.backgroundImage !== 'none') {
+      for (const s of extractGradientStops(cs.backgroundImage)) stops.push(s);
+    }
+    cur = cur.parentElement;
+    hops++;
+  }
+  return stops;
 }
 
 /** Alpha-composite fg over bg. */

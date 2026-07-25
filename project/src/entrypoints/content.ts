@@ -17,20 +17,32 @@ import { verifyStyle, type VerifyResult } from '@/core/verify';
 import { pixelVerify, type PixelVerifyResult, type PixelInput, type ClusterRect } from '@/core/verify/pixel';
 import { captureAtPositions, screenshotToPixelInput } from '@/core/verify/capture';
 import { planRepair, bestNonBroken, type Attempt } from '@/core/repair';
-import { checkCompleteness } from '@/core/spec';
+import { checkCompleteness, mergeSpecs } from '@/core/spec';
 import { applyStyle, applyStyleEverywhere, removeStyle, removeStyleEverywhere, startDefense, startDefenseEverywhere, ensureEscapeUI, removeEscapeUI } from '@/core/execute';
 import { loadSiteState, saveSiteState, clearSiteState, storageKey, type SiteState } from '@/core/persist';
-import { MAX_REPAIR_ATTEMPTS, logDebug } from '@/core/config';
+import { AI_CONFIG, logDebug } from '@/core/config';
+import type { Role } from '@/core/reason';
 import type { DesignSpec } from '@/core/spec';
 import type { Perception } from '@/core/perceive';
+import { TransactionLog, type DomAdapter } from '@/core/ops/transaction';
+import { validateOps, type ValidatedOp } from '@/core/ops';
 
 interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?: string; usage?: unknown; model?: string; callMs?: number; }
+
+/** Per-role call accounting (calls × tokens × wall-clock per role). The budget is
+ *  TIME, not calls — per-role calls are OBSERVABILITY, not a gate. */
+export interface RoleCall {
+  role: Role;
+  ms: number;
+  promptTokens?: number;
+  completionTokens?: number;
+}
 
 export interface Ledger {
   perceiveMs: number;
   serializeChars: number;
   serializeCharsBefore: number;  // pre-budget char count (demote/drop tail to fit the budget)
-  modelCalls: { ms: number; promptTokens?: number }[];
+  roleCalls: RoleCall[];          // per-role calls (architect/painter/critic) — observability
   compileMs: number;
   applyMs: number;
   verifyMs: number;
@@ -38,8 +50,12 @@ export interface Ledger {
   persistMs: number;      // storage write
   unaccountedMs: number;  // totalMs − sum(stages); a big gap = something unmeasured
   totalMs: number;
-  paidCalls: number;
+  paidCalls: number;        // total paid calls across roles (observability — NOT a gate)
+  repairRounds: number;     // Critic repair rounds used
   paintCount: number;     // visible repaints (the ≤2 contract)
+  opsExecuted: number;      // structural DOM ops executed (remove/move/reorder/wrap)
+  opsRefused: number;       // ops refused by guard laws (logged with reasons)
+  opsRefusedReasons: string[]; // the `kind(handle:reason)` refusal strings (observability)
 }
 
 export interface TransformOutcome {
@@ -58,7 +74,7 @@ export interface TransformOutcome {
   wallMs?: number;       // total transform wall-clock
   model?: string;        // which model served the request
   usage?: unknown;       // token usage
-  paidCalls?: number;    // paid model calls used
+  paidCalls?: number;    // total paid model calls used (observability — NOT a gate)
   paintCount?: number;   // visible repaints
   ledger?: Ledger;       // stage-by-stage time breakdown (structured run report)
 }
@@ -74,6 +90,12 @@ let lastAppliedCss = '';   // last applied CSS — for immediate shadow-root inj
 // re-apply the design on inserted content (free, no model call).
 let activeSpec: DesignSpec | null = null;
 let activeOpts: CompileOptions = {};
+// Structural ops: the transaction log (session-only undo) + the accepted op
+// set (for re-derive on reload + re-exec on SPA re-render). `activeOps` is the
+// validated plan from the LAST compile; re-derive re-runs validateOps against a
+// fresh perception then executeOps. The log holds live-node inverses for undo.
+const txnLog = new TransactionLog();
+let activeOps: ValidatedOp[] = [];
 let dynamicObserver: MutationObserver | null = null;
 let shadowDynamicObservers: MutationObserver[] = [];
 let restyleTimer: ReturnType<typeof setTimeout> | null = null;
@@ -101,11 +123,15 @@ function buildClusterRects(): ClusterRect[] {
     if (seen.has(handle)) continue;
     seen.add(handle);
     const r = el.getBoundingClientRect();
+    // role: the semantic role (for the rail-aware invisible-text detector). The
+    // tag/role is the element's own; a rail label is often a <nav>/<aside> child.
+    const role = el.getAttribute('role') || el.tagName.toLowerCase();
     out.push({
       handle,
       rect: { x: r.left, y: r.top, w: r.width, h: r.height },
       text: (el.textContent || '').trim(),
       fontSize: parseFloat(getComputedStyle(el).fontSize) || 16,
+      role,
     });
   }
   return out;
@@ -141,7 +167,107 @@ async function captureAndPixelVerify(before?: PixelInput): Promise<{ result: Pix
   return { result, ms: Math.round(performance.now() - tc) };
 }
 
-async function runStyle(intent: string): Promise<TransformOutcome> {
+/** The live DOM adapter for the op transaction layer. executeOps + txnLog.undoAll
+ *  go through this so the inverse logic in transaction.ts is DOM-agnostic. */
+const liveDom: DomAdapter = {
+  resolve(handle) { return document.querySelector<HTMLElement>(`[data-wm-c="${handle}"]`); },
+  parent(node) { return node.parentNode; },
+  nextSibling(node) { return node.nextSibling; },
+  insertBefore(parent, node, ref) { parent.insertBefore(node, ref); },
+  appendChild(parent, node) { parent.appendChild(node); },
+  removeChild(parent, node) { parent.removeChild(node); },
+  createElement(tag) { return document.createElement(tag); },
+  resolveDestination(to) { return to ? document.querySelector<HTMLElement>(`[data-wm-c="${to}"]`) : null; },
+};
+
+/** Execute a validated op set against the live DOM. Idempotent: each op checks
+ *  the live state and skips if already satisfied (re-derive on reload + dynamic
+ *  defense re-exec both call this). Records an exact inverse per op (session
+ *  undo). Refused/no-op ops are counted, not recorded. Returns {executed,refused}.
+ *  `record` = true on the primary apply (records inverses); false on re-derive
+ *  (no log — the log is session-only, the spec re-derives on reload). */
+function executeOps(ops: ValidatedOp[], record: boolean): { executed: number; refused: number; refusedReasons: string[] } {
+  let executed = 0; const refusedReasons: string[] = [];
+  for (const op of ops) {
+    const el = liveDom.resolve(op.target);
+    if (!el) { refusedReasons.push(`${op.kind}(${op.target}:not-found)`); continue; }
+    const parent = liveDom.parent(el);
+    if (!parent) { refusedReasons.push(`${op.kind}(${op.target}:no-parent)`); continue; }
+
+    if (op.kind === 'remove') {
+      const next = liveDom.nextSibling(el);
+      liveDom.removeChild(parent, el);
+      if (record) txnLog.record({ op: { kind: 'remove', target: op.target }, target: op.target, inverse: { kind: 'reattach', node: el, parent, nextSibling: next } });
+      executed++; continue;
+    }
+
+    if (op.kind === 'wrap') {
+      // Idempotent: if the cluster is already the sole child of a wrapper we
+      // created, skip (re-derive on reload). Detect a wrapper with a data-wm-wrap
+      // attr around the cluster.
+      const existingWrap = el.parentElement?.getAttribute('data-wm-wrap') === 'true' ? el.parentElement : null;
+      if (existingWrap) { executed++; continue; }
+      const wrap = liveDom.createElement('div') as HTMLElement;
+      wrap.setAttribute('data-wm-wrap', 'true');
+      if (op.hint) (wrap as HTMLElement).style.display = op.hint;
+      const next = liveDom.nextSibling(el);
+      liveDom.insertBefore(parent, wrap, next);
+      liveDom.appendChild(wrap, el);
+      if (record) txnLog.record({ op: { kind: 'wrap', target: op.target }, target: op.target, inverse: { kind: 'unwrap', node: el, wrapper: wrap, parent, nextSibling: next } });
+      executed++; continue;
+    }
+
+    if (op.kind === 'reorder') {
+      const parentEl = parent;
+      // Idempotent: if `before` is given and the target is already immediately before it, skip.
+      if (op.before) {
+        const beforeEl = liveDom.resolve(op.before);
+        if (beforeEl && liveDom.nextSibling(el) === beforeEl) { executed++; continue; }
+        if (beforeEl) {
+          const next = liveDom.nextSibling(el);
+          liveDom.insertBefore(parentEl, el, beforeEl);
+          if (record) txnLog.record({ op: { kind: 'reorder', target: op.target, before: op.before }, target: op.target, inverse: { kind: 'reparent', node: el, parent: parentEl, nextSibling: next } });
+          executed++; continue;
+        }
+      }
+      // No/missing before → move to end. Idempotent if already last.
+      if (liveDom.nextSibling(el) === null) { executed++; continue; }
+      const next = liveDom.nextSibling(el);
+      liveDom.appendChild(parentEl, el);
+      if (record) txnLog.record({ op: { kind: 'reorder', target: op.target }, target: op.target, inverse: { kind: 'reparent', node: el, parent: parentEl, nextSibling: next } });
+      executed++; continue;
+    }
+
+    if (op.kind === 'move') {
+      // 'floating' = position:fixed lever (a mini-player). Idempotent if already fixed.
+      if (op.hint === 'floating') {
+        if (getComputedStyle(el).position === 'fixed') { executed++; continue; }
+        // Record the original inline position so undo restores it.
+        const prevPos = (el as HTMLElement).style.position;
+        const prevInlines = (el as HTMLElement).style.cssText;
+        const next = liveDom.nextSibling(el);
+        (el as HTMLElement).style.position = 'fixed';
+        // A minimal fixed lever; the Painter/compile refine the exact spot.
+        if (record) txnLog.record({ op: { kind: 'move', target: op.target, to: 'floating', consent: true }, target: op.target, inverse: { kind: 'reparent', node: el, parent, nextSibling: next } });
+        // Restore inline position on undo by stashing the prev cssText on the node.
+        (el as HTMLElement).dataset['wmPrevCss'] = prevInlines;
+        void prevPos;
+        executed++; continue;
+      }
+      const dest = liveDom.resolveDestination(op.to);
+      if (!dest) { refusedReasons.push(`move(${op.target}:bad-dest)`); continue; }
+      // Idempotent: already a child of the destination.
+      if (liveDom.parent(el) === dest) { executed++; continue; }
+      const next = liveDom.nextSibling(el);
+      liveDom.appendChild(dest, el);
+      if (record) txnLog.record({ op: { kind: 'move', target: op.target, to: op.to }, target: op.target, inverse: { kind: 'reparent', node: el, parent, nextSibling: next } });
+      executed++; continue;
+    }
+  }
+  return { executed, refused: refusedReasons.length, refusedReasons };
+}
+
+async function runStyle(intent: string, restyleOnly = false): Promise<TransformOutcome> {
   const t0 = Date.now();
   delete document.documentElement.dataset[APPLIED];
   delete document.documentElement.dataset[FAILED];
@@ -153,12 +279,12 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   activeSpec = null;
   // Clear any stale style from a previous transform or reapplyStored before the
   // new transform begins — ensures the before-capture (A1) sees the true original
-  // AND no stale style survives a model failure (the BBC harness/live discrepancy).
+  // AND no stale style survives a model failure (the dense-news-page discrepancy).
   removeStyleEverywhere(activeShadowRoots);
   lastAppliedCss = '';
 
   clearHandles();
-  const perception = perceive();
+  let perception = perceive();
   activeShadowRoots = perception.shadowRoots;
   const serialized = serializePerception(perception);
   const serializeChars = serialized.length;
@@ -171,26 +297,57 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   // 0 paintCount — a read, not a paint.
   const beforeTop = await captureShotAt(0);
 
-  const modelCalls: { ms: number; promptTokens?: number }[] = [];
+  // Per-role call accounting (observability — the budget is TIME, not calls).
+  const roleCalls: RoleCall[] = [];
+  let repairRounds = 0;
+  const recordCall = (role: Role, res: SpecResponse): void => {
+    if (res.callMs == null) return;
+    const u = res.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined;
+    roleCalls.push({ role, ms: res.callMs, promptTokens: u?.prompt_tokens, completionTokens: u?.completion_tokens });
+  };
+  const paidCalls = (): number => roleCalls.length;
+  // A Critic repair round fits only if the remaining wall-clock clears the per-call
+  // minimum; the budget is time, not a call count.
+  const canReReason = (): boolean => (AI_CONFIG.designMaxMs - (Date.now() - t0)) > AI_CONFIG.criticMinMs;
 
-  let specRes = await askForSpec(intent, serialized);
-  if (specRes.callMs != null) modelCalls.push({ ms: specRes.callMs, promptTokens: (specRes.usage as { prompt_tokens?: number })?.prompt_tokens });
-  if (!specRes.ok || !specRes.spec) {
-    logDebug(`LEDGER perceive=${perception.builtInMs}ms serialize=${serializeChars}chars model=[${modelCalls.map((c) => `${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] total=${Date.now() - t0}ms paidCalls=${modelCalls.length} — FAILED ${specRes.kind ?? ''}`);
-    removeStyleEverywhere(activeShadowRoots);
-    markFailed(specRes.message || 'engine failed');
-    return { ok: false, kind: specRes.kind, message: specRes.message || 'Design engine failed.', paidCalls: modelCalls.length, wallMs: Date.now() - t0 };
+  // ── Design call: Architect + Painter in PARALLEL, then merge ──
+  // The Architect sets the structure (composition/layout/canvasLayout/hide); the
+  // Painter sets the surface (canvas/variables/paletteMode/styles). Independent
+  // inputs → run concurrently. compile joins them via mergeSpecs.
+  // Restyle-only: the Painter ALONE (no Architect) — a pure palette request isn't
+  // asking for a rearrangement, so the Architect (structure) would only add latency.
+  let archRes: SpecResponse = { ok: false };
+  let paintRes: SpecResponse;
+  if (restyleOnly) {
+    paintRes = await askForSpec('painter', intent, serialized);
+    recordCall('painter', paintRes);
+  } else {
+    [archRes, paintRes] = await Promise.all([
+      askForSpec('architect', intent, serialized),
+      askForSpec('painter', intent, serialized),
+    ]);
+    recordCall('architect', archRes);
+    recordCall('painter', paintRes);
+    // If the Architect failed (a transient timeout/error on a large page) but the
+    // Painter succeeded, the merged spec is the Painter-only surface — a recolor,
+    // which the verify !layoutReshaped gate catches and the Critic may upgrade. A
+    // retry was tried but pushed large pages past the hard budget (a timeout wastes
+    // the paid call); shipping the recolor + honest failure is the lesser evil.
   }
-  let spec = specRes.spec;
-  logDebug(`served by=${specRes.model ?? '?'} usage=${JSON.stringify(specRes.usage ?? {})}`);
-  logDebug(`paletteMode=${spec.paletteMode ?? 'restrained(default)'} rules=${spec.rules.length} composition=${spec.composition?.length ?? 0} clusters=${perception.clusters.length}`);
+  if ((!archRes.ok || !archRes.spec) && (!paintRes.ok || !paintRes.spec)) {
+    // Both roles failed (or the sole Painter failed) — honest error (no fallback chain).
+    const failed = !archRes.ok && !paintRes.ok ? archRes : paintRes;
+    logDebug(`LEDGER perceive=${perception.builtInMs}ms serialize=${serializeChars}chars roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms`).join(', ')}] total=${Date.now() - t0}ms paidCalls=${paidCalls()} — FAILED ${failed.kind ?? ''}`);
+    removeStyleEverywhere(activeShadowRoots);
+    markFailed(failed.message || 'engine failed');
+    return { ok: false, kind: failed.kind, message: failed.message || 'Design engine failed.', paidCalls: paidCalls(), wallMs: Date.now() - t0 };
+  }
+  let spec = mergeSpecs(archRes.ok ? archRes.spec : undefined, paintRes.ok ? paintRes.spec : undefined);
+  logDebug(`architect=${archRes.ok ? 'ok' : (restyleOnly ? 'skipped' : 'FAIL')} painter=${paintRes.ok ? 'ok' : 'FAIL'} merged rules=${spec.rules.length} composition=${spec.composition?.length ?? 0} clusters=${perception.clusters.length}`);
+  logDebug(`paletteMode=${spec.paletteMode ?? 'restrained(default)'} rules=${spec.rules.length}`);
 
-  let reReasonsDone = 0;
-
-  // Completeness contract — BEFORE apply. Log only, do NOT spend a paid re-ask
-  // here — the shared MAX_REPAIR_ATTEMPTS=1 budget must stay intact for post-apply
-  // pixel/quality repair (the by-eye-killer path). Base-coat harmonizes unaccounted
-  // clusters; the post-apply !c.covered gate catches under-coverage with the budget.
+  // Completeness contract — BEFORE apply. Log only; base-coat harmonizes
+  // unaccounted clusters and the post-apply !c.covered gate catches under-coverage.
   {
     const comp = checkCompleteness(spec, perception.handles);
     if (!comp.ok) {
@@ -199,6 +356,34 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
       logDebug(`completeness OK — ${perception.handles.size} clusters, ${comp.unaccounted.length} base-coated`);
     }
   }
+
+  // ── Structural ops: validate + execute ONCE before paint 1, then re-perceive
+  // so compile uses POST-OP geometry (risk 4: a removed sidebar's main column must
+  // widen into the reclaimed space — compile against stale pre-op geometry keeps
+  // the dead-margin band). The initial `perception` stamped the live nodes; we
+  // resolve by handle, mutate, record the inverse, then refresh geometry. The
+  // `before` fingerprint (captured earlier) stays the original page — correct.
+  // Idempotent: re-derive (reload/SPA) re-runs this against fresh stamps.
+  txnLog.clear();
+  const opsResult = (function () {
+    const { ops: validated, refused: opRefusals } = validateOps(spec.ops, perception);
+    if (!validated.length) return { executed: 0, refused: opRefusals.length, reasons: opRefusals, ops: [] as ValidatedOp[] };
+    // Execute against the CURRENT (pre-op) stamps — handles resolve to live nodes.
+    const r = executeOps(validated, true);
+    activeOps = validated;
+    return { executed: r.executed, refused: r.refused + opRefusals.length, reasons: [...opRefusals, ...r.refusedReasons], ops: validated };
+  })();
+  if (opsResult.executed) {
+    logDebug(`ops: executed=${opsResult.executed} refused=${opsResult.refused}${opsResult.reasons.length ? ` refused=[${opsResult.reasons.join(',')}]` : ''}`);
+    // Re-perceive so compile sees the post-op DOM. The before-fingerprint is
+    // unchanged (the original page); verify compares against it.
+    const reP = perceive();
+    activeShadowRoots = reP.shadowRoots;
+    perception = reP; // compile + verify below use post-op geometry
+  } else {
+    activeOps = opsResult.ops;
+  }
+  const removedHandles = txnLog.removedHandles();
 
   // Build modelAddressed set for the model coverage gate.
   const modelAddressed = new Set<string>();
@@ -210,6 +395,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
       if (rule.styles || rule.layout || rule.hide) modelAddressed.add(rule.target);
     }
   }
+  if (spec.ops) for (const op of spec.ops) modelAddressed.add(op.target);
 
   let options: CompileOptions = { paletteMode: spec.paletteMode };
   const attempts: Attempt[] = [];
@@ -234,9 +420,13 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     paintCount++;
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
     const tcVerify = performance.now();
-    const verify = verifyStyle(before, curSpec.paletteMode, modelAddressed);
+    // Restyle-only: a palette change isn't claiming to reshape, so the reshape checks
+    // (layoutReshaped/usesRoom) are reported but not enforced; the recolor pixel
+    // detector is skipped (no `before` passed to captureAndPixelVerify). The by-eye-
+    // safety bars still hold.
+    const verify = verifyStyle(before, curSpec.paletteMode, modelAddressed, restyleOnly, removedHandles);
     verifyMsTotal += performance.now() - tcVerify;
-    const px = await captureAndPixelVerify(beforeTop);
+    const px = await captureAndPixelVerify(restyleOnly ? undefined : beforeTop);
     pixelVerifyMsTotal += px.ms;
     return { compiled, sanitized, verify, pixel: px.result };
   };
@@ -253,7 +443,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     if (!p1.pixel.passed) logDebug(`  pixel critiques: ${p1.pixel.critiques.join(' | ')}`);
   } catch (e) {
     removeStyleEverywhere(activeShadowRoots); markFailed('no styles');
-    return { ok: false, message: (e as Error).message || 'Produced no applicable styles.', spec, reasoning: spec.reasoning, paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+    return { ok: false, message: (e as Error).message || 'Produced no applicable styles.', spec, reasoning: spec.reasoning, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
   }
 
   // passed := DOM passed AND pixel passed. A by-eye-killer is mechanically
@@ -261,50 +451,61 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   const phase1Passed = phase1Verify.passed && (lastPixel?.passed ?? true);
 
   if (!phase1Passed && paintCount < 2) {
-    const decision = planRepair(phase1Verify!, options, reReasonsDone, spec.paletteMode, lastPixel);
+    // The budget is TIME: a Critic repair round fits only if the remaining
+    // wall-clock clears the per-call minimum (canReReason). No call-count cap.
+    const decision = planRepair(phase1Verify!, options, repairRounds, spec.paletteMode, lastPixel, canReReason());
     logDebug(`repair -> ${decision.action}: ${decision.reason}`);
 
     if (decision.action === 'rollback') {
       removeStyleEverywhere(activeShadowRoots); markFailed('content blanked');
-      return { ...failVerify(spec, phase1Verify!), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+      return { ...failVerify(spec, phase1Verify!), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
     }
 
     if (decision.action === 'reReason') {
-      // Latency guard: if the 1st call already consumed >60s, a 2nd call pushes
-      // total past the 130s harness marker. Skip it, ship paint 1 if non-broken.
-      if (Date.now() - t0 > 60000) {
-        logDebug('reReason skipped — elapsed > 60s (latency budget); shipping paint 1');
+      // Latency guard: if the design calls already consumed most of the budget, a
+      // Critic round would push past the hard abort. Ship paint 1 if non-broken.
+      if (!canReReason()) {
+        logDebug('Critic skipped — time budget exhausted; shipping paint 1');
         if (!(phase1Verify!.checks.notBlank && phase1Verify!.checks.contentCollapsed)) {
-          removeStyleEverywhere(activeShadowRoots); markFailed('latency budget — no revision');
-          return { ...failVerify(spec, phase1Verify!), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+          removeStyleEverywhere(activeShadowRoots); markFailed('time budget — no revision');
+          return { ...failVerify(spec, phase1Verify!), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
         }
       } else {
-        // Append the pixel-grounded critiques to the reReason so the model fixes
-        // the by-eye-killers (voids, invisible text, squeeze), not just DOM flags.
+        // Append the pixel-grounded critiques so the Critic fixes the by-eye-killers
+        // (voids, invisible text, squeeze), not just DOM flags.
         const critique = decision.critique + (lastPixel && !lastPixel.passed ? '\nPixel verification also found: ' + lastPixel.critiques.join('; ') : '');
         const failing = Object.entries(phase1Verify!.checks).filter(([, v]) => !v).map(([k]) => k).join(',');
-        logDebug(`PAID SECOND CALL — first-call prompt failed to prevent: ${failing}${lastPixel && !lastPixel.passed ? ' +pixel' : ''}`);
-        reReasonsDone++;
-        const re = await askForSpec(intent, serialized, critique, Math.max(15000, 115000 - (Date.now() - t0)));
-        if (re.callMs != null) modelCalls.push({ ms: re.callMs, promptTokens: (re.usage as { prompt_tokens?: number })?.prompt_tokens });
+        logDebug(`CRITIC REPAIR ROUND — fixing: ${failing}${lastPixel && !lastPixel.passed ? ' +pixel' : ''}`);
+        repairRounds++;
+        const re = await askForSpec('critic', intent, serialized, critique, Math.max(AI_CONFIG.criticMinMs, AI_CONFIG.designMaxMs - (Date.now() - t0)));
+        recordCall('critic', re);
         if (re.ok && re.spec) {
-          spec = re.spec; options = { paletteMode: spec.paletteMode };
-          // ── Paint 2: re-apply with the revised spec ──
+          // Merge the Critic's corrections into the spec (Critic returns a patch:
+          // styles/layout on the failing clusters). The structure (Architect) +
+          // surface (Painter) base stays; the Critic overrides the failing bits.
+          spec = mergeSpecs(spec, re.spec);
+          // Carry the deterministic repair options (forceContrast + the flagged
+          // contrast/pixel-invisible handles) into paint 2 — the Critic is a model
+          // call that may not fix every invisible cluster; the deterministic bg+text
+          // pair guarantees the pixel-invisible ones are readable. (The old code
+          // reset options to paletteMode only, dropping the deterministic backstop.)
+          options = { ...options, ...decision.options, paletteMode: spec.paletteMode };
+          // ── Paint 2: re-apply with the corrected spec ──
           try {
             const p2 = await applyOnce(spec, options);
             lastVerify = p2.verify; lastPixel = p2.pixel;
             attempts.push({ spec, css: p2.sanitized, notBroken: p2.verify.checks.notBlank && p2.verify.checks.noOverflow && p2.verify.checks.noOverlap && p2.verify.checks.contrastOk && p2.verify.checks.contentCollapsed && p2.verify.checks.contentVisible, changeScore: p2.verify.changeScore, covered: p2.verify.checks.covered, coherent: p2.verify.checks.coherent, changed: p2.verify.checks.changed, contentCollapsed: p2.verify.checks.contentCollapsed });
-            logDebug(`paint2(reReason): checks=${JSON.stringify(p2.verify.checks)} pixel(passed=${p2.pixel.passed})`);
+            logDebug(`paint2(critic): checks=${JSON.stringify(p2.verify.checks)} pixel(passed=${p2.pixel.passed})`);
             // If paint 2 is broken, rollback+fail (no 3rd paint to revert).
             if (!(p2.verify.checks.notBlank && p2.verify.checks.contentCollapsed)) {
               removeStyleEverywhere(activeShadowRoots); markFailed('revision broke content');
-              return { ...failVerify(spec, p2.verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+              return { ...failVerify(spec, p2.verify), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
             }
           } catch {
-            // reReason'd spec produced no styles — keep paint 1 if non-broken.
+            // Critic'd spec produced no styles — keep paint 1 if non-broken.
             if (!(phase1Verify!.checks.notBlank && phase1Verify!.checks.contentCollapsed)) {
               removeStyleEverywhere(activeShadowRoots); markFailed('revision failed');
-              return { ...failVerify(spec, phase1Verify!), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+              return { ...failVerify(spec, phase1Verify!), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
             }
             applyStyleEverywhere(phase1Sanitized, activeShadowRoots); // revert to paint 1
             logDebug('paint2 produced no styles — reverted to paint 1');
@@ -326,7 +527,7 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
           // No — paint 2 overwrote it). Re-applying paint 1 would be a 3rd paint.
           // Rollback+fail honestly instead.
           removeStyleEverywhere(activeShadowRoots); markFailed('repair broke content');
-          return { ...failVerify(spec, p2.verify), paidCalls: 1 + reReasonsDone, wallMs: Date.now() - t0 };
+          return { ...failVerify(spec, p2.verify), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
         }
       } catch {
         // repair produced no styles — keep paint 1
@@ -368,17 +569,19 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
   // unexplained). unaccountedMs = totalMs − sum(stages); a big gap means a stage
   // is eating time we didn't instrument (the ~44s unexplained-overhead case).
   const totalMs = Date.now() - t0;
-  const stagesMs = perception.builtInMs + modelCalls.reduce((s, c) => s + c.ms, 0) + Math.round(compileMsTotal) + Math.round(applyMsTotal) + Math.round(verifyMsTotal) + Math.round(pixelVerifyMsTotal) + persistMs;
+  const modelMsTotal = roleCalls.reduce((s, c) => s + c.ms, 0);
+  const stagesMs = perception.builtInMs + modelMsTotal + Math.round(compileMsTotal) + Math.round(applyMsTotal) + Math.round(verifyMsTotal) + Math.round(pixelVerifyMsTotal) + persistMs;
   const ledger: Ledger = {
     perceiveMs: perception.builtInMs, serializeChars, serializeCharsBefore: lastSerializeBudget.before,
-    modelCalls, compileMs: Math.round(compileMsTotal),
+    roleCalls, compileMs: Math.round(compileMsTotal),
     applyMs: Math.round(applyMsTotal), verifyMs: Math.round(verifyMsTotal),
     pixelVerifyMs: Math.round(pixelVerifyMsTotal), persistMs,
     unaccountedMs: Math.max(0, totalMs - stagesMs),
-    totalMs, paidCalls: 1 + reReasonsDone, paintCount: finalPaintCount,
+    totalMs, paidCalls: paidCalls(), repairRounds, paintCount: finalPaintCount,
+    opsExecuted: opsResult.executed, opsRefused: opsResult.refused, opsRefusedReasons: opsResult.reasons,
   };
-  const modelMsStr = modelCalls.map((c) => `${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ');
-  logDebug(`LEDGER perceive=${ledger.perceiveMs}ms serialize=${serializeChars}chars${lastSerializeBudget.before > lastSerializeBudget.after ? `(budget ${lastSerializeBudget.before}->${lastSerializeBudget.after})` : ''} model=[${modelMsStr}] compile=${ledger.compileMs}ms apply=${ledger.applyMs}ms verify=${ledger.verifyMs}ms pixelVerify=${ledger.pixelVerifyMs}ms persist=${persistMs}ms unaccounted=${ledger.unaccountedMs}ms total=${totalMs}ms paidCalls=${ledger.paidCalls} paints=${finalPaintCount}`);
+  const rolesStr = roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ');
+  logDebug(`LEDGER perceive=${ledger.perceiveMs}ms serialize=${serializeChars}chars${lastSerializeBudget.before > lastSerializeBudget.after ? `(budget ${lastSerializeBudget.before}->${lastSerializeBudget.after})` : ''} roles=[${rolesStr}] compile=${ledger.compileMs}ms apply=${ledger.applyMs}ms verify=${ledger.verifyMs}ms pixelVerify=${ledger.pixelVerifyMs}ms persist=${persistMs}ms unaccounted=${ledger.unaccountedMs}ms total=${totalMs}ms paidCalls=${ledger.paidCalls} repairRounds=${repairRounds} paints=${finalPaintCount} ops=${opsResult.executed}/${opsResult.refused}`);
   if (ledger.unaccountedMs > 0.15 * totalMs) logDebug(`LEDGER GAP >15%: ${ledger.unaccountedMs}ms unaccounted — investigate`);
 
   return {
@@ -387,8 +590,9 @@ async function runStyle(intent: string): Promise<TransformOutcome> {
     perceiveMs: perception.builtInMs, clusters: perception.clusters.length,
     changeScore: lastVerify?.changeScore, accentFraction: lastVerify?.accentFraction,
     modelCoverageFraction: lastVerify?.modelCoverageFraction,
-    wallMs: totalMs, model: specRes.model, usage: specRes.usage,
-    paidCalls: 1 + reReasonsDone, paintCount: finalPaintCount, ledger,
+    wallMs: totalMs, model: roleCalls.map((c) => c.role).join('+'),
+    usage: roleCalls.length ? { total: roleCalls.reduce((s, c) => s + (c.promptTokens ?? 0) + (c.completionTokens ?? 0), 0) } : undefined,
+    paidCalls: paidCalls(), paintCount: finalPaintCount, ledger,
   };
 }
 
@@ -396,9 +600,9 @@ function failVerify(spec: DesignSpec, verify: VerifyResult): TransformOutcome {
   return { ok: false, message: 'Result failed checks: ' + verify.details.slice(0, 3).join('; '), spec, reasoning: spec.reasoning, verify };
 }
 
-function askForSpec(intent: string, perception: string, critique?: string, timeoutMs?: number): Promise<SpecResponse> {
+function askForSpec(role: Role, intent: string, perception: string, critique?: string, timeoutMs?: number): Promise<SpecResponse> {
   return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ action: 'styleSpec', intent, perception, critique, timeoutMs }, (response) => {
+    chrome.runtime.sendMessage({ action: 'styleSpec', role, intent, perception, critique, timeoutMs }, (response) => {
       if (chrome.runtime.lastError || !response) resolve({ ok: false, message: chrome.runtime.lastError?.message || 'No response from design engine.' });
       else resolve(response as SpecResponse);
     });
@@ -417,9 +621,24 @@ async function reapplyStored(): Promise<boolean> {
   }
   if (!state.enabled || !state.style?.css) return false;
   clearHandles();
-  const perception = perceive();
+  let perception = perceive();
   activeShadowRoots = perception.shadowRoots;
-  // Re-compile the stored spec against the current perception (handles may differ).
+  // Re-derive structural ops from the stored spec (risk 3): the spec is the durable
+  // source of truth; the session log died with the tab. Re-validate against the
+  // fresh perception (handles may differ) + execute idempotently (skip if already
+  // satisfied — a move already applied, a removed element gone). No log on re-derive.
+  const { ops: revalidated } = validateOps(state.style.spec.ops, perception);
+  if (revalidated.length) {
+    executeOps(revalidated, false);
+    activeOps = revalidated;
+    // Re-perceive so compile uses post-op geometry (the reclamation must show).
+    perception = perceive();
+    activeShadowRoots = perception.shadowRoots;
+  } else {
+    activeOps = [];
+  }
+  txnLog.clear(); // fresh session — the log is session-only
+  // Re-compile the stored spec against the (possibly post-op) perception.
   const opts = state.style.compileOptions ?? { paletteMode: state.style.spec.paletteMode };
   const compiled = compileSpec(state.style.spec, perception, opts);
   const css = sanitizeCss(compiled.css).css || state.style.css;
@@ -440,14 +659,23 @@ async function toggleSiteState(): Promise<void> {
   state.enabled = !state.enabled;
   await saveSiteState(key, state);
   if (state.enabled) await reapplyStored();
-  else { stopDynamicDefense(); activeSpec = null; removeStyleEverywhere(activeShadowRoots); removeEscapeUI(); delete document.documentElement.dataset[APPLIED]; }
+  else { undoOpsAndCss(); }
+}
+
+/** Off / undo: replay the op transaction log backwards (restore the original
+ *  DOM), then strip the CSS. The escape hatch stays instant and absolute —
+ *  ops are undone BEFORE the style tag is removed, so the page returns to its
+ *  pre-transform state in one synchronous pass. The log is session-only. */
+function undoOpsAndCss(): void {
+  stopDynamicDefense();
+  activeSpec = null; activeOps = [];
+  txnLog.undoAll(liveDom);
+  removeStyleEverywhere(activeShadowRoots); removeEscapeUI();
+  delete document.documentElement.dataset[APPLIED];
 }
 
 async function removeAll(): Promise<void> {
-  stopDynamicDefense();
-  activeSpec = null;
-  removeStyleEverywhere(activeShadowRoots); removeEscapeUI();
-  delete document.documentElement.dataset[APPLIED];
+  undoOpsAndCss();
   await clearSiteState(storageKey());
 }
 
@@ -464,10 +692,15 @@ function restyleDynamic(): void {
   clearHandles();
   const perception = perceive();
   activeShadowRoots = perception.shadowRoots;
+  // Re-derive ops against the fresh perception (risk 2: a framework re-inserted
+  // a removed element; re-execute is idempotent — removed ops are a no-op if
+  // the element is gone, re-apply if it came back). No log (re-derive path).
+  const { ops: revalidated } = validateOps(activeSpec.ops, perception);
+  if (revalidated.length) { executeOps(revalidated, false); activeOps = revalidated; }
   const compiled = compileSpec(activeSpec, perception, activeOpts);
   const css = sanitizeCss(compiled.css).css;
   if (css) { applyStyleEverywhere(css, activeShadowRoots); lastAppliedCss = css; }
-  logDebug(`dynamic restyle: ${perception.clusters.length} clusters re-stamped + re-applied`);
+  logDebug(`dynamic restyle: ${perception.clusters.length} clusters re-stamped + re-applied${revalidated.length ? ` ops=${revalidated.length}` : ''}`);
 }
 
 function scheduleRestyle(): void {
@@ -550,7 +783,14 @@ async function handleRouteChange(): Promise<void> {
 // heuristic classifier routes obvious cases; ambiguous ones fall through to the
 // full path.
 
-function classifyIntent(intent: string): 'hide' | 'move' | 'design' {
+/** Intent routing. The pure-palette path ('restyle-only') runs the PAINTER alone
+ *  — 1 fast call, no Architect — a big latency win on the most common request type.
+ *  It is exempt from the recolor + layoutReshaped checks (a palette-only request
+ *  isn't claiming to be a redesign) but KEEPS every by-eye-safety bar (contrast,
+ *  invisible, voids, squeeze, overflow, coverage, proportion). The exemption is
+ *  bounded by the CLASSIFIER ONLY: a palette word AND NO arrangement word. A mixed
+ *  request ('make it dark and move the sidebar to the top') goes full design. */
+function classifyIntent(intent: string): 'hide' | 'move' | 'restyle-only' | 'design' {
   const s = intent.trim().toLowerCase();
   if (s.length > 120) return 'design';                  // long/descriptive → design
   // Starts with a hide verb AND has no aesthetic/design keywords → simple hide.
@@ -560,6 +800,12 @@ function classifyIntent(intent: string): 'hide' | 'move' | 'design' {
   if (/^(move|shift|relocate|push|send)\b/.test(s) &&
       /\b(to (the )?(top|bottom|up|down|beginning|start|end|finish))\b/.test(s) &&
       !/\b(like|style|theme|aesthetic|redesign|make it|transform|look)\b/.test(s)) return 'move';
+  // Restyle-only: a pure palette request. A palette/theme word AND no arrangement
+  // word (column/width/grid/layout/move/rearrange/sidebar/stack/reorder/etc.) →
+  // Painter alone. A mixed request falls through to the full design path.
+  const hasPaletteWord = /\b(colou?r|theme|palette|dark|light|neon|cyberpunk|warm|cool|muted|vivid|pastel|monochrome|grayscale|sepia|saturat|bright|moody|earthy|duotone)\b/.test(s);
+  const hasArrangementWord = /\b(column|columns|width|grid|layout|move|rearrange|sidebar|side bar|stack|reorder|row|arrange|arrangement|narrow|widen|spacing|restructur)\b/.test(s);
+  if (hasPaletteWord && !hasArrangementWord) return 'restyle-only';
   return 'design';
 }
 
@@ -627,7 +873,7 @@ async function fastHidePath(intent: string): Promise<TransformOutcome> {
   return {
     ok: true, reasoning: spec.reasoning, spec, perceiveMs: perception.builtInMs,
     clusters: perception.clusters.length, paidCalls: 0, wallMs,
-    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, serializeCharsBefore: 0, modelCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: wallMs, paidCalls: 0, paintCount: 1 },
+    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, serializeCharsBefore: 0, roleCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: wallMs, paidCalls: 0, repairRounds: 0, paintCount: 1, opsExecuted: 0, opsRefused: 0, opsRefusedReasons: [] },
   };
 }
 
@@ -713,8 +959,17 @@ async function fastMovePath(intent: string): Promise<TransformOutcome> {
   return {
     ok: true, reasoning: spec.reasoning, spec, perceiveMs: perception.builtInMs,
     clusters: perception.clusters.length, paidCalls: 0, wallMs,
-    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, serializeCharsBefore: 0, modelCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: wallMs, paidCalls: 0, paintCount: 1 },
+    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, serializeCharsBefore: 0, roleCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: wallMs, paidCalls: 0, repairRounds: 0, paintCount: 1, opsExecuted: 0, opsRefused: 0, opsRefusedReasons: [] },
   };
+}
+
+/** Restyle-only path — Painter ALONE (1 fast call, no Architect). A pure palette
+ *  request ("make it dark", "cyberpunk colors") runs the Painter only and is
+ *  exempt from the recolor + layoutReshaped checks (it's a palette change by
+ *  definition, not a redesign), but keeps every by-eye-safety bar. The classifier
+ *  gates this: a palette word AND no arrangement word. A mixed request goes full. */
+function restyleOnlyPath(intent: string): Promise<TransformOutcome> {
+  return runStyle(intent, true);
 }
 
 // ── Entry ──────────────────────────────────────────────────────────
@@ -742,9 +997,13 @@ export default defineContentScript({
       if (message.action === 'transform' && message.intent) {
         if (!inFlight) {
           const intent = message.intent;
-          // Adaptive effort: simple hide/move intents take the fast no-model path.
+          // Adaptive effort: simple hide/move intents take the fast no-model path;
+          // a pure-palette restyle-only intent takes the Painter-alone path.
+          // Clear any prior session's op log so a fast-path undo (CSS-only) never
+          // replays stale design-path ops; runStyle clears it again before recording.
+          txnLog.clear(); activeOps = [];
           const kind = classifyIntent(intent);
-          const runner = kind === 'hide' ? fastHidePath(intent) : kind === 'move' ? fastMovePath(intent) : runStyle(intent);
+          const runner = kind === 'hide' ? fastHidePath(intent) : kind === 'move' ? fastMovePath(intent) : kind === 'restyle-only' ? restyleOnlyPath(intent) : runStyle(intent);
           inFlight = runner.finally(() => { inFlight = null; });
         }
         return inFlight;

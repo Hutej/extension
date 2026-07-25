@@ -15,8 +15,9 @@ import type { DesignSpec, StyleDecls, LayoutDecls } from '../spec';
 import type { Perception, Cluster } from '../perceive';
 import { buildDeclarations } from '../capabilities/style/index.ts';
 import { buildLayoutDeclarations } from '../capabilities/structure/index.ts';
-import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, luminanceCompatible, fluidizeRawPxSizing, MIN_CHARS_PER_LINE, MIN_CONTENT_WIDTH_FRACTION } from '../laws/index.ts';
-import { parseColor, colorfulness, pickReadableText } from '../../shared/color.ts';
+import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, luminanceCompatible, fluidizeRawPxSizing, MIN_CHARS_PER_LINE, MIN_CONTENT_WIDTH_FRACTION, MIN_COMPONENT_WIDTH_FRACTION, COMPONENT_WIDE_FRACTION } from '../laws/index.ts';
+import { parseColor, colorfulness, pickReadableText, extractGradientStops, pickReadableTextForGradient } from '../../shared/color.ts';
+import { validateOps, type ValidatedOp } from '../ops/index.ts';
 
 export interface CompileOptions {
   forceContrast?: boolean;
@@ -44,6 +45,9 @@ export interface CompileResult {
   invalidTargets: string[];
   droppedProps: string[];
   baseCoatCount: number;       // clusters base-coated by the harmonizer
+  /** Structural ops accepted by the guard laws (content.ts executes them live).
+   *  Refused ops are in droppedProps as `kind(target:reason)`. */
+  ops: ValidatedOp[];
 }
 
 const PADDING_KEYS = ['padding', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'];
@@ -57,6 +61,12 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
   const droppedProps: string[] = [];
   let rulesEmitted = 0;
   let baseCoatCount = 0;
+
+  // Structural ops: validate against guard laws (pure). content.ts executes the
+  // accepted ops against the live DOM; refusals land in droppedProps like any
+  // refused declaration. Ops + CSS join into ONE apply (ops are not paints).
+  const { ops: validatedOps, refused: opRefusals } = validateOps(spec.ops, perception);
+  droppedProps.push(...opRefusals);
 
   const canvasText = firstNonEmpty(spec.canvas?.color, perception.canvas.color);
   // Effective page backdrop: the spec's chosen canvas bg, else the site's original.
@@ -89,20 +99,38 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       decls.push(...r.decls);
     }
     if (spec.canvasLayout && !opts.dropLayout) {
-      // Refuse page-narrowing: on a wide page (content ≥70% of viewport), the
-      // model's maxWidth can't be below 65% of the page's natural content width —
-      // that leaves a dead-margin band. Clamp the floor UP so the content uses the room.
+      // Refuse page-narrowing AND px-anchored width: on a wide page (content
+      // ≥70% of viewport) a fixed-px maxWidth is wrong twice — it can leave a
+      // dead-margin band (the "whole site shrank" look), and it freezes the
+      // proportion at ONE zoom level. Browser zoom rescales the CSS viewport
+      // (Ctrl-minus at 80% makes a 1280px window report ~1600px), so a px cap
+      // that was ~90% of the page at 100% zoom becomes ~65% of it zoomed out —
+      // the design shrinks while the site around it grows. A PERCENTAGE keeps
+      // the same proportion at every zoom and window size. Convert the model's
+      // px cap to a viewport-relative percentage, floored at
+      // MIN_CONTENT_WIDTH_FRACTION of the natural content width; ≥97% of the
+      // viewport is treated as full width.
       let canvasLayout = spec.canvasLayout;
       const cmw = perception.skeleton.contentMaxWidthPx;
-      if (cmw != null && cmw >= perception.viewport.w * 0.7 && canvasLayout.maxWidth) {
+      const vpWidth = perception.viewport.w;
+      if (cmw != null && vpWidth > 0 && cmw >= vpWidth * 0.7 && canvasLayout.maxWidth) {
         const pxVals = [...canvasLayout.maxWidth.matchAll(/(\d+(?:\.\d+)?)\s*px/gi)].map((m) => parseFloat(m[1]));
         const modelPx = pxVals.length ? Math.max(...pxVals) : null;
         if (modelPx != null) {
-          const floor = Math.round(cmw * MIN_CONTENT_WIDTH_FRACTION);
-          if (modelPx < floor) {
-            canvasLayout = { ...canvasLayout, maxWidth: `min(100%, ${floor}px)` };
-            droppedProps.push(`refusePageNarrowing: canvasLayout.maxWidth ${modelPx}px -> ${floor}px (floor = ${Math.round(MIN_CONTENT_WIDTH_FRACTION * 100)}% of ${cmw}px content on a wide page)`);
-          }
+          const effectivePx = Math.max(modelPx, cmw * MIN_CONTENT_WIDTH_FRACTION);
+          const pct = Math.min(100, Math.round((effectivePx / vpWidth) * 100));
+          const pctValue = pct >= 97 ? '100%' : `${pct}%`;
+          canvasLayout = { ...canvasLayout, maxWidth: pctValue };
+          droppedProps.push(`refusePageNarrowing: canvasLayout.maxWidth ${modelPx}px -> ${pctValue} (zoom-proof percentage; floor = ${Math.round(MIN_CONTENT_WIDTH_FRACTION * 100)}% of ${cmw}px natural content on a wide page)`);
+        }
+      } else if (canvasLayout.maxWidth) {
+        // Not a wide page, OR no measured content width — still convert any fixed-px
+        // maxWidth to a zoom-proof percentage of the viewport (a px cap is zoom-hostile
+        // at any width). A `min(Xpx, 100%)` or bare `Xpx` becomes a pure percentage.
+        const converted = percentifyValueToViewport(canvasLayout.maxWidth, vpWidth);
+        if (converted !== canvasLayout.maxWidth) {
+          canvasLayout = { ...canvasLayout, maxWidth: converted };
+          droppedProps.push(`percentifyCanvas: canvasLayout.maxWidth -> ${converted} (zoom-proof % of ${Math.round(vpWidth)}px viewport)`);
         }
       }
       const r = buildLayoutDeclarations(canvasLayout, { isConstraintOwner: true, ownsTarget: false, dropSizing: opts.dropSizing });
@@ -113,9 +141,19 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
     // any cluster rule) must be readable against the canvas backdrop. Root cause
     // of the old no-op: forceContrast only touched rules that set a background, so
     // uncovered text stayed dark-on-dark. Appended last -> wins the block's color.
+    // For a GRADIENT canvas, pick text readable against every stop (a dark text on
+    // a light→dark gradient is invisible at the light end; this is the washed-text
+    // bug, and it holds the contrast at every zoom where the gradient renders
+    // against a different stop).
     if (opts.forceContrast) {
       const parsed = parseColor(canvasBg);
-      const readable = parsed ? pickReadableText(parsed) : canvasText;
+      let readable: string;
+      if (parsed) {
+        readable = pickReadableText(parsed);
+      } else {
+        const stops = extractGradientStops(canvasBg);
+        readable = stops.length ? pickReadableTextForGradient(stops) : canvasText;
+      }
       if (readable) decls.push(`color: ${readable} !important;`);
     }
     // ponytail: overflow-x:clip prevents horizontal scrollbar WITHOUT affecting
@@ -164,7 +202,12 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       }
       if (rule.layout && !opts.collapseTargets?.includes(rule.target)) {
         const clampThis = opts.dropSizing || (opts.clampTargets?.includes(rule.target) ?? false) || (opts.squeezeTargets?.includes(rule.target) ?? false);
-        const r = buildLayoutDeclarations(rule.layout, {
+        // Percentage geometry law (cluster level) — same as component rules: a
+        // fixed-px width on a composition region is zoom-hostile; convert to a
+        // percentage of the measured parent, floored at the component room law.
+        const compParentW = cluster.layout.parentHandle ? byHandle.get(cluster.layout.parentHandle)?.rect.w : undefined;
+        const layoutInput = percentifyClusterWidth(rule.layout, cluster, compParentW ?? perception.viewport.w, droppedProps, rule.target);
+        const r = buildLayoutDeclarations(layoutInput, {
           isConstraintOwner: cluster.layout.isContainer ?? false,
           ownsTarget: cluster.layout.constraintOwnerHandle != null,
           isPassiveWrapper: cluster.layout.isPassiveWrapper ?? false,
@@ -219,6 +262,12 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       // Content-image protection: a cluster whose own bg is a url() image (thumbnail)
       // must never receive a solid background (would paint over the image).
       styles = stripImageBg(styles, cluster?.style.hasBgImage ?? false, droppedProps, rule.target);
+      // Decorative-void refusal: a rule that grows a TEXT-LESS, IMAGE-LESS cluster
+      // into a large framed box (big padding + border + boxShadow, no content) is a
+      // decorative void — the empty-capsule bug (a header that was removed leaves a
+      // big empty framed box). Cap the padding and drop the framing on such clusters
+      // so a void can't be grown. A text/image-bearing cluster keeps its framing.
+      styles = stripDecorativeVoidGrowth(styles, cluster, droppedProps, rule.target);
       const r = buildDeclarations(styles, {
         mode: 'base',
         isNativeControl: cluster?.isNativeControl,
@@ -251,6 +300,13 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       // The cluster's samples tell us it carries text; the layout value tells us
       // how narrow. Pure geometry — no aesthetic logic.
       layoutInput = refuseSubMeasure(layoutInput, cluster, droppedProps, rule.target);
+      // Percentage geometry law (cluster level): convert fixed-px widths to a
+      // percentage of the measured parent, floored at the component room law for
+      // wide children. A px width is zoom-hostile; a % tracks the parent at every
+      // zoom and window size. The parent is the nearest cluster ancestor (else
+      // the viewport — a top-level cluster IS relative to the viewport).
+      const parentW = cluster?.layout.parentHandle ? byHandle.get(cluster.layout.parentHandle)?.rect.w : undefined;
+      layoutInput = percentifyClusterWidth(layoutInput, cluster, parentW ?? perception.viewport.w, droppedProps, rule.target);
       const r = buildLayoutDeclarations(layoutInput, {
         isConstraintOwner: cl?.isContainer ?? false,
         ownsTarget: cl?.constraintOwnerHandle != null,
@@ -406,7 +462,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
   const { css: fluidCss, leaks: rawPxLeaks } = fluidizeRawPxSizing(blocks.join('\n\n'));
   for (const leak of rawPxLeaks) droppedProps.push(`fluidize(${leak})`);
 
-  return { css: fluidCss, rulesEmitted, invalidTargets, droppedProps, baseCoatCount };
+  return { css: fluidCss, rulesEmitted, invalidTargets, droppedProps, baseCoatCount, ops: validatedOps };
 }
 
 function indent(decls: string[]): string { return decls.map((d) => '  ' + d).join('\n'); }
@@ -542,6 +598,143 @@ function refuseSubMeasure(layout: LayoutDecls, cluster: Cluster | undefined, dro
       if (out === layout) out = { ...layout };
       delete (out as Record<string, unknown>)[k];
       droppedProps.push(`measure(${handle}:${k}=${v} — ${cpl.toFixed(1)}cpl < ${MIN_CHARS_PER_LINE})`);
+    }
+  }
+  return out;
+}
+
+/**
+ * Percentage geometry law, cluster level. A fixed-px width/maxWidth/minWidth on a
+ * cluster is zoom-hostile — browser zoom rescales the CSS viewport, so a px cap
+ * frozen at compile time changes proportion at every zoom level. Convert it to a
+ * percentage of the measured parent width (the cluster's own parent when known,
+ * else the viewport). A percentage tracks its parent, which tracks the viewport,
+ * at every zoom and window size.
+ *
+ * The room law extends one level down: a WIDE child (widthFractionOfParent ≥ 0.7)
+ * may not be emitted below MIN_COMPONENT_WIDTH_FRACTION of that fraction — the
+ * "all my components shrank" dead-margin band, inside its parent. Floor the
+ * converted percentage there; a narrow child (e.g. a sidebar) is left to the
+ * model's value. Pure geometry — no aesthetic logic. The structure path's
+ * min(X, 100%) wrap then receives a fluid % value and leaves it untouched.
+ *
+ * `parentWidth falls back to the viewport when no parent cluster is
+ *  known (widthFractionOfParent=1); a real per-rule parent lookup would be tighter,
+ *  but perception's parentHandle already captured the nearest cluster ancestor,
+ *  so the viewport fallback only hits top-level clusters (correct — they ARE
+ *  relative to the viewport).`
+ */
+/**
+ * Convert a fixed-px width value (bare `Xpx` or `min(Xpx, 100%)`/`min(100%, Xpx)`)
+ * to a pure zoom-proof percentage of the viewport. A px ceiling is zoom-hostile
+ * (it freezes the proportion at one viewport size); a percentage tracks the viewport
+ * at every size. A value already in %/clamp()/calc() is returned unchanged. Pure.
+ */
+function percentifyValueToViewport(v: string, viewportWidthPx: number): string {
+  if (!v || viewportWidthPx <= 0) return v;
+  const t = v.trim();
+  const bare = t.match(/^([\d.]+)px$/i);
+  const minWrap = t.match(/^min\(\s*([\d.]+)px\s*,\s*100%\s*\)|^min\(\s*100%\s*,\s*([\d.]+)px\s*\)$/i);
+  let px: number | null = null;
+  if (bare) px = parseFloat(bare[1]);
+  else if (minWrap) px = parseFloat(minWrap[1] ?? minWrap[2]);
+  if (px == null) return v;
+  return `${Math.min(100, Math.round((px / viewportWidthPx) * 100))}%`;
+}
+
+function percentifyClusterWidth(layout: LayoutDecls, cluster: Cluster | undefined, parentWidthPx: number, droppedProps: string[], handle: string): LayoutDecls {
+  if (!cluster || parentWidthPx <= 0) return layout;
+  let out = layout;
+  for (const k of ['width', 'maxWidth', 'minWidth'] as const) {
+    const v = (layout as Record<string, unknown>)[k];
+    if (typeof v !== 'string') continue;
+    // Extract the fixed-px value: a bare `Xpx` OR a `min(Xpx, 100%)`/`min(100%, Xpx)`
+    // (the structure path's viewport-safe wrap, which still freezes a px ceiling —
+    // zoom-hostile). A pure %/clamp()/calc() is left alone.
+    const bare = v.trim().match(/^([\d.]+)px$/i);
+    const minWrap = v.trim().match(/^min\(\s*([\d.]+)px\s*,\s*100%\s*\)|^min\(\s*100%\s*,\s*([\d.]+)px\s*\)$/i);
+    let px: number | null = null;
+    if (bare) px = parseFloat(bare[1]);
+    else if (minWrap) px = parseFloat(minWrap[1] ?? minWrap[2]);
+    if (px == null) continue;                           // already a pure fluid value — leave it
+    let pct = (px / parentWidthPx) * 100;
+    // Room law, component level: a wide child can't shrink below the floor of
+    // its natural fraction. This is the "all my components shrank" bug, one level
+    // down from the page-level MIN_CONTENT_WIDTH_FRACTION law.
+    if (cluster.widthFractionOfParent >= COMPONENT_WIDE_FRACTION) {
+      const floor = MIN_COMPONENT_WIDTH_FRACTION * cluster.widthFractionOfParent * 100;
+      if (pct < floor) pct = floor;
+    }
+    pct = Math.min(100, Math.round(pct));
+    if (out === layout) out = { ...layout };
+    (out as Record<string, unknown>)[k] = `${pct}%`;
+    droppedProps.push(`percentify(${handle}:${k}=${v} -> ${pct}% of ${Math.round(parentWidthPx)}px parent)`);
+  }
+  return out;
+}
+
+/**
+ * Decorative-void refusal. A rule that grows a TEXT-LESS, IMAGE-LESS cluster into a
+ * large framed box (big padding + a thick border/boxShadow) is a decorative void —
+ * the empty-capsule bug: a header/section that was removed leaves a big empty framed
+ * box where it was. Refuse the GROWTH on such a cluster: cap large padding and drop
+ * the heavy framing so a void can't be grown into a visible capsule. A text-bearing
+ * or image cluster keeps its framing (it has content to show). A normal card with a
+ * modest border + small padding is NOT a void — only LARGE padding + THICK framing on
+ * a content-less cluster is.
+ * `ponytail: the void signal is a heuristic (no text + large pad + thick frame); a
+ *  real content measure would catch the edge case of a content-less card, but the
+ *  large-pad + thick-frame gate avoids false positives on normal framed cards.`
+ */
+const VOID_PAD_CAP_PX = 24;
+const VOID_LARGE_PAD_PX = 40;
+const VOID_THICK_BORDER_PX = 3;
+function stripDecorativeVoidGrowth(styles: StyleDecls, cluster: Cluster | undefined, droppedProps: string[], handle: string): StyleDecls {
+  if (!cluster) return styles;
+  // Only a content-less, image-less cluster can become a decorative void. A cluster
+  // with text samples, a content image, OR a primary-content role (main/article) has
+  // something to show — keep its framing.
+  const hasText = cluster.samples.reduce((s, t) => s + (t || '').length, 0) > 0;
+  const isContentRole = cluster.role === 'main' || cluster.role === 'article';
+  if (hasText || cluster.style.hasBgImage || isContentRole) return styles;
+  // Only a WIDE content-less cluster reads as a void (a header/section that was
+  // removed). A narrow card — even a content-less one — keeps its framing; the
+  // void bug is a big empty band, not a small box.
+  if (cluster.layout.widthRatio < 0.5) return styles;
+  // Only refuse if the rule GROWS the void: large padding (≥40px) AND/OR a thick
+  // border + boxShadow together. A modest border alone on a card isn't a void.
+  const hasLargePad = ['padding', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'].some((k) => {
+    const v = styles[k];
+    const m = v?.match(/^([\d.]+)px/i);
+    return m && parseFloat(m[1]) >= VOID_LARGE_PAD_PX;
+  });
+  const hasThickBorder = ['border', 'borderTop', 'borderRight', 'borderBottom', 'borderLeft'].some((k) => {
+    const v = styles[k];
+    const m = v?.match(/^([\d.]+)px/i);
+    return m && parseFloat(m[1]) >= VOID_THICK_BORDER_PX;
+  });
+  const hasShadow = 'boxShadow' in styles;
+  const growsVoid = hasLargePad || (hasThickBorder && hasShadow);
+  if (!growsVoid) return styles;
+  let out = styles;
+  // Cap large padding down so the void doesn't balloon.
+  for (const k of ['padding', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft']) {
+    if (!(k in out)) continue;
+    const v = out[k];
+    const m = v?.match(/^([\d.]+)px/i);
+    if (m && parseFloat(m[1]) > VOID_PAD_CAP_PX) {
+      if (out === styles) out = { ...styles };
+      out[k] = `${VOID_PAD_CAP_PX}px`;
+      droppedProps.push(`voidGrowth(${handle}:${k} capped to ${VOID_PAD_CAP_PX}px)`);
+    }
+  }
+  // Drop the heavy framing (thick border + boxShadow) — a frame around nothing.
+  if (hasThickBorder && hasShadow) {
+    for (const k of ['border', 'borderTop', 'borderRight', 'borderBottom', 'borderLeft', 'boxShadow']) {
+      if (!(k in out)) continue;
+      if (out === styles) out = { ...styles };
+      delete out[k];
+      droppedProps.push(`voidGrowth(${handle}:${k} dropped — decorative void)`);
     }
   }
   return out;

@@ -86,6 +86,43 @@ export function pickReadableText(bg: RGBA): string {
 }
 
 /**
+ * The contrast ratio of a candidate text color against a gradient's WORST stop.
+ * Text over a gradient must clear the contrast floor against EVERY stop — a dark
+ * text on a light→dark gradient is invisible at the light end. Returns the MINIMUM
+ * contrast ratio across the stops (the worst case), or the ratio against the single
+ * color for a non-gradient. Pure.
+ */
+export function minContrastAgainstGradient(text: RGBA, stops: RGBA[]): number {
+  if (stops.length === 0) return 21; // no stops -> treat as maximally readable
+  let min = Infinity;
+  for (const stop of stops) {
+    const r = contrastRatio(text, stop);
+    if (r < min) min = r;
+  }
+  return min;
+}
+
+/**
+ * Pick a readable text color for a gradient background, checking against EVERY
+ * stop. A single pickReadableText against the average stop can leave text invisible
+ * at one end. Pick dark text if it clears the floor against the lightest (highest-
+ * luminance) stop; else light text. Returns '#111111' or '#f5f5f5'. Pure.
+ */
+export function pickReadableTextForGradient(stops: RGBA[], floor = MIN_CONTRAST_FOR_PICK): string {
+  if (stops.length === 0) return '#111111';
+  const dark: RGBA = [17, 17, 17, 1];
+  const light: RGBA = [245, 245, 245, 1];
+  // Dark text is readable iff it clears the floor against the LIGHTEST stop.
+  const lightest = stops.reduce((a, b) => (luminance(b) > luminance(a) ? b : a));
+  if (contrastRatio(dark, lightest) >= floor) return '#111111';
+  // Else light text — readable iff it clears the floor against the DARKEST stop.
+  return '#f5f5f5';
+}
+
+/** The contrast floor the readable-text pick uses (WCAG AA for normal text). */
+export const MIN_CONTRAST_FOR_PICK = 4.5;
+
+/**
  * Chroma-ish colorfulness in 0..1 = (max-min)/255. A loud accent (red, blue,
  * green) scores high; neutrals (white/gray/black) score ~0. Used by verify to
  * measure how much of the page carries an accent, without trusting cluster counts.
@@ -109,6 +146,41 @@ export function colorDistance(a: RGBA, b: RGBA): number {
   const dg = ea(a[1], a[3]) - ea(b[1], b[3]);
   const db = ea(a[2], a[3]) - ea(b[2], b[3]);
   return Math.sqrt(dr * dr + dg * dg + db * db);
+}
+
+/**
+ * Extract the solid color stops from a CSS gradient (linear-gradient / radial-gradient
+ * / conic-gradient). Returns the parsed RGBA of each stop color, or [] for a non-
+ * gradient. Pure — used by compile + verify to contrast-check text against EVERY
+ * stop of a gradient bar (text over a gradient must clear the contrast floor against
+ * each stop, not just the first). Stops without a parseable color (e.g. transparent)
+ * are skipped; a stop list that resolves to nothing returns [].
+ */
+export function extractGradientStops(bg: string): RGBA[] {
+  if (!bg) return [];
+  const s = bg.trim().toLowerCase();
+  const grad = s.match(/^(linear-gradient|radial-gradient|conic-gradient|repeating-linear-gradient|repeating-radial-gradient)\s*\(([\s\S]*)\)$/i);
+  if (!grad) return [];
+  // Split the gradient body on commas at the top level (not inside nested parens).
+  const parts: string[] = [];
+  let depth = 0, cur = '';
+  for (const ch of grad[2]) {
+    if (ch === '(') depth++;
+    if (ch === ')') depth--;
+    if (ch === ',' && depth === 0) { if (cur.trim()) parts.push(cur.trim()); cur = ''; }
+    else cur += ch;
+  }
+  if (cur.trim()) parts.push(cur.trim());
+  const stops: RGBA[] = [];
+  for (const part of parts) {
+    // A part is a stop if it begins with a color (hex/rgb/hsl/named) — skip the
+    // angle/position declarations (e.g. "to right", "45deg", "at center").
+    const first = part.split(/\s+/)[0];
+    if (/^(to|at|\d+(deg|rad|turn|grad|%)|center|top|bottom|left|right)\b/i.test(first)) continue;
+    const c = parseColor(part) ?? parseColor(first);
+    if (c) stops.push(c);
+  }
+  return stops;
 }
 
 function clampByte(n: number): number { return Math.max(0, Math.min(255, Math.round(n))); }

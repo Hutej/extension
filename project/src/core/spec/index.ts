@@ -26,6 +26,34 @@ export interface DesignRule {
   hide?: boolean;
 }
 
+/** A structural DOM operation. The Architect emits these alongside CSS layout;
+ *  compile VALIDATES each against guard laws (pure) and content.ts EXECUTES the
+ *  accepted ones against the live DOM, recording an exact inverse per op so the
+ *  escape hatch can undo them. Ops are for what CSS can't do: collapsing an empty
+ *  container so its space is RECLAIMED (remove), a true source-order change
+ *  (reorder), reparenting/relocating including a floating/sticky lever (move),
+ *  a grouping container created purely for layout (wrap). Conservative lift:
+ *  CSS-layout still does most composition; ops are rare. */
+export type OpKind = 'remove' | 'move' | 'reorder' | 'wrap';
+
+export interface DesignOp {
+  kind: OpKind;
+  /** Cluster handle the op targets (resolved to a live stamped node at apply). */
+  target: string;
+  /** move: destination handle (a cluster to reparent into) or a named slot
+   *  ('floating' = position:fixed mini-player lever). wrap: the new wrapper's
+   *  intended display ('flex'|'grid'). reorder: the handle to insert before
+   *  (omitted = move to end). */
+  to?: string;
+  /** reorder: insert target before this handle. wrap/reorder: omit for end. */
+  before?: string;
+  /** Risky-target consent. move/reorder/wrap on a 'risky' cluster (event-heavy,
+   *  forms, live iframes, canvas/video) execute ONLY when the model sets this
+   *  explicitly — a second thought, not a reflex. 'forbidden' targets (primary
+   *  content, scripts) are refused regardless. */
+  consent?: boolean;
+}
+
 export interface DesignSpec {
   reasoning: string;
   /** Declared palette intent, chosen by the model from the user's words.
@@ -43,6 +71,10 @@ export interface DesignSpec {
    *  component rules, so the macro structure is established. Same shape as rules;
    *  same laws pipeline. */
   composition?: DesignRule[];
+  /** Structural DOM operations (Architect-owned, take-not-merge — like
+   *  composition). Validated by compile against guard laws, executed against
+   *  the live DOM by content.ts with an exact inverse recorded per op. */
+  ops?: DesignOp[];
   rules: DesignRule[];
 }
 
@@ -107,6 +139,29 @@ export function validateSpec(raw: unknown): ValidateResult {
     }
     if (compRules.length) spec.composition = compRules;
   }
+  // Parse structural ops (shape-only — guard logic is compile's job). Dedup
+  // by target+kind (first wins): two `remove` ops on the same target are
+  // idempotent; two `move` ops conflict and the first is the intent.
+  if (Array.isArray(r.ops)) {
+    const ops: DesignOp[] = [];
+    const seen = new Set<string>();
+    for (const item of r.ops as unknown[]) {
+      if (!item || typeof item !== 'object') continue;
+      const oi = item as Record<string, unknown>;
+      if (typeof oi.target !== 'string' || !oi.target) continue;
+      const kind = oi.kind as string;
+      if (kind !== 'remove' && kind !== 'move' && kind !== 'reorder' && kind !== 'wrap') continue;
+      const key = `${kind}:${oi.target}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const op: DesignOp = { kind: kind as OpKind, target: oi.target };
+      if (typeof oi.to === 'string') op.to = oi.to;
+      if (typeof oi.before === 'string') op.before = oi.before;
+      if (oi.consent === true) op.consent = true;
+      ops.push(op);
+    }
+    if (ops.length) spec.ops = ops;
+  }
   const variables = asDecls(r.variables);
   const canvas = asDecls(r.canvas);
   const canvasLayout = asDecls(r.canvasLayout);
@@ -118,6 +173,87 @@ export function validateSpec(raw: unknown): ValidateResult {
     return { ok: false, error: 'spec produced no usable rules, canvas, or variables' };
   }
   return { ok: true, spec };
+}
+
+/**
+ * Merge an Architect spec (composition/layout/canvasLayout/hide — the structure)
+ * with a Painter spec (canvas/variables/paletteMode/styles/hover/focusVisible —
+ * the surface). Both are partial DesignSpecs; the merge produces the full spec the
+ * compiler consumes. By target: the Architect's layout joins the Painter's styles
+ * on the same cluster. Page-level: canvas/variables/paletteMode come from the
+ * Painter; canvasLayout/composition come from the Architect. Pure: takes two
+ * validated specs as data, returns one merged spec.
+ *
+ * A role may be absent (the restyle-only path passes no Architect); an absent role
+ * contributes nothing. Conflicts on the same target's same bag are resolved
+ * Painter-wins for styles, Architect-wins for layout (each role owns its bag, so a
+ * true conflict shouldn't happen — but if both set `layout`, the Architect is the
+ * authority on structure).
+ */
+export function mergeSpecs(architect?: DesignSpec, painter?: DesignSpec): DesignSpec {
+  const rulesByTarget = new Map<string, DesignRule>();
+
+  // Architect owns the layout bag + composition + canvasLayout + hide.
+  if (architect) {
+    for (const rule of architect.rules) {
+      const existing = rulesByTarget.get(rule.target);
+      if (existing) {
+        if (rule.layout) existing.layout = { ...existing.layout, ...rule.layout };
+        if (rule.hide) existing.hide = true;
+      } else {
+        rulesByTarget.set(rule.target, { target: rule.target, ...(rule.layout ? { layout: { ...rule.layout } } : {}), ...(rule.hide ? { hide: true } : {}) });
+      }
+    }
+  }
+
+  // Painter owns the styles + hover + focusVisible bag + canvas + variables + paletteMode.
+  if (painter) {
+    for (const rule of painter.rules) {
+      const existing = rulesByTarget.get(rule.target);
+      if (existing) {
+        if (rule.styles) existing.styles = { ...(existing.styles ?? {}), ...rule.styles };
+        if (rule.hover) existing.hover = { ...(existing.hover ?? {}), ...rule.hover };
+        if (rule.focusVisible) existing.focusVisible = { ...(existing.focusVisible ?? {}), ...rule.focusVisible };
+        if (rule.layout && !existing.layout) existing.layout = { ...rule.layout };
+      } else {
+        rulesByTarget.set(rule.target, {
+          target: rule.target,
+          ...(rule.styles ? { styles: { ...rule.styles } } : {}),
+          ...(rule.hover ? { hover: { ...rule.hover } } : {}),
+          ...(rule.focusVisible ? { focusVisible: { ...rule.focusVisible } } : {}),
+          ...(rule.layout ? { layout: { ...rule.layout } } : {}),
+        });
+      }
+    }
+  }
+
+  const rules = [...rulesByTarget.values()].filter((r) => r.styles || r.layout || r.hover || r.focusVisible || r.hide);
+
+  // Composition: Architect-only (region-level structure). Take the Architect's.
+  const composition = architect?.composition;
+  // Ops: Architect-only (structural DOM mutations). Take-not-merge — ops don't
+  // overlay (validateSpec already deduped by target+kind within a spec; across
+  // specs the Architect is the sole source, the Painter emits none).
+  const ops = architect?.ops;
+
+  // Page-level: canvas/variables/paletteMode from the Painter; canvasLayout from
+  // the Architect (the Painter has no layout). If a Painter set canvasLayout
+  // (shouldn't, but defensively), the Architect wins on structure.
+  const canvas = painter?.canvas ?? architect?.canvas;
+  const variables = painter?.variables ?? architect?.variables;
+  const paletteMode = painter?.paletteMode ?? architect?.paletteMode;
+  const canvasLayout = architect?.canvasLayout ?? painter?.canvasLayout;
+
+  return {
+    reasoning: [architect?.reasoning, painter?.reasoning].filter(Boolean).join(' | ') || '',
+    ...(paletteMode ? { paletteMode } : {}),
+    ...(variables ? { variables } : {}),
+    ...(canvas ? { canvas } : {}),
+    ...(canvasLayout ? { canvasLayout } : {}),
+    ...(composition ? { composition } : {}),
+    ...(ops ? { ops } : {}),
+    rules,
+  };
 }
 
 /** Coerce a value into a flat string->string decl bag, or undefined. */

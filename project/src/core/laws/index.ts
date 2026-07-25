@@ -11,7 +11,8 @@ import { parseColor, luminance } from '../../shared/color.ts';
  *
  * Phase 1 includes paint AND layout: color, type, borders, radius, shadow,
  * backdrop, safe inner spacing, widths, grid/flex arrangement, and type scale.
- * DOM moves and element injection are Phase 2+.
+ * Reversible structural DOM operations (remove/move/reorder/wrap) live in
+ * core/ops, validated here against these same geometry laws before execution.
  */
 
 /**
@@ -343,11 +344,23 @@ export const MIN_CHARS_PER_LINE = 12;
 
 /**
  * Minimum content-width fraction on a wide page. A wide page (content ≥70% of
- * the viewport) that the design narrows below 65% of its natural content width
- * leaves a dead-margin band — the empty-band failure. The compile-law clamps the
- * model's maxWidth UP to this floor so the content can't shrink from the room.
+ * the viewport) must keep content at ≥92% of its natural width — anything
+ * narrower reads as "the whole site shrank" dead margins at a glance. The
+ * compile-law converts the model's maxWidth to a viewport-relative percentage
+ * at this floor, so the proportion also holds under browser zoom and resize
+ * (a fixed px cap is zoom-hostile; a percentage tracks the viewport).
  */
-export const MIN_CONTENT_WIDTH_FRACTION = 0.65;
+export const MIN_CONTENT_WIDTH_FRACTION = 0.92;
+
+/**
+ * Component-level room law. A cluster whose natural width is ≥70% of its parent
+ * may not be emitted below 92% of that fraction — the "all my components shrank"
+ * bug, one level down from the page-level law. The compile-law floors a cluster's
+ * converted percentage at this fraction × the cluster's widthFractionOfParent so
+ * a wide child can't shrink into a dead-margin band inside its parent either.
+ */
+export const MIN_COMPONENT_WIDTH_FRACTION = 0.92;
+export const COMPONENT_WIDE_FRACTION = 0.7;
 
 /**
  * Clamp columnCount to fit the container. Pure: takes the requested
@@ -446,10 +459,18 @@ function normalizeTrack(track: string, containerWidthPx?: number): string {
   const frMatch = t.match(/^([\d.]+)fr$/i);
   if (frMatch) return `minmax(0, ${t})`;
   if (t === '1fr') return 'minmax(0, 1fr)';
-  // fixed px wider than container → min(Xpx, 100%)
+  // fixed px track → percentage of the measured container, so a 3×~33% grid
+  // stays 3×~33% at 67% zoom and at 150% zoom. A px track frozen at compile time
+  // changes proportion at every zoom (browser zoom rescales the CSS viewport); a
+  // percentage tracks the container, which tracks the viewport, at every size.
+  // minmax(0, X%) keeps the min at 0 (no min-content overflow) and the max as the
+  // zoom-proof proportion. Capped at 100% so a track never exceeds its container.
   if (containerWidthPx && containerWidthPx > 0) {
     const pxMatch = t.match(/^([\d.]+)px$/i);
-    if (pxMatch && parseFloat(pxMatch[1]) > containerWidthPx) return `min(${t}, 100%)`;
+    if (pxMatch) {
+      const pct = Math.min(100, (parseFloat(pxMatch[1]) / containerWidthPx) * 100);
+      return `minmax(0, ${Math.round(pct)}%)`;
+    }
   }
   return t; // auto, %, min-content, max-content, already-safe values
 }

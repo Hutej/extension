@@ -21,7 +21,16 @@ const MAX_TIME_MS = 6000;           // budget — no node cap, time is the only 
 const MAX_DEPTH = 30;               // safety net (not a truncation — 30 is very deep)
 const CLUSTER_ATTR = 'data-wm-c';
 const TIER1_FULL_DETAIL_COUNT = 80; // top clusters by prominence get full serialization
-const SERIALIZE_BUDGET = 12000;   // char budget for the serialized perception (demote/drop tail when over)
+// Adaptive serialization budget (the budget is TIME, not chars). The fast path
+// keeps FULL detail up to the soft ceiling; the compact/drop trim fires only when
+// the serialized perception exceeds the HARD ceiling (a genuinely large page where
+// the token cost would threaten the time budget). `ponytail: the hard ceiling is a
+// measured-size heuristic, not a precise model — a real serialize-time gate would
+// be tighter, but the char ceiling is a stable proxy for the token/time cost and
+// the role prompts are smaller than the old monolith, so the fast path keeps detail
+// where it used to be trimmed.`
+const SERIALIZE_BUDGET_SOFT = 16000;  // keep full detail up to here
+const SERIALIZE_BUDGET = 24000;        // hard ceiling — compact/drop tail beyond this
 
 /** Last serialization budget stats — read by content.ts for the ledger. */
 export let lastSerializeBudget = { before: 0, after: 0 };
@@ -62,6 +71,19 @@ export interface Cluster {
   style: ClusterStyle;
   layout: ClusterLayout;
   prominence: number;
+  widthFractionOfParent: number;   // rect.w ÷ parent cluster rect.w at capture (1.0 if no parent cluster)
+  /** 0..1 — painted area vs real text/media content. Near-empty for the
+   *  empty-capsule / dead-band failures (a large box with little text and no
+   *  image scores high). Drives the remove-op emptiness floor + the void gate. */
+  emptinessScore: number;
+  /** Structural move-safety for the op vocabulary. 'forbidden' = primary-content
+   *  ancestors / scripts / the cluster itself being primary; 'risky' =
+   *  event-heavy (inline on*), forms, live iframes, canvas/video; else 'safe'.
+   *  Advisory for the model; compile's guard laws are the enforcement gate. */
+  moveSafety: 'safe' | 'risky' | 'forbidden';
+  /** DOM document-order index at capture. Cheap running counter; lets the
+   *  model see source-vs-visual order divergence (a reorder opportunity). */
+  sourceOrder: number;
 }
 
 export interface LayoutSkeleton {
@@ -306,7 +328,8 @@ function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): 
       tag: rep.tag, role: rep.role, isNativeControl,
       isCheckboxRadio: rep.role === 'checkbox' || rep.role === 'radio',
       hasSolidBg: rep.hasSolidBg, rect: rep.rect, samples, style: rep.style,
-      layout: placeholderLayout(rep, vpW), prominence, _members: members,
+      layout: placeholderLayout(rep, vpW), prominence, widthFractionOfParent: 1,
+      emptinessScore: 0, moveSafety: 'safe', sourceOrder: 0, _members: members,
     });
   }
 
@@ -322,6 +345,15 @@ function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): 
 
   // Enrich layout facts now that handles exist (needs data-wm-c on ancestors).
   for (const r of kept) enrichLayout(r, r._members[0], vpW);
+
+  // Structural enrichment for the op vocabulary: emptiness + move-safety +
+  // source order. Computed after stamping (moveSafety walks ancestors for
+  // primary-content). One pass; O(clusters × depth), depth-bounded by the tree.
+  let order = 0;
+  for (const r of kept) {
+    enrichSafety(r, r._members[0]);
+    r.sourceOrder = order++;
+  }
 
   return kept.map(({ _members, ...c }) => c);
 }
@@ -356,12 +388,81 @@ function enrichLayout(cluster: Cluster, rep: Candidate, _vpW: number): void {
   }
   cluster.layout.ownedByFlexGrid = owner != null;
   cluster.layout.constraintOwnerHandle = owner?.getAttribute(CLUSTER_ATTR) || null;
+  let parentClusterEl: HTMLElement | null = null;
   let a = rep.el.parentElement;
   while (a) {
     const h = a.getAttribute(CLUSTER_ATTR);
-    if (h && h !== cluster.handle) { cluster.layout.parentHandle = h; break; }
+    if (h && h !== cluster.handle) { cluster.layout.parentHandle = h; parentClusterEl = a; break; }
     a = a.parentElement;
   }
+  // widthFractionOfParent: the cluster's rect width ÷ its parent cluster's rect
+  // width at capture time. Used by compile to convert a fixed-px width to a
+  // zoom-proof percentage of the parent (and to floor wide children so they can't
+  // shrink into a dead-margin band). No parent cluster -> 1.0 (relative to viewport).
+  if (parentClusterEl) {
+    const pw = parentClusterEl.getBoundingClientRect().width;
+    cluster.widthFractionOfParent = pw > 0 ? Math.min(1, cluster.rect.w / pw) : 1;
+  } else {
+    cluster.widthFractionOfParent = 1;
+  }
+}
+
+/** Emptiness: how much of the cluster's painted area is real text/media vs dead
+ *  space. A large box with short text and no background image scores near 1
+ *  (the empty-capsule / dead-band failures). Pure-ish: reads rect + samples +
+ *  hasBgImage — no per-pixel scan. 0 = content-dense, 1 = empty. */
+const EMPTINESS_TEXT_CHARS_PER_KPX = 8; // ponytail: ~8 chars/kpx² of box = "has real content"; a coarse content-density heuristic, recalibrate from the grid.
+
+function computeEmptiness(cluster: Cluster): number {
+  const areaKpx = (cluster.rect.w * cluster.rect.h) / 1000;
+  if (areaKpx <= 0) return 0;
+  // Aggregate text length across members (samples is capped at 3; use the
+  // cluster's count × a per-member estimate from the samples).
+  const sampleLen = cluster.samples.reduce((s, t) => s + t.length, 0);
+  const textLen = sampleLen * Math.max(1, cluster.count);
+  const hasImage = cluster.style.hasBgImage;
+  // Image-bearing clusters are content, not voids.
+  if (hasImage) return 0;
+  // Tiny clusters aren't "empty" — they're just small.
+  if (areaKpx < 20) return 0;
+  // Content-density: chars per kpx². Below the threshold = sparse → high emptiness.
+  const density = textLen / areaKpx;
+  // Map density → emptiness (inverse, floored at 0, ceiling 1).
+  // ponytail: a linear inverse is a coarse heuristic — the void detector +
+  // pixel scan are the real gate; this is the model's advisory score.
+  return Math.max(0, Math.min(1, 1 - density / EMPTINESS_TEXT_CHARS_PER_KPX));
+}
+
+/** Move-safety for the op vocabulary. forbidden = the cluster itself is
+ *  primary content OR an ancestor is primary (moving it would orphan the page's
+ *  main content) OR it's a script. risky = event-heavy (inline on*), forms,
+ *  live iframes, canvas/video. safe = anything else. Advisory for the model;
+ *  compile's guard laws are the enforcement gate. */
+function enrichSafety(cluster: Cluster, rep: Candidate): void {
+  cluster.emptinessScore = computeEmptiness(cluster);
+  const tag = rep.tag;
+  const role = cluster.role;
+  // The cluster itself is primary content → forbidden to move/remove.
+  if (role === 'main' || role === 'article') { cluster.moveSafety = 'forbidden'; return; }
+  if (tag === 'script' || tag === 'style') { cluster.moveSafety = 'forbidden'; return; }
+  // Live media / interactive surfaces → risky (move only with consent).
+  if (tag === 'video' || tag === 'canvas' || tag === 'iframe' || tag === 'embed') { cluster.moveSafety = 'risky'; return; }
+  if (role === 'form' || tag === 'form' || tag === 'input' || tag === 'select' || tag === 'textarea') { cluster.moveSafety = 'risky'; return; }
+  // Inline event handlers → risky (behavior is bound to this node).
+  if (rep.el.hasAttribute && (rep.el.hasAttribute('onclick') || rep.el.hasAttribute('onmousedown') || rep.el.hasAttribute('onload'))) {
+    cluster.moveSafety = 'risky'; return;
+  }
+  // An ancestor is primary content → moving this node could orphan it. Walk
+  // ancestors (capped) for a main/article ancestor.
+  let p: Element | null = rep.el.parentElement;
+  let depth = 0;
+  while (p && depth < 12) {
+    const r = p.getAttribute('role') || p.tagName.toLowerCase();
+    if (r === 'main' || r === 'article') { cluster.moveSafety = 'forbidden'; return; }
+    p = p.parentElement;
+    depth++;
+  }
+  cluster.moveSafety = 'safe';
 }
 
 /** Coarsened signature: 4px buckets for size, 8-step quantize for colors.
@@ -672,7 +773,7 @@ export function serializePerception(p: Perception): string {
   // Serialization budget: if over SERIALIZE_BUDGET, demote least-prominent full
   // entries to compact (formatFull→formatCompact shrinks the string), then drop
   // least-prominent compact entries (by prominence ascending). Top-prominence
-  // clusters are always kept. YouTube 13.4K → ≤12K is the test case.
+  // clusters are always kept. A large media-heavy page (~13K chars) → ≤ the budget.
   if (before > SERIALIZE_BUDGET) {
     // Phase 1: demote full entries to compact (least-prominent first).
     const fullEntries = entries
@@ -703,7 +804,7 @@ function formatFull(c: Cluster): string {
   const L = c.layout;
   const parts = [
     `${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
-    `${c.rect.w}x${c.rect.h} ${Math.round(L.widthRatio * 100)}%w`,
+    `${c.rect.w}x${c.rect.h} ${Math.round(L.widthRatio * 100)}%w ${Math.round(c.widthFractionOfParent * 100)}%ofP`,
     `${L.display}${L.isContainer ? '/container' : ''}`,
     `bg:${short(c.style.background)}`, `text:${short(c.style.color)}`,
   ];
@@ -714,6 +815,11 @@ function formatFull(c: Cluster): string {
   if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) parts.push('[image]');
   if (L.isPassiveWrapper) parts.push('[passive]');
   if (L.isOpaqueWrapper) parts.push('[opaque]');
+  // Structural op cues (advisory for the Architect). Compact: only when the
+  // signal is actionable — a near-empty cluster (remove candidate) or a non-safe
+  // move target. Keeps the serialize budget on large pages.
+  if (c.emptinessScore >= 0.6) parts.push(`empty${Math.round(c.emptinessScore * 10)}`);
+  if (c.moveSafety !== 'safe') parts.push(c.moveSafety === 'forbidden' ? 'forbid-move' : 'risky-move');
   let line = parts.join(' ');
   if (c.samples.length) line += ` e.g.${c.samples.slice(0, 2).map((s) => JSON.stringify(s.slice(0, 20))).join(',')}`;
   return line;
@@ -726,6 +832,8 @@ function formatCompact(c: Cluster): string {
   ];
   if (c.hasSolidBg) parts.push(`bg:${short(c.style.background)}`);
   if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) parts.push('[image]');
+  // Near-empty cue in compact too (so demoted clusters still flag the op).
+  if (c.emptinessScore >= 0.6) parts.push(`empty${Math.round(c.emptinessScore * 10)}`);
   return parts.join(' ');
 }
 

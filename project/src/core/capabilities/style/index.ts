@@ -17,7 +17,7 @@
 
 import { BASE_PROPS, INTERACTION_PROPS, BACKGROUND_KEYS, BOXING_KEYS, SURFACE_KEYS, isSafeValue, clampDisplayFont } from '../../laws/index.ts';
 import type { StyleDecls } from '../../spec';
-import { parseColor, pickReadableText } from '../../../shared/color.ts';
+import { parseColor, pickReadableText, extractGradientStops, pickReadableTextForGradient } from '../../../shared/color.ts';
 
 export interface BuildOptions {
   mode: 'base' | 'interaction';
@@ -81,6 +81,9 @@ export function buildDeclarations(input: StyleDecls, opts: BuildOptions): BuildR
   }
 
   // Contrast Lock — a background must never ship without a readable text color.
+  // For a GRADIENT background, the text must contrast ≥4.5 against EVERY stop (text
+  // over a light→dark gradient is invisible at the light end if the text is dark).
+  // The Painter pair contract: a failing pair is deterministically corrected here.
   if (setsBackground && (!hasExplicitColor || opts.forceContrast)) {
     let parsed = parseColor(bgValue);
     // Resolve var() against the perception's CSS variable map for contrast computation.
@@ -89,7 +92,18 @@ export function buildDeclarations(input: StyleDecls, opts: BuildOptions): BuildR
       const resolved = resolveVar(bgValue, opts.varMap);
       if (resolved) parsed = parseColor(resolved);
     }
-    const text = parsed ? pickReadableText(parsed) : (opts.defaultText || '');
+    let text: string;
+    if (!parsed) {
+      // A gradient (or other unparseable bg) — contrast-check against every stop.
+      const stops = extractGradientStops(bgValue);
+      if (stops.length > 0) {
+        text = pickReadableTextForGradient(stops);
+      } else {
+        text = opts.defaultText || '';
+      }
+    } else {
+      text = pickReadableText(parsed);
+    }
     if (text && (opts.forceContrast || !hasExplicitColor)) out.set('color', text);
   } else if (opts.forceContrast && hasExplicitColor && opts.contrastBg) {
     let parsed = parseColor(opts.contrastBg);
@@ -98,6 +112,11 @@ export function buildDeclarations(input: StyleDecls, opts: BuildOptions): BuildR
       if (resolved) parsed = parseColor(resolved);
     }
     if (parsed) out.set('color', pickReadableText(parsed));
+    else {
+      // contrastBg is a gradient — pick readable text against every stop.
+      const stops = extractGradientStops(opts.contrastBg);
+      if (stops.length > 0) out.set('color', pickReadableTextForGradient(stops));
+    }
   }
 
   // Box model safety — borders/padding require border-box or they shift geometry.
