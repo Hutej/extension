@@ -36,12 +36,22 @@ export type StyleSpecResult =
 export interface StyleSpecRequest {
   intent: string;
   perception: string;
-  apiKey: string;
+  accountId: string;   // Cloudflare account id — builds the Workers AI endpoint URL
+  apiKey: string;      // bearer token — Cloudflare API token (OPENAI key disabled, kept for revert)
   critique?: string; // regenerative-repair feedback appended to the user message
   timeoutMs?: number; // per-call override (used to cap a Critic round so total stays < budget)
 }
 
 const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
+// OPENAI — disabled in favor of Cloudflare Workers AI, kept for easy revert.
+// Cloudflare Workers AI exposes an OpenAI-COMPATIBLE chat-completions endpoint:
+// identical request body (messages/response_format/reasoning_effort/max_completion_tokens)
+// and identical response shape (choices[0].message.content + usage), so the existing
+// request builder + response parser are reused — no forked adapter. Only the URL +
+// the bearer token source differ (token + account id come from chrome.storage.local,
+// injected by the harness, mirroring the old OpenAI key injection).
+const cfChatUrl = (accountId: string): string =>
+  `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/chat/completions`;
 
 // ── Role prompts ────────────────────────────────────────────────────
 
@@ -73,6 +83,8 @@ You receive: the user's request + the site's identity (domain + page title) + a 
    - "move": reparent a region into another, or "to":"floating" for a position:fixed mini-player (a video that stays visible while scrolling). The cluster's move-safety is shown (forbid-move / risky-move); risky targets need "consent":true — a second thought, not a reflex.
    - "wrap": group a set of regions under one new container for layout (a flex/grid wrapper CSS can't target because the parent isn't a cluster you own).
    An empty region is REMOVED, not decorated. A sidebar that fights the composition is RELOCATED, not repainted. A true source-order change uses "reorder". A floating mini-player uses "move" with "to":"floating". Default to CSS; ops are rare and deliberate.
+
+9. REFLOW WHEN WARRANTED. The perception's PAGE line may show "REFLOW side-rail:HANDLE" — a sidebar/nav region beside the main content that calls for a structural reflow (sidebar→top-bar, collapse, or relocation). When you see a REFLOW tag, you MUST address EVERY named handle: emit an op (remove / reorder / move) on it, OR change its layout (grid-template-columns / width / maxWidth) so it visibly reflows. Leaving a warranted reflow untouched — the side-rail at the same width and position — is a FAILURE, even if the rest of the page is redesigned. A sidebar becoming a full-width top bar (stacked above the main via reorder + grid) is the canonical win.
 
 ## Non-negotiables
 1. canvasLayout (content-width / arrangement decision).
@@ -161,6 +173,7 @@ Fix each failure with the smallest change that resolves it:
 - VOID (blanked surface) → restore the cluster's background so its content is visible.
 - SQUEEZE (text too narrow) → widen the cluster (maxWidth/width in %, or drop the columnCount).
 - RECOLOR / no-reshape / dead-margin band → change the structure: column count, content/region widths (in %), arrangement. A color swap on stock layout is a failure.
+- REFLOW SKIPPED (a warranted side-rail reflow was left untouched) → emit an op (remove / reorder / move) on the named handle, OR change its layout (grid-template-columns / width / maxWidth) so it visibly reflows. A sidebar that should become a full-width top bar: reorder it above the main content + set grid-template-columns: 1fr on its parent so it stacks. Leaving it untouched is a failure.
 - COVERAGE gaps → restyle or hide the named unaddressed clusters.
 - OVER-ACCENT → strip the accent background from the repeated/over-prominent clusters.
 
@@ -208,7 +221,7 @@ function promptForRole(role: Role): string {
  *  faults (429/5xx) only. A 400 that rejects response_format/reasoning_effort drops
  *  those params and retries once. Returns a validated DesignSpec (role prompts emit
  *  partial specs — validateSpec accepts layout-only and styles-only rules). */
-async function callModel(role: Role, intent: string, perception: string, apiKey: string, critique: string | undefined, timeoutMs: number | undefined): Promise<StyleSpecResult> {
+async function callModel(role: Role, intent: string, perception: string, accountId: string, apiKey: string, critique: string | undefined, timeoutMs: number | undefined): Promise<StyleSpecResult> {
   let userContent = `USER REQUEST: ${intent}\n\nRUNTIME PAGE PERCEPTION:\n${perception}`;
   if (critique) userContent += `\n\nREVISION REQUIRED — the previous attempt was rejected:\n${critique}`;
 
@@ -239,7 +252,15 @@ async function callModel(role: Role, intent: string, perception: string, apiKey:
     const t0 = Date.now();
     let res: Response;
     try {
-      res = await fetchWithTimeout(OPENAI_URL, {
+      // OPENAI — disabled in favor of Cloudflare Workers AI, kept for easy revert:
+      // res = await fetchWithTimeout(OPENAI_URL, {
+      //   method: 'POST',
+      //   headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
+      //   body: JSON.stringify(bodyObj),
+      // }, timeout);
+      // Cloudflare Workers AI (OpenAI-compatible endpoint — same body + response shape).
+      // `apiKey` carries the Cloudflare API token; `accountId` builds the endpoint URL.
+      res = await fetchWithTimeout(cfChatUrl(accountId), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
         body: JSON.stringify(bodyObj),
@@ -285,24 +306,24 @@ async function callModel(role: Role, intent: string, perception: string, apiKey:
 /** ARCHITECT call — composition only. Returns a partial spec (layout/composition/
  *  canvasLayout/hide). The caller merges this with the Painter's spec. */
 export function requestArchitectSpec(req: StyleSpecRequest): Promise<StyleSpecResult> {
-  return callModel('architect', req.intent, req.perception, req.apiKey, req.critique, req.timeoutMs);
+  return callModel('architect', req.intent, req.perception, req.accountId, req.apiKey, req.critique, req.timeoutMs);
 }
 
 /** PAINTER call — palette + typography only. Returns a partial spec (canvas/
  *  variables/paletteMode/styles). The caller merges this with the Architect's spec. */
 export function requestPainterSpec(req: StyleSpecRequest): Promise<StyleSpecResult> {
-  return callModel('painter', req.intent, req.perception, req.apiKey, req.critique, req.timeoutMs);
+  return callModel('painter', req.intent, req.perception, req.accountId, req.apiKey, req.critique, req.timeoutMs);
 }
 
 /** CRITIC call — repair only. Takes the bundled failure critique, returns a minimal
  *  correction spec (a patch). Runs on the fastest model within the time budget. */
 export function requestCriticCorrection(req: StyleSpecRequest): Promise<StyleSpecResult> {
-  return callModel('critic', req.intent, req.perception, req.apiKey, req.critique, req.timeoutMs);
+  return callModel('critic', req.intent, req.perception, req.accountId, req.apiKey, req.critique, req.timeoutMs);
 }
 
 /** Single-call path (restyle-only / fallback). One model, one prompt, one spec. */
-export async function requestStyleSpec({ intent, perception, apiKey, critique, timeoutMs: callTimeout }: StyleSpecRequest): Promise<StyleSpecResult> {
-  return callModel('design', intent, perception, apiKey, critique, callTimeout);
+export async function requestStyleSpec({ intent, perception, accountId, apiKey, critique, timeoutMs: callTimeout }: StyleSpecRequest): Promise<StyleSpecResult> {
+  return callModel('design', intent, perception, accountId, apiKey, critique, callTimeout);
 }
 
 /** Compact token-usage string incl. reasoning tokens when the API reports them. */
@@ -313,17 +334,23 @@ function fmtUsage(u: unknown): string {
   return `prompt=${usage.prompt_tokens ?? '?'} completion=${usage.completion_tokens ?? '?'}${r != null ? ` reasoning=${r}` : ''} total=${usage.total_tokens ?? '?'}`;
 }
 
-/** 429 wait: honor the server's "try again in Xs" if present, else exponential backoff. */
+/** 429 wait: honor the server's "try again in Xs" if present, else a generous
+ *  429-specific backoff (rateLimitBackoffMs × 2^attempt) — the short exponential
+ *  baseBackoffMs (1s,2s,4s) slammed back into a sustained rate limit and failed
+ *  the grid; a 429 means "back off for real". The server's Retry-After always wins. */
 function retryWaitMs(bodyTxt: string, transient: number): number {
   const m = bodyTxt.match(/try again in (?:(\d+)m)?([\d.]+)s/);
   if (m) return Math.ceil(((m[1] ? +m[1] * 60 : 0) + parseFloat(m[2])) * 1000) + 500;
-  return AI_CONFIG.baseBackoffMs * 2 ** (transient - 1);
+  const base = AI_CONFIG.rateLimitBackoffMs || AI_CONFIG.baseBackoffMs;
+  return Math.min(60000, base * 2 ** (transient - 1));
 }
 
 // ── transport helpers ──────────────────────────────────────────────
 
-/** Reasoning-family models: reasoning_effort supported, temperature rejected. */
-function isReasoningModel(model: string): boolean { return /^(gpt-5|o\d)/i.test(model); }
+/** Reasoning-family models: reasoning_effort supported, temperature rejected.
+ *  Matches OpenAI gpt-5/o-series (disabled, kept for revert) AND the Cloudflare
+ *  Workers AI GLM family (glm-5.2 + glm-4.7-flash both support reasoning_effort). */
+function isReasoningModel(model: string): boolean { return /^(gpt-5|o\d)/i.test(model) || /glm/i.test(model); }
 
 async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();

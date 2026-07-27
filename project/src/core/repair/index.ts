@@ -40,13 +40,21 @@ export interface Attempt {
   contentCollapsed: boolean;
 }
 
-export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasonsDone: number, paletteMode?: 'restrained' | 'vivid', pixel?: PixelVerifyResult | null, canReReason: boolean = true): RepairDecision {
+export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasonsDone: number, paletteMode?: 'restrained' | 'vivid', pixel?: PixelVerifyResult | null, canReReason: boolean = true, opTargets?: Set<string>): RepairDecision {
   const c = verify.checks;
   // Pixel-grounded handles — invisible-text clusters the DOM contrast sampler
   // missed, and pixel-squeeze below the readable measure. Merged into the
   // deterministic repair so paint-2 targets what the USER sees, not just DOM flags.
   const pixelInvisible = pixel?.invisibleText ?? [];
   const pixelSqueeze = pixel?.squeeze ?? [];
+  // Phase-1 hard void law (MIN_CONTRAST_RATIO is the pattern): a pixel void is
+  // "addressed" ONLY if a structural op (remove/move/reorder/wrap) targets it. Voids
+  // CSS can't collapse (empty/decorative containers) must be removed, not decorated.
+  // Untouched voids force a bounded reReason naming exactly those ids — advisory no
+  // longer; a run with untouched voids cannot pass even if every other check clears.
+  const pixelVoids = pixel?.voids ?? [];
+  const opTargetSet = opTargets ?? new Set<string>();
+  const untouchedVoids = pixelVoids.filter((h) => !opTargetSet.has(h));
 
   // Broken content is the only rollback path (after trying to strip hides).
   if (!c.notBlank) {
@@ -81,18 +89,19 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // repairs (padding/sizing/layout) run ONLY for overflow/overlap failures — they
   // can never reduce accent, so they must not be spent on a coherence failure.
 
-  // When pixel-invisible text is SEVERE (>=6 clusters), a deterministic
-  // force-contrast text-color bump is insufficient — the bg/text combo is the
-  // problem, not just the text color. Escalate to a Critic repair round (if the
-  // time budget still allows one) with the pixel critiques so the surfaces are
-  // redesigned. Carry the deterministic forceContrast + bg-aware pair options TOO
-  // so paint 2 gets BOTH the Critic's redesign AND the deterministic backstop (the
-  // Critic is a model call — it may not fix every invisible cluster; the deterministic
-  // bg+text pair guarantees the pixel-invisible ones are readable regardless of zoom).
-  if (pixelInvisible.length >= 6 && canReReason) {
-    const contrastHandles = Array.from(new Set([...verify.contrastTargets, ...pixelInvisible]));
-    return { action: 'reReason', options: { ...prev, forceContrast: true, contrastTargets: contrastHandles, contrastTargetBgs: verify.contrastTargetBgs, pixelInvisibleTargets: pixelInvisible }, critique: critiqueFor(verify, pixel), reason: `pixel-invisible severe (${pixelInvisible.length}) — escalate to Critic + deterministic forceContrast` };
-  }
+  // Pixel-invisible text (any count) is fixed DETERMINISTICALLY by the generic
+  // forceContrast recompile below: it paints an opaque readable bg + readable text
+  // pair (forceContrastSelector, specificity 0,2,0 + !important — beats site class
+  // !important) ON each invisible cluster's OWN element, so the pair covers the
+  // cluster's whole rect regardless of which ancestor surface(s) sit behind it —
+  // that fixes cascade-loss, wrong-bg, AND multi-bg in one free ~1s paint 2. The
+  // canvas text floor covers no-handle text. The old code escalated SEVERE (>=6)
+  // and multi-bg to a paid Critic round, but a Critic is slow (observed 49s) and
+  // blew the 120s budget so paint 2 (the backstop) NEVER RAN — the "guarantee"
+  // silently failed (the all-"unknown"-class invisible-survivors run). The
+  // deterministic backstop IS the guarantee; the Critic is reserved for failures a
+  // deterministic pass cannot fix (voids, flat layout, reflow) — see the tiers below.
+  // (Phase-1 broken-guarantee root cause: the backstop was gated behind a Critic.)
 
   // Contrast: force a readable text color — the canvas body floor PLUS the
   // specific handles the sampler flagged (dark text on a dark painted block).
@@ -154,12 +163,34 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // ── Regenerative tier: quality failures a deterministic pass can't fix
   // (flat / still-incoherent after trim / over-framed / under-covered / no reshape).
   // The caller gates on the wall-clock budget (canReReason); no call-count cap.
-  if (!c.changed || !c.coherent || !c.covered || !c.layoutReshaped || !c.usesRoom || (pixel?.recolor ?? false)) {
+  // Phase-1 hard void law: untouched voids (no structural op targets them) are a
+  // HARD failure — CSS cannot collapse an empty/decorative container; an op must.
+  // This fires BEFORE the generic quality tier so a void run can't pass by being
+  // otherwise-pretty. One bounded reReason names the untouched ids.
+  if (untouchedVoids.length > 0) {
+    if (!canReReason) return { action: 'keepBest', options: prev, reason: `untouched voids: ${untouchedVoids.length} (no op targets them) — time budget exhausted` };
+    return { action: 'reReason', options: prev, critique: voidCritique(untouchedVoids, pixel) + ' ALSO: ' + critiqueFor(verify, pixel), reason: `HARD VOID LAW: ${untouchedVoids.length} void(s) untouched by any structural op — ${untouchedVoids.slice(0, 8).join(', ')}` };
+  }
+
+  if (!c.changed || !c.coherent || !c.covered || !c.layoutReshaped || !c.usesRoom || !c.reflowAddressed || (pixel?.recolor ?? false)) {
     if (!canReReason) return { action: 'keepBest', options: prev, reason: 'time budget exhausted' };
     return { action: 'reReason', options: prev, critique: critiqueFor(verify, pixel), reason: 'regenerate for quality' };
   }
 
   return { action: 'keepBest', options: prev, reason: 'no further repair' };
+}
+
+/** Phase-1 hard void law critique — names the untouched void ids and demands a
+ *  structural op on each. CSS cannot collapse an empty/decorative container; only a
+ *  remove/move/reorder/wrap op reclaims the space. A recolor that decorates a void is
+ *  a failure. Mirrors the reflowSkipped critique's "you MUST emit an op" language. */
+function voidCritique(untouchedVoids: string[], pixel?: PixelVerifyResult | null): string {
+  const dec = new Set<string>();
+  if (pixel) for (const c of pixel.critiques) {
+    for (const h of untouchedVoids) if (c.includes(h) && c.includes('DECORATIVE')) dec.add(h);
+  }
+  const list = untouchedVoids.slice(0, 12).map((h) => dec.has(h) ? `${h} (DECORATIVE dead-zone)` : h).join(', ');
+  return `HARD VOID LAW: pixel verification found ${untouchedVoids.length} void(s) NOT targeted by any structural op: ${list}. CSS CANNOT collapse an empty or decorative container — display:none leaves a dead band; painting a void is a failure. You MUST emit a structural op ("remove" for an empty/decorative wrapper, or "move"/"reorder" if the content was orphaned) on EACH named handle, OR restyle it so the content column reclaims the space. A run that leaves a void untouched is a FAILURE even if every other check passes.`;
 }
 
 function critiqueFor(verify: VerifyResult, pixel?: PixelVerifyResult | null): string {
@@ -203,6 +234,14 @@ function critiqueFor(verify: VerifyResult, pixel?: PixelVerifyResult | null): st
   // Recolor: the pixel detector found the redesign is a hue-only shift on stock structure.
   if (pixel?.recolor) {
     parts.push('The redesign reads as a RECOLOR — the edge/structure map is near-identical to the original and only the hue shifted. A recolor is a FAILURE. You MUST change the structural layout: column count, content/region widths, spacing, arrangement — not just paint.');
+  }
+  // Reflow forcing: the perception flagged a side-rail (sidebar/nav beside main
+  // content) that calls for a structural reflow, and the Architect left it at the
+  // same width+position with no op on it. This is the exact failure mode Phase 2
+  // exists to kill — the model reshaped OTHER things but skipped the warranted
+  // reflow. Force the Critic to address it explicitly.
+  if (verify.reflowSkippedHandles.length > 0) {
+    parts.push(`Your previous design SKIPPED a warranted STRUCTURAL REFLOW. The perception flagged side-rail handle(s) ${verify.reflowSkippedHandles.slice(0, 6).join(', ')} — a sidebar/nav beside the main content that should reflow (become a full-width top bar, collapse, or relocate). You left it at the same width and position with no op on it. You MUST address it: emit an op (remove / reorder / move) on the handle, OR change its layout (grid-template-columns / width / maxWidth) so it visibly reflows. Leaving a warranted reflow untouched is a FAILURE.`);
   }
   return parts.join(' ALSO: ') || 'The previous design failed quality checks. Review the page perception and produce a complete, coherent redesign.';
 }

@@ -10,12 +10,19 @@ export const AI_CONFIG = {
   // The design path = Architect + Painter + Critic rounds; restyle-only = Painter
   // alone; the fast path = no model. Env-overridable (WM_MODEL_*); the operator
   // updates these by eye from the bake-off (bakeoff.ts prints per-role winners).
-  architectModel: process.env.WM_MODEL_ARCHITECT ?? 'gpt-5.1',
-  painterModel: process.env.WM_MODEL_PAINTER ?? 'gpt-5.1',
-  criticModel: process.env.WM_MODEL_CRITIC ?? 'gpt-4o-mini',
+  //
+  // PROVIDER: Cloudflare Workers AI (OpenAI-compatible endpoint) is the LIVE path
+  // for all three roles. Model IDs are the Workers AI @cf/... names. GLM 5.2 is the
+  // flagship (function calling + reasoning, 262K ctx); glm-4.7-flash is the fast
+  // companion for the Critic (mirrors the old gpt-5.1 / gpt-4o-mini split).
+  // OPENAI — disabled in favor of Cloudflare Workers AI, kept for one-step revert:
+  //   architectModel: 'gpt-5.1', painterModel: 'gpt-5.1', criticModel: 'gpt-4o-mini', styleModel: 'gpt-5.1'
+  architectModel: process.env.WM_MODEL_ARCHITECT ?? '@cf/zai-org/glm-5.2',
+  painterModel: process.env.WM_MODEL_PAINTER ?? '@cf/zai-org/glm-5.2',
+  criticModel: process.env.WM_MODEL_CRITIC ?? '@cf/zai-org/glm-4.7-flash',
   // Single-call path model (restyle-only Painter-alone fallback + the bake-off).
   // WM_MODEL env override (for the bake-off; production default unchanged).
-  styleModel: process.env.WM_MODEL ?? 'gpt-5.1',
+  styleModel: process.env.WM_MODEL ?? '@cf/zai-org/glm-5.2',
   // No fallback: a known-recolorer fallback is a worse failure than an honest error.
   styleFallbackModel: undefined as string | undefined,
   // Non-reasoning fallback temperature (unused now — no fallback).
@@ -26,9 +33,11 @@ export const AI_CONFIG = {
 
   // Latency knob. The DESIGN THINKING lives in our system prompt (baked lessons),
   // so we ask for 'low' effort: near-full quality at a fraction of the wait.
-  // Escalate to 'medium' ONLY if real runs visibly lose quality with the new
-  // simplified prompt.
-  styleReasoningEffort: 'low' as 'low' | 'medium',
+  // 6a test: 'medium' timed out at 130s (hard abort) on GLM 5.2 / Cloudflare
+  // Workers AI — the model's thinking time dominates wall-clock. 'low' runs
+  // 59-90s with good quality (invisible=0, coverage=1.0). REVERT to 'low'.
+  // Env-overridable (WM_EFFORT) kept for future re-testing with a faster model.
+  styleReasoningEffort: (process.env.WM_EFFORT ?? 'low') as 'low' | 'medium',
 
   // Time budget (replaces the call-count cap). The wall-clock owns the run:
   // design ≤30s target, ≤120s absolute hard abort. Within it, as many Critic
@@ -47,9 +56,18 @@ export const AI_CONFIG = {
   criticTimeoutMs: 45_000,      // Critic: ≤45s (small repair spec)
   timeoutMs: 120_000,        // primary (restyle-only single call): hard ≤120s abort
   fallbackTimeoutMs: 90_000, // (unused now — no fallback)
-  // HTTP-level retries are for TRANSIENT server faults ONLY (429/5xx).
-  maxTransientRetries: 2,
+  // HTTP-level retries are for TRANSIENT server faults ONLY (429/5xx). Bumped to 4
+  // so a sustained 429 burst (heavy gpt-5.1 design calls in a back-to-back grid) is
+  // ridden out instead of failing the run. The 429 backoff floor (rateLimitBackoffMs)
+  // is generous so a retry doesn't slam back into the rate limit; the server's
+  // Retry-After is honored when present (reason.retryWaitMs).
+  maxTransientRetries: 4,
   baseBackoffMs: 1000,
+  // 429-specific backoff floor (seconds). A 429 means "back off"; the exponential
+  // baseBackoffMs (1s,2s,4s...) is too short for a sustained limit. Used as the
+  // minimum when the server doesn't send Retry-After. The server's Retry-After
+  // always wins when present.
+  rateLimitBackoffMs: 8000,
 };
 
 /**

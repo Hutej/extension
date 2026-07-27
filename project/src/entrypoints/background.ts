@@ -8,8 +8,8 @@
 
 import { requestStyleSpec, requestArchitectSpec, requestPainterSpec, requestCriticCorrection, type Role } from '@/core/reason';
 
-async function dispatchRole(role: Role, intent: string, perception: string, apiKey: string, critique?: string, timeoutMs?: number) {
-  const req = { intent, perception, apiKey, critique, timeoutMs };
+async function dispatchRole(role: Role, intent: string, perception: string, accountId: string, apiToken: string, critique?: string, timeoutMs?: number) {
+  const req = { intent, perception, accountId, apiKey: apiToken, critique, timeoutMs };
   switch (role) {
     case 'architect': return requestArchitectSpec(req);
     case 'painter': return requestPainterSpec(req);
@@ -19,16 +19,29 @@ async function dispatchRole(role: Role, intent: string, perception: string, apiK
 }
 
 export default defineBackground(() => {
+  // MV3 keepalive: a content script opens a long-lived port during a run; the
+  // port's existence keeps this service worker alive so it isn't killed mid-fetch
+  // (which would hang the content script's sendMessage silently — the ~30s idle
+  // kill terminates the SW during a 70-90s model fetch). The content script
+  // disconnects on run completion.
+  chrome.runtime.onConnect.addListener(() => {});
+
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.action === 'styleSpec') {
-      chrome.storage.local.get(['openai_api_key'], async (result: Record<string, unknown>) => {
-        const apiKey = result.openai_api_key as string | undefined;
-        if (!apiKey) {
-          sendResponse({ ok: false, kind: 'invalid_key', message: 'No API key set. Open Settings in the WebMorph popup.' });
+      // OPENAI — disabled in favor of Cloudflare Workers AI, kept for easy revert:
+      //   chrome.storage.local.get(['openai_api_key'], async (result) => {
+      //     const apiKey = result.openai_api_key as string | undefined; ... })
+      // Cloudflare Workers AI creds (account id + API token) are injected into
+      // storage by the harness (mirroring the old OpenAI key injection).
+      chrome.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token'], async (result: Record<string, unknown>) => {
+        const accountId = result.cloudflare_account_id as string | undefined;
+        const apiToken = result.cloudflare_api_token as string | undefined;
+        if (!accountId || !apiToken) {
+          sendResponse({ ok: false, kind: 'invalid_key', message: 'No Cloudflare Workers AI credentials set. Set CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN.' });
           return;
         }
         try {
-          const res = await dispatchRole(message.role as Role, message.intent, message.perception, apiKey, message.critique, message.timeoutMs);
+          const res = await dispatchRole(message.role as Role, message.intent, message.perception, accountId, apiToken, message.critique, message.timeoutMs);
           sendResponse(res);
         } catch (err) {
           sendResponse({ ok: false, kind: 'unknown', message: (err as Error).message || 'Design engine error.' });

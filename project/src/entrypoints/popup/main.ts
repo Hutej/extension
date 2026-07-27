@@ -142,6 +142,13 @@ removeBtn.addEventListener('click', async () => {
 async function updateSiteStatus(): Promise<void> {
   const tabId = await getTabId();
   if (!tabId) return;
+  // Stale-run warning: if a run is in-flight (the content script set the flag on
+  // run start), warn the user. The flag is cleared on completion; a stale timestamp
+  // (>120s) means the run aborted without clearing it (SW killed, tab crashed).
+  chrome.storage.local.get(['webmorphRunInFlight'], (res) => {
+    const ts = res.webmorphRunInFlight as number | undefined;
+    if (ts && Date.now() - ts > 2000) showStatus('⚠ A transform is in progress on this tab…', 'info');
+  });
   chrome.tabs.sendMessage(tabId, { action: 'getSiteInfo' }, async (info) => {
     if (chrome.runtime.lastError || !info?.url) { siteStatus.textContent = ''; return; }
     try {

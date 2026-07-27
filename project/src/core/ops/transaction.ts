@@ -62,6 +62,14 @@ export class TransactionLog {
     for (const e of this.entries) if (e.op.kind === 'remove') s.add(e.target);
     return s;
   }
+  /** The handles targeted by an accepted move/reorder op (for verify's moved-alive
+   *  check — a moved node must remain present, visible, sized, and keep its role
+   *  after relocation; a move that orphaned or hid the node is a silent break). */
+  movedHandles(): Set<string> {
+    const s = new Set<string>();
+    for (const e of this.entries) if (e.op.kind === 'move' || e.op.kind === 'reorder') s.add(e.target);
+    return s;
+  }
   /** Snapshot for the ledger (ops executed, by kind). */
   summary(): { executed: number; byKind: Record<OpKind, number> } {
     const byKind: Record<OpKind, number> = { remove: 0, move: 0, reorder: 0, wrap: 0 };

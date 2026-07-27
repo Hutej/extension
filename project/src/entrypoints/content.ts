@@ -11,15 +11,16 @@
  */
 
 import { perceive, serializePerception, clearHandles, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
-import { compileSpec, type CompileOptions } from '@/core/compile';
+import { compileSpec, deriveBaseTone, type CompileOptions } from '@/core/compile';
 import { sanitizeCss } from '@/core/sanitize';
 import { verifyStyle, type VerifyResult } from '@/core/verify';
-import { pixelVerify, type PixelVerifyResult, type PixelInput, type ClusterRect } from '@/core/verify/pixel';
-import { captureAtPositions, screenshotToPixelInput } from '@/core/verify/capture';
+import { pixelVerify, classifyInvisibleFailures, type PixelVerifyResult, type InvisibleBreakdown, type PixelInput, type ClusterRect } from '@/core/verify/pixel';
+import { screenshotToPixelInput } from '@/core/verify/capture';
 import { planRepair, bestNonBroken, type Attempt } from '@/core/repair';
 import { checkCompleteness, mergeSpecs } from '@/core/spec';
 import { applyStyle, applyStyleEverywhere, removeStyle, removeStyleEverywhere, startDefense, startDefenseEverywhere, ensureEscapeUI, removeEscapeUI } from '@/core/execute';
 import { loadSiteState, saveSiteState, clearSiteState, storageKey, type SiteState } from '@/core/persist';
+import { parseColor, pickReadableText } from '@/shared/color';
 import { AI_CONFIG, logDebug } from '@/core/config';
 import type { Role } from '@/core/reason';
 import type { DesignSpec } from '@/core/spec';
@@ -66,6 +67,15 @@ export interface TransformOutcome {
   spec?: DesignSpec;
   verify?: VerifyResult;
   pixel?: { passed: boolean; voids: number; invisibleText: number; squeeze: number };
+  /** Phase-1: the per-failure-class breakdown of SURVIVING invisible-text clusters
+   *  (still invisible after the final paint). null when none survived. Each record
+   *  names the root-cause class {no-handle, wrong-bg, cascade-loss, multi-bg} + the
+   *  evidence — so the run report proves WHY the deterministic guarantee held or
+   *  which class still leaks, instead of asserting a guarantee the count contradicts. */
+  invisibleBreakdown?: { records: { handle: string; cls: string; evidence: string }[]; byClass: Record<string, number> } | null;
+  /** Phase-1: count of low-contrast text nodes WITHOUT a [data-wm-c] ancestor —
+   *  invisible to handle-targeted repair and the pixel detector. */
+  contrastNoHandle?: number;
   perceiveMs?: number;
   clusters?: number;
   changeScore?: number;
@@ -113,7 +123,10 @@ function markFailed(msg: string): void {
 
 /** Build ClusterRect[] from the current [data-wm-c] elements for the pixel
  *  detectors. One representative per handle, with the rendered rect + text + font
- *  size. Skips our own UI nodes. */
+ *  size. Skips our own UI nodes. `hasImage`/`hasGradient` flag content-image vs
+ *  gradient/texture backgrounds so the void detector can recognize a DECORATIVE
+ *  dead-zone (a large gradient with no content — the Wikipedia case) independent
+ *  of color flatness. */
 function buildClusterRects(): ClusterRect[] {
   const seen = new Set<string>();
   const out: ClusterRect[] = [];
@@ -123,15 +136,25 @@ function buildClusterRects(): ClusterRect[] {
     if (seen.has(handle)) continue;
     seen.add(handle);
     const r = el.getBoundingClientRect();
+    const cs = getComputedStyle(el);
     // role: the semantic role (for the rail-aware invisible-text detector). The
     // tag/role is the element's own; a rail label is often a <nav>/<aside> child.
     const role = el.getAttribute('role') || el.tagName.toLowerCase();
+    const bgImage = cs.backgroundImage;
+    // hasImage: a url() background = a content image (thumbnail). hasGradient: a
+    // gradient/texture background (linear/radial/conic/repeating) — NOT a content
+    // image. A cluster with a gradient bg and no text is a decorative dead-zone
+    // candidate (the void detector's case 2).
+    const hasImage = /url\(/i.test(bgImage);
+    const hasGradient = /gradient/i.test(bgImage) && !hasImage;
     out.push({
       handle,
       rect: { x: r.left, y: r.top, w: r.width, h: r.height },
       text: (el.textContent || '').trim(),
-      fontSize: parseFloat(getComputedStyle(el).fontSize) || 16,
+      fontSize: parseFloat(cs.fontSize) || 16,
       role,
+      hasImage,
+      hasGradient,
     });
   }
   return out;
@@ -147,7 +170,7 @@ async function captureShotAt(y: number): Promise<PixelInput> {
   return new Promise<PixelInput>((resolve) => {
     chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, (resp: { ok: boolean; dataUrl?: string }) => {
       if (chrome.runtime.lastError || !resp?.ok || !resp.dataUrl) { resolve({ width: 0, height: 0, data: new Uint8ClampedArray(0) }); return; }
-      screenshotToPixelInput(resp.dataUrl).then(resolve);
+      screenshotToPixelInput(resp.dataUrl, window.innerWidth || 1280).then(resolve);
     });
   });
 }
@@ -159,12 +182,93 @@ async function captureShotAt(y: number): Promise<PixelInput> {
  *  detector compares it to captures[0] (the scrollY=0 after-shot). */
 async function captureAndPixelVerify(before?: PixelInput): Promise<{ result: PixelVerifyResult; ms: number }> {
   const tc = performance.now();
-  const rects = buildClusterRects();
   const h = document.documentElement.scrollHeight || 1;
-  const captures = await captureAtPositions([0, Math.floor(h / 2), Math.floor(h * 0.8)], captureShotAt);
+  const scrolls = [0, Math.floor(h / 2), Math.floor(h * 0.8)];
+  // Build rects at EACH scroll position — getBoundingClientRect() returns viewport-
+  // relative coords, so a rect from scrollY=0 misaligned against a capture at
+  // scrollY=h/2 reads the wrong pixels (the false-positive source). The capture is
+  // decoded at viewport width (CSS pixels) so the coordinate system matches the rects.
+  const captures: PixelInput[] = [];
+  const rectsPerCapture: ClusterRect[][] = [];
+  for (const y of scrolls) {
+    captures.push(await captureShotAt(y));
+    rectsPerCapture.push(buildClusterRects());
+  }
   window.scrollTo(0, 0);
-  const result = pixelVerify(captures, rects, before);
+  const result = pixelVerify(captures, rectsPerCapture, before);
   return { result, ms: Math.round(performance.now() - tc) };
+}
+
+/** Phase-1 instrument: classify each SURVIVING invisible-text cluster (still
+ *  invisible after paint N) into its failure class — {no-handle, wrong-bg,
+ *  cascade-loss, multi-bg} — so the run report names the ROOT CAUSE of every
+ *  invisible cluster, not just the count. The repair comment promises the
+ *  deterministic bg+text pair "guarantees the pixel-invisible ones are readable
+ *  regardless"; this instrument proves or disproves that guarantee per run.
+ *  Pure classification lives in core/verify/pixel (classifyInvisibleFailures);
+ *  this gathers the DOM-grounded inputs the pure fn needs:
+ *   - emittedBg[handle]  : the `background` our CSS actually painted on it (live).
+ *   - liveEffBg[handle]  : the effective bg the text sits on (parent-chain walk).
+ *   - multiBg            : handles whose rect spans >1 distinct opaque-ancestor bg.
+ *  A no-handle survivor (text with no [data-wm-c]) is invisible to the pixel
+ *  detector entirely (buildClusterRects only iterates [data-wm-c]); those are
+ *  counted separately on VerifyResult.contrastNoHandle. */
+function classifyInvisible(invisible: string[]): InvisibleBreakdown | null {
+  if (!invisible.length) return null;
+  const emittedBg = new Map<string, string>();
+  const liveEffBg = new Map<string, string>();
+  const multiBg = new Set<string>();
+  const colorDiag = new Map<string, string>();
+  for (const h of invisible) {
+    const el = document.querySelector<HTMLElement>(`[data-wm-c="${h}"]`);
+    if (!el) continue;
+    emittedBg.set(h, getComputedStyle(el).backgroundColor || '');
+    liveEffBg.set(h, effectiveBgStr(el));
+    // multi-bg: sample the rect's left/right thirds' effective backgrounds; if they
+    // differ, the cluster spans >1 painted surface (one pair can't cover both).
+    const r = el.getBoundingClientRect();
+    if (r.width > 200) {
+      const leftBg = effectiveBgAt(r.left + 8, r.top + r.height / 2);
+      const rightBg = effectiveBgAt(r.right - 8, r.top + r.height / 2);
+      if (leftBg && rightBg && leftBg !== rightBg) multiBg.add(h);
+    }
+    // DIAG (Phase-1): capture the cluster's computed color + the first text-bearing
+    // descendant's tag/computed-color, so the harness's INVISIBLE-TEXT breakdown
+    // shows WHY the forced color isn't reaching the text (root-causes `unknown`).
+    if (colorDiag.size < 5) {
+      const cs = getComputedStyle(el);
+      const hasDirectText = (e: Element): boolean => Array.from(e.childNodes).some((n) => n.nodeType === 3 && n.textContent && n.textContent.trim());
+      // search ANY descendant branch (first-child-only descent misses sibling text)
+      let txtEl: Element | null = null;
+      for (const d of Array.from(el.querySelectorAll('*'))) { if (hasDirectText(d)) { txtEl = d; break; } }
+      if (!txtEl && hasDirectText(el)) txtEl = el;
+      const txtColor = txtEl ? getComputedStyle(txtEl).color : '(no text desc)';
+      const txtTag = txtEl ? `${txtEl.tagName.toLowerCase()}${txtEl.id ? '#' + txtEl.id : ''}${txtEl.className && typeof txtEl.className === 'string' ? '.' + String(txtEl.className).split(/\s+/).slice(0, 2).join('.') : ''}` : '-';
+      const r2 = el.getBoundingClientRect();
+      colorDiag.set(h, `clusterColor=${cs.color} display=${cs.display} bg=${cs.backgroundColor} rect=${Math.round(r2.width)}x${Math.round(r2.height)} textIn=<${txtTag}> txtColor=${txtColor}`);
+    }
+  }
+  const bd = classifyInvisibleFailures(invisible, emittedBg, liveEffBg, multiBg);
+  if (bd) for (const rec of bd.records) { const d = colorDiag.get(rec.handle); if (d) rec.evidence = `${rec.evidence} [${d}]`; }
+  return bd;
+}
+
+/** Effective background of an element as a CSS rgb() string — the first opaque
+ *  ancestor's bg, mirroring verify's effectiveBackground walk. */
+function effectiveBgStr(el: HTMLElement): string {
+  let cur: Element | null = el;
+  while (cur) {
+    const c = parseColor(getComputedStyle(cur).backgroundColor);
+    if (c && c[3] >= 0.95) return `rgb(${c[0]},${c[1]},${c[2]})`;
+    cur = cur.parentElement;
+  }
+  return '';
+}
+/** Effective background at a viewport point via elementFromPoint — the real painted
+ *  surface under a pixel (catches a bg boundary the rect-walk averages over). */
+function effectiveBgAt(x: number, y: number): string {
+  const el = document.elementFromPoint(x, y) as Element | null;
+  return el ? effectiveBgStr(el as HTMLElement) : '';
 }
 
 /** The live DOM adapter for the op transaction layer. executeOps + txnLog.undoAll
@@ -268,6 +372,23 @@ function executeOps(ops: ValidatedOp[], record: boolean): { executed: number; re
 }
 
 async function runStyle(intent: string, restyleOnly = false): Promise<TransformOutcome> {
+  // MV3 keepalive: open a port so the SW stays alive for the duration of this run.
+  // The SW (background.ts) relays the model fetch (70-90s) — without the port, MV3's
+  // ~30s idle kill terminates the SW mid-fetch, and askForSpec's sendMessage never
+  // resolves (a silent hang). The port's existence keeps the SW alive; the sendMessage
+  // timeout (in askForSpec) is the backstop if the SW dies anyway. The in-flight flag
+  // surfaces a stale-run warning in the popup.
+  const keepalivePort = chrome.runtime.connect();
+  void chrome.storage.local.set({ webmorphRunInFlight: Date.now() });
+  try {
+    return await runStyleImpl(intent, restyleOnly);
+  } finally {
+    keepalivePort.disconnect();
+    void chrome.storage.local.remove('webmorphRunInFlight');
+  }
+}
+
+async function runStyleImpl(intent: string, restyleOnly = false): Promise<TransformOutcome> {
   const t0 = Date.now();
   delete document.documentElement.dataset[APPLIED];
   delete document.documentElement.dataset[FAILED];
@@ -288,6 +409,11 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
   activeShadowRoots = perception.shadowRoots;
   const serialized = serializePerception(perception);
   const serializeChars = serialized.length;
+  // Capture the reflow opportunities from the ORIGINAL page (before any op
+  // re-perceive). The verify gate checks whether the Architect addressed each; the
+  // post-op perception may have dropped a removed side-rail, so we hold the
+  // original list. Empty on pages with no detectable side-rail (no gate then).
+  const reflowOpportunity = perception.reflowOpportunity;
   const before = captureLayoutFingerprint();
   logDebug(`perceived ${perception.nodeCount} nodes -> ${perception.clusters.length} clusters (${perception.builtInMs}ms) ${perception.shadowRoots.length} shadow roots serialize=${serializeChars}chars`);
 
@@ -384,6 +510,7 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
     activeOps = opsResult.ops;
   }
   const removedHandles = txnLog.removedHandles();
+  const movedHandles = txnLog.movedHandles();
 
   // Build modelAddressed set for the model coverage gate.
   const modelAddressed = new Set<string>();
@@ -401,6 +528,7 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
   const attempts: Attempt[] = [];
   let lastVerify: VerifyResult | null = null;
   let lastPixel: PixelVerifyResult | null = null;
+  let lastBreakdown: InvisibleBreakdown | null = null;
   let compileMsTotal = 0, applyMsTotal = 0, verifyMsTotal = 0, pixelVerifyMsTotal = 0;
 
   // Batched repair: apply once (paint 1) → verify (DOM + pixel) → compute ALL
@@ -408,7 +536,41 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
   // is a failing check (the harness asserts paintCount <= 2). No keepBest re-apply
   // beyond paint 2: if paint 2 is broken we rollback+fail rather than repaint again.
   let paintCount = 0;
-  const applyOnce = async (curSpec: DesignSpec, opts: CompileOptions): Promise<{ compiled: ReturnType<typeof compileSpec>; sanitized: string; verify: VerifyResult; pixel: PixelVerifyResult }> => {
+  /** Inline-style forceContrast backstop: the CSS backstop rule (`[data-wm-c="h"]²`,
+   *  0,2,0 + !important) loses to id-level site !important (1,0,0+) — the cascade-loss
+   *  class proven by the Phase-1 diagnostic (clusters whose computed bg stayed
+   *  rgba(0,0,0,0) after the CSS pair was emitted). Inline + !important beats ANY
+   *  stylesheet rule (inline is the highest specificity tier), so this forces the
+   *  readable bg+text pair onto each pixel-invisible cluster element regardless of
+   *  the site's specificity. Image-bg clusters are skipped (never paint over content
+   *  images). Runs inside paint 2's applyOnce, after the CSS is injected — the CSS
+   *  handles the common case + descendant color (`*`); this catches the survivors. */
+  const applyInlineBackstop = (curSpec: DesignSpec, targets: string[] | undefined, contrastTargetBgs: Record<string, string> | undefined): void => {
+    if (!targets?.length) return;
+    const canvasTone = deriveBaseTone(curSpec.canvas?.background ?? '');
+    const canvasParsed = parseColor(canvasTone);
+    const opaque = (bg: string | undefined | null): string | null => {
+      if (!bg) return null;
+      const p = parseColor(bg);
+      return p && p[3] === 1 ? bg : null;
+    };
+    for (const h of new Set(targets)) {
+      const el = document.querySelector<HTMLElement>(`[data-wm-c="${h}"]`);
+      if (!el) continue;
+      if (getComputedStyle(el).backgroundImage !== 'none') continue; // protect content images
+      const ownBg = getComputedStyle(el).backgroundColor;
+      const effBg = opaque(contrastTargetBgs?.[h]) ?? opaque(ownBg) ?? canvasTone;
+      const baseTone = deriveBaseTone(effBg);
+      const baseParsed = parseColor(baseTone) ?? canvasParsed;
+      const readableBg = baseParsed ? baseTone : '#ffffff';
+      const readableText = baseParsed ? pickReadableText(baseParsed) : '#111111';
+      el.style.setProperty('background', readableBg, 'important');
+      el.style.setProperty('background-image', 'none', 'important');
+      el.style.setProperty('color', readableText, 'important');
+    }
+  };
+
+  const applyOnce = async (curSpec: DesignSpec, opts: CompileOptions): Promise<{ compiled: ReturnType<typeof compileSpec>; sanitized: string; verify: VerifyResult; pixel: PixelVerifyResult; breakdown: InvisibleBreakdown | null }> => {
     const tcCompile = performance.now();
     const compiled = compileSpec(curSpec, perception, opts);
     compileMsTotal += performance.now() - tcCompile;
@@ -416,6 +578,10 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
     if (!sanitized.trim()) return Promise.reject(new Error('no styles'));
     const tcApply = performance.now();
     applyStyleEverywhere(sanitized, activeShadowRoots);
+    // Inline forceContrast backstop: forces the readable pair onto each invisible
+    // cluster's own element, beating id-level site !important that defeats the CSS
+    // rule (the cascade-loss class). Gated on pixelInvisibleTargets (paint 2 only).
+    applyInlineBackstop(curSpec, opts.pixelInvisibleTargets, opts.contrastTargetBgs);
     applyMsTotal += performance.now() - tcApply;
     paintCount++;
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
@@ -424,11 +590,16 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
     // (layoutReshaped/usesRoom) are reported but not enforced; the recolor pixel
     // detector is skipped (no `before` passed to captureAndPixelVerify). The by-eye-
     // safety bars still hold.
-    const verify = verifyStyle(before, curSpec.paletteMode, modelAddressed, restyleOnly, removedHandles);
+    const verify = verifyStyle(before, curSpec.paletteMode, modelAddressed, restyleOnly, removedHandles, movedHandles, reflowOpportunity);
     verifyMsTotal += performance.now() - tcVerify;
     const px = await captureAndPixelVerify(restyleOnly ? undefined : beforeTop);
     pixelVerifyMsTotal += px.ms;
-    return { compiled, sanitized, verify, pixel: px.result };
+    // Phase-1 instrument: classify each surviving invisible-text cluster into its
+    // root-cause class so the run report names WHY each is still invisible, not just
+    // the count. The breakdown is logged per-paint and carried on the outcome.
+    const breakdown = classifyInvisible(px.result.invisibleText);
+    if (breakdown) logDebug(`invisible-text breakdown: ${px.result.invisibleText.length} survivor(s) — no-handle=${verify.contrastNoHandle} wrong-bg=${breakdown.byClass['wrong-bg']} cascade-loss=${breakdown.byClass['cascade-loss']} multi-bg=${breakdown.byClass['multi-bg']} unknown=${breakdown.byClass['unknown']}${breakdown.records.slice(0, 6).map((r) => `\n  ${r.handle}: ${r.cls} — ${r.evidence}`).join('')}`);
+    return { compiled, sanitized, verify, pixel: px.result, breakdown };
   };
 
   // ── Paint 1: initial apply + verify (DOM + pixel) ──
@@ -436,7 +607,7 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
   let phase1Verify: VerifyResult | null = null;
   try {
     const p1 = await applyOnce(spec, options);
-    phase1Sanitized = p1.sanitized; phase1Verify = p1.verify; lastVerify = p1.verify; lastPixel = p1.pixel;
+    phase1Sanitized = p1.sanitized; phase1Verify = p1.verify; lastVerify = p1.verify; lastPixel = p1.pixel; lastBreakdown = p1.breakdown;
     attempts.push({ spec, css: p1.sanitized, notBroken: p1.verify.checks.notBlank && p1.verify.checks.noOverflow && p1.verify.checks.noOverlap && p1.verify.checks.contrastOk && p1.verify.checks.contentCollapsed && p1.verify.checks.contentVisible, changeScore: p1.verify.changeScore, covered: p1.verify.checks.covered, coherent: p1.verify.checks.coherent, changed: p1.verify.checks.changed, contentCollapsed: p1.verify.checks.contentCollapsed });
     logDebug(`paint1: rules=${p1.compiled.rulesEmitted} baseCoat=${p1.compiled.baseCoatCount} checks=${JSON.stringify(p1.verify.checks)} pixel(passed=${p1.pixel.passed} voids=${p1.pixel.voids.length} invisible=${p1.pixel.invisibleText.length} squeeze=${p1.pixel.squeeze.length}) change=${p1.verify.changeScore.toFixed(3)} accent=${p1.verify.accentFraction.toFixed(3)} coverage=${p1.verify.coverageFraction.toFixed(3)} modelCov=${p1.verify.modelCoverageFraction.toFixed(3)}${p1.compiled.droppedProps.length ? ' dropped=[' + p1.compiled.droppedProps.slice(0, 12).join(',') + ']' : ''}`);
     logDebug(`  detail: ${p1.verify.details.join(' | ')}`);
@@ -453,7 +624,10 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
   if (!phase1Passed && paintCount < 2) {
     // The budget is TIME: a Critic repair round fits only if the remaining
     // wall-clock clears the per-call minimum (canReReason). No call-count cap.
-    const decision = planRepair(phase1Verify!, options, repairRounds, spec.paletteMode, lastPixel, canReReason());
+    // opTargets = the handles a structural op targeted (remove/move/reorder/wrap) —
+    // the hard void law needs them to decide which voids are "addressed".
+    const opTargets = new Set(activeOps.map((o) => o.target));
+    const decision = planRepair(phase1Verify!, options, repairRounds, spec.paletteMode, lastPixel, canReReason(), opTargets);
     logDebug(`repair -> ${decision.action}: ${decision.reason}`);
 
     if (decision.action === 'rollback') {
@@ -493,7 +667,7 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
           // ── Paint 2: re-apply with the corrected spec ──
           try {
             const p2 = await applyOnce(spec, options);
-            lastVerify = p2.verify; lastPixel = p2.pixel;
+            lastVerify = p2.verify; lastPixel = p2.pixel; lastBreakdown = p2.breakdown;
             attempts.push({ spec, css: p2.sanitized, notBroken: p2.verify.checks.notBlank && p2.verify.checks.noOverflow && p2.verify.checks.noOverlap && p2.verify.checks.contrastOk && p2.verify.checks.contentCollapsed && p2.verify.checks.contentVisible, changeScore: p2.verify.changeScore, covered: p2.verify.checks.covered, coherent: p2.verify.checks.coherent, changed: p2.verify.checks.changed, contentCollapsed: p2.verify.checks.contentCollapsed });
             logDebug(`paint2(critic): checks=${JSON.stringify(p2.verify.checks)} pixel(passed=${p2.pixel.passed})`);
             // If paint 2 is broken, rollback+fail (no 3rd paint to revert).
@@ -519,7 +693,7 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
       options = batchedOpts;
       try {
         const p2 = await applyOnce(spec, options);
-        lastVerify = p2.verify;
+        lastVerify = p2.verify; lastPixel = p2.pixel; lastBreakdown = p2.breakdown;
         attempts.push({ spec, css: p2.sanitized, notBroken: p2.verify.checks.notBlank && p2.verify.checks.noOverflow && p2.verify.checks.noOverlap && p2.verify.checks.contrastOk && p2.verify.checks.contentCollapsed && p2.verify.checks.contentVisible, changeScore: p2.verify.changeScore, covered: p2.verify.checks.covered, coherent: p2.verify.checks.coherent, changed: p2.verify.checks.changed, contentCollapsed: p2.verify.checks.contentCollapsed });
         logDebug(`paint2(repair): checks=${JSON.stringify(p2.verify.checks)} pixel(passed=${p2.pixel.passed}) change=${p2.verify.changeScore.toFixed(3)} accent=${p2.verify.accentFraction.toFixed(3)}`);
         if (!(p2.verify.checks.notBlank && p2.verify.checks.contentCollapsed)) {
@@ -587,6 +761,8 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
   return {
     ok: true, reasoning: spec.reasoning, spec, verify: lastVerify || undefined,
     pixel: lastPixel ? { passed: lastPixel.passed, voids: lastPixel.voids.length, invisibleText: lastPixel.invisibleText.length, squeeze: lastPixel.squeeze.length } : undefined,
+    invisibleBreakdown: lastBreakdown,
+    contrastNoHandle: lastVerify?.contrastNoHandle,
     perceiveMs: perception.builtInMs, clusters: perception.clusters.length,
     changeScore: lastVerify?.changeScore, accentFraction: lastVerify?.accentFraction,
     modelCoverageFraction: lastVerify?.modelCoverageFraction,
@@ -602,7 +778,20 @@ function failVerify(spec: DesignSpec, verify: VerifyResult): TransformOutcome {
 
 function askForSpec(role: Role, intent: string, perception: string, critique?: string, timeoutMs?: number): Promise<SpecResponse> {
   return new Promise((resolve) => {
+    let done = false;
+    // MV3 sendMessage timeout: if the SW is killed mid-fetch (the ~30s idle kill
+    // terminates the SW during a 70-90s model call), the callback never fires — a
+    // silent hang. This timer resolves a clean `kind: 'timeout'` failure (which the
+    // popup's error taxonomy already maps to a user message) instead of hanging.
+    const t = setTimeout(() => {
+      if (done) return;
+      done = true;
+      resolve({ ok: false, kind: 'timeout', message: 'Service worker dropped mid-run (no response within timeout).' });
+    }, timeoutMs ?? 120000);
     chrome.runtime.sendMessage({ action: 'styleSpec', role, intent, perception, critique, timeoutMs }, (response) => {
+      if (done) return;
+      done = true;
+      clearTimeout(t);
       if (chrome.runtime.lastError || !response) resolve({ ok: false, message: chrome.runtime.lastError?.message || 'No response from design engine.' });
       else resolve(response as SpecResponse);
     });

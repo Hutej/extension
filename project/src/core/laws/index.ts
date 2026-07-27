@@ -335,6 +335,18 @@ export const NARROWING_KEYS = new Set(['width', 'maxWidth', 'minWidth', 'gridTem
 export const MIN_COLUMN_PX = 120;
 
 /**
+ * Side-rail width band (fraction of viewport). A region in this band sitting beside
+ * a main/article is a SIDE RAIL — a reflow opportunity (sidebar→top-bar or collapse).
+ * A redesign that leaves it at the same width+position on a layout request skipped a
+ * warranted reflow. Detected by role + geometry (navigation/complementary/banner or
+ * aside/nav, widthRatio in this band, with a main/article sibling) — PRINCIPLE (a side
+ * rail is structural), not a recipe. The same band flags a geometry-based side-rail in
+ * the invisible-text scan (one principle, two consumers).
+ */
+export const SIDE_RAIL_MIN_FRAC = 0.15;
+export const SIDE_RAIL_MAX_FRAC = 0.45;
+
+/**
  * Minimum chars-per-line before text is "squeezed". A text container
  * whose effective chars-per-line falls below this wraps every word — invisible
  * to bleed checks (text stays in-bounds) but visibly broken. Measured via

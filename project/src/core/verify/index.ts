@@ -20,7 +20,7 @@ const OVERLAP_TOLERANCE = 2; // allow minor noise / a couple of self-inflicted-b
 
 export interface VerifyResult {
   passed: boolean;
-  checks: { notBlank: boolean; noOverflow: boolean; noOverlap: boolean; contrastOk: boolean; changed: boolean; coherent: boolean; covered: boolean; contentCollapsed: boolean; contentVisible: boolean; layoutReshaped: boolean; usesRoom: boolean };
+  checks: { notBlank: boolean; noOverflow: boolean; noOverlap: boolean; contrastOk: boolean; changed: boolean; coherent: boolean; covered: boolean; contentCollapsed: boolean; contentVisible: boolean; layoutReshaped: boolean; usesRoom: boolean; movedAlive: boolean; reflowAddressed: boolean };
   changeScore: number;
   layoutReshapedScore: number;   // structural-change signal (columns + content width + region widths)
   accentFraction: number;
@@ -36,10 +36,23 @@ export interface VerifyResult {
   contentWidthBefore: number | null;           // contentMaxWidthPx before apply (usesRoom critique)
   contentWidthAfter: number | null;            // contentMaxWidthPx after apply (usesRoom critique)
   repeatedAccent: boolean;
+  /** Count of low-contrast text nodes WITHOUT a [data-wm-c] ancestor — invisible to
+   *  handle-targeted repair (forceContrast targets handles) and to the pixel
+   *  detector (only scans [data-wm-c] rects). The canvas text floor + base-coat are
+   *  the only paths that reach un-clustered text. Surfaced for the Phase-1 run report
+   *  so a no-handle failure class is visible, not silently dropped. */
+  contrastNoHandle: number;
+  /** Handles of moved/reordered nodes that did NOT survive the move (gone, hidden,
+   *  zero-size, or lost their role) — for the moved-alive report + repair. */
+  movedDead: string[];
+  /** Side-rail handles the perception flagged as a warranted reflow that the
+   *  Architect left untouched (same width+position, no op). Empty when the reflow
+   *  was addressed (op on the handle) OR no reflow was warranted. */
+  reflowSkippedHandles: string[];
   details: string[];
 }
 
-export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained' | 'vivid', modelAddressed?: Set<string>, skipReshapeChecks?: boolean, removedHandles?: Set<string>): VerifyResult {
+export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained' | 'vivid', modelAddressed?: Set<string>, skipReshapeChecks?: boolean, removedHandles?: Set<string>, movedHandles?: Set<string>, reflowOpportunity?: { kind: 'side-rail'; handle: string }[]): VerifyResult {
   const details: string[] = [];
   const after = captureLayoutFingerprint();
 
@@ -92,6 +105,26 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   const contentVisible = invisibleCount === 0;
   if (!contentVisible) details.push(`${invisibleCount} cluster(s) have opacity < 0.1 — content may be invisible`);
 
+  // 1d) Moved nodes alive — a move/reorder op must leave the node present, visible,
+  // and sized after relocation. A move that orphaned the node (parent gone), hid it,
+  // or zeroed its rect is a silent break the DOM notBlank/contentCollapsed checks
+  // don't catch (the handle may still "exist" but be display:none under a new
+  // ancestor). Each moved handle is re-resolved live and checked: present, display
+  // !=none, visibility !=hidden, opacity >=0.1, rect >0, role preserved.
+  const movedDead: string[] = [];
+  if (movedHandles && movedHandles.size) {
+    for (const h of movedHandles) {
+      const el = document.querySelector<HTMLElement>(`[data-wm-c="${h}"]`);
+      if (!el) { movedDead.push(h); continue; }
+      const cs = getComputedStyle(el);
+      const r = el.getBoundingClientRect();
+      if (cs.display === 'none' || cs.visibility === 'hidden' || parseFloat(cs.opacity) < 0.1) { movedDead.push(h); continue; }
+      if (r.width <= 1 || r.height <= 1) { movedDead.push(h); continue; }
+    }
+  }
+  const movedAlive = movedDead.length === 0;
+  if (!movedAlive) details.push(`moved nodes dead/hidden/zero-size: ${movedDead.slice(0, 6).join(', ')} — a move orphaned or hid a node`);
+
   // 2) No horizontal blow-out — DELTA: flag only overflow WE introduced, not pre-existing.
   const scrollW = document.documentElement.scrollWidth;
   const innerW = window.innerWidth || 1;
@@ -108,10 +141,14 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   if (!noOverlap) details.push(`new region overlaps: ${before.overlapCount} -> ${after.overlapCount}`);
 
   // 4) Contrast sane. Collect the specific cluster handles that carry flagged
-  // low-contrast text so forceContrast can fix exactly those.
+  // low-contrast text so forceContrast can fix exactly those. `noHandle` counts the
+  // failing text WITHOUT a [data-wm-c] ancestor — invisible to handle-targeted repair
+  // (forceContrast) and to the pixel detector (only scans [data-wm-c]); the canvas text
+  // floor + base-coat are the only paths that reach it. Surfaced for the run report.
   const contrastFlags = new Set<string>();
   const contrastTargetBgs = new Map<string, string>();
-  const contrastOk = checkContrast(details, contrastFlags, contrastTargetBgs);
+  const noHandle = { count: 0 };
+  const contrastOk = checkContrast(details, contrastFlags, contrastTargetBgs, noHandle);
 
   // 5) Layout actually changed (lenient).
   const changeScore = fingerprintDelta(before, after);
@@ -189,6 +226,33 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
     details.push(`dead-margin band: content narrowed ${Math.round(beforeW!)}px -> ${afterW != null ? Math.round(afterW) : '?'}px (${pct}% of original) on a wide page — content does not use the room`);
   }
 
+  // 1e) Reflow forcing — when the perception flagged a structural reflow
+  // opportunity (a side-rail beside main content), the Architect MUST address it:
+  // an op (remove/move/reorder) on the handle, OR a material width/position change
+  // (the rail reflowed — sidebar→top-bar widens to full width; a collapsed rail
+  // narrows). A side-rail left at the same width+position with no op targeted it =
+  // a warranted reflow the Architect skipped. Enforced ONLY on a redesign
+  // (skipReshapeChecks = a palette-only request isn't claiming to reflow). The
+  // 24px floor matches the region-width-change threshold — a real reflow (a rail
+  // stretching from ~20% to ~100% of the viewport, or relocating above main) clears
+  // it by orders of magnitude; a recolor that nudges padding does not.
+  const reflowSkippedHandles: string[] = [];
+  if (reflowOpportunity && reflowOpportunity.length && !skipReshapeChecks) {
+    for (const r of reflowOpportunity) {
+      const h = r.handle;
+      if (removedHandles?.has(h)) continue;        // op removed it — addressed
+      if (movedHandles?.has(h)) continue;          // op moved/reordered it — addressed
+      const ra = before.regions.find((x) => x.handle === h);
+      const rb = afterByHandle.get(h);
+      if (!ra || !rb) continue;                    // gone from fingerprint — can't judge, benefit of the doubt
+      if (Math.abs(ra.w - rb.w) > 24 || Math.abs(ra.x - rb.x) > 24 || Math.abs(ra.y - rb.y) > 24) continue;  // reflowed
+      reflowSkippedHandles.push(h);
+    }
+  }
+  const reflowSkipped = reflowSkippedHandles.length > 0;
+  const reflowAddressed = !reflowSkipped;
+  if (reflowSkipped) details.push(`reflow skipped: side-rail ${reflowSkippedHandles.slice(0, 6).join(', ')} left at same width+position — a warranted reflow was not addressed (no op + no grid/width change)`);
+
   // A restyle-only (pure palette) request isn't claiming to be a redesign, so the
   // "is this a real redesign" checks (layoutReshaped + usesRoom) are computed for the
   // report but NOT enforced in `passed` when skipReshapeChecks is set. The by-eye-
@@ -196,8 +260,8 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   // contentCollapsed, contentVisible) still hold — a palette change must not break
   // the page. The recolor pixel detector is skipped at the call site (no `before`).
   const enforcedReshape = skipReshapeChecks ? true : (layoutReshaped && usesRoom);
-  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible && enforcedReshape;
-  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible, layoutReshaped, usesRoom }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, collapseTargets: [...collapsedRegions], contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), contentWidthBefore: beforeW, contentWidthAfter: afterW, repeatedAccent, details };
+  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible && movedAlive && enforcedReshape && !reflowSkipped;
+  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible, layoutReshaped, usesRoom, movedAlive, reflowAddressed }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, collapseTargets: [...collapsedRegions], contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), contentWidthBefore: beforeW, contentWidthAfter: afterW, repeatedAccent, contrastNoHandle: noHandle.count, movedDead, reflowSkippedHandles, details };
 }
 
 /**
@@ -397,7 +461,7 @@ function checkRepeatedAccent(before: LayoutFingerprint): boolean {
   }
 
   for (const [h, count] of counts) {
-    if (count <= 3) continue;  // ponytail: 2-3 members is a pair, not a "repeated cluster"
+    if (count <= 3) continue;  // 2-3 members is a pair, not a "repeated cluster"
     const rep = document.querySelector(`[data-wm-c="${h}"]`);
     if (!rep) continue;
     const afterC = parseColor(getComputedStyle(rep).backgroundColor);
@@ -463,11 +527,15 @@ function measureFramedClusterFraction(): number {
 
 // ── contrast ───────────────────────────────────────────────────────
 
-function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<string, string>): boolean {
+function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<string, string>, noHandle: { count: number }): boolean {
   // Largest type first: display/hero text is the most visible place to fail.
+  // Phase-1 root-cause fix: the OLD code did `.slice(0, 200)` BEFORE the font-size
+  // sort — on a markup-heavy page the first 200 matched elements in DOM order could
+  // be chrome (nav links, list items), leaving main-content <p> paragraphs past #200
+  // excluded from sampling ENTIRELY. Collect ALL candidates, sort by font size
+  // descending, THEN cap the sample at CONTRAST_SAMPLE_COUNT in the loop below.
   const candidates = Array.from(document.querySelectorAll('h1, h2, h3, h4, p, li, td, a, span, blockquote'))
     .filter((el) => !el.hasAttribute('data-webmorph-ui') && (el.textContent || '').trim().length >= 5)
-    .slice(0, 200)
     .map((el) => ({ el, fs: parseFloat(getComputedStyle(el).fontSize) || 0 }))
     .sort((a, b) => b.fs - a.fs);
   let checked = 0, failed = 0, failedTop = 0;
@@ -500,6 +568,17 @@ function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<s
         // it picks a readable color against the wrong surface (root cause of the
         // persistent contrast failure: text on an ancestor's painted panel).
         targetBgs.set(h, `rgb(${Math.round(eb[0])},${Math.round(eb[1])},${Math.round(eb[2])})`);
+      } else {
+        // Phase-1 class: NO-HANDLE. The failing text has no [data-wm-c] ancestor —
+        // it lives outside any cluster (text the perception didn't group). The OLD
+        // code counted it toward `failed` (forcing contrastOk=false) but added NO
+        // repair target, so the failure was silently unfixable: forceContrast only
+        // targets handles, and the pixel detector only scans [data-wm-c] rects.
+        // Surface the count so the loop can act (base-coat / canvas floor) instead
+        // of silently dropping the unfixable failure.
+        noHandle.count++;
+        details.push(`low contrast on UNCLUSTERED "${(el.textContent || '').trim().slice(0, 24)}" (no [data-wm-c] — falls back to the canvas text floor)`);
+        continue;
       }
       details.push(`low contrast on "${(el.textContent || '').trim().slice(0, 24)}"`);
     }

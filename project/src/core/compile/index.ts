@@ -156,7 +156,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       }
       if (readable) decls.push(`color: ${readable} !important;`);
     }
-    // ponytail: overflow-x:clip prevents horizontal scrollbar WITHOUT affecting
+    // overflow-x:clip prevents horizontal scrollbar WITHOUT affecting
     // overflow-y (unlike overflow-x:hidden which forces overflow-y:auto per CSS
     // spec, potentially clipping content). clip is supported in Chrome 90+.
     if (spec.canvas?.background) {
@@ -216,7 +216,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
         });
         droppedProps.push(...r.dropped);
         decls.push(...r.decls);
-        // ponytail: NO preventive overflow-wrap on narrowed containers. `anywhere`
+        // NO preventive overflow-wrap on narrowed containers. `anywhere`
         // collapses min-content to 1 char, letting flex/grid squeeze text columns
         // to a few characters and break every word ("PROTES TS IN UKRAIN E's").
         // Genuine bleeds are caught by verify's bleedTargets and repaired with
@@ -316,7 +316,7 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
       });
       droppedProps.push(...r.dropped);
       decls.push(...r.decls);
-      // ponytail: NO preventive overflow-wrap on narrowed containers (see
+      // NO preventive overflow-wrap on narrowed containers (see
       // composition-rule note above). `anywhere` was destroying prose by
       // collapsing min-content; bleeds are repaired targeted, post-verify.
     }
@@ -360,13 +360,18 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
     for (const h of new Set(opts.contrastTargets)) {
       if (pixelInvisSet.has(h)) continue;
       const cl = byHandle.get(h);
-      if (!cl) continue;
+      if (!cl) { droppedProps.push(`contrast(${h}:handle-vanished — cascade-loss: the handle dropped from the live perception, no text-only bump emitted)`); continue; }
       // Priority: the EFFECTIVE bg verify's parent-chain walk captured (the real
       // surface the text sits on — usually an ancestor's painted panel, not the
       // handle's own bg), then the rule's bg, then the cluster's original bg, then canvas.
       const parsed = parseColor(opts.contrastTargetBgs?.[h] ?? specBg.get(h) ?? cl.style.background) ?? canvasParsed;
       const readable = parsed ? pickReadableText(parsed) : '#111111';
-      blocks.push(`${cl.selector} {\n  color: ${readable} !important;\n}`);
+      blocks.push(`${forceContrastSelector(h)} {\n  color: ${readable} !important;\n}`);
+      // Force the color onto descendants too: text often lives in a child (<a>/<span>)
+      // whose own `color` overrides the inherited parent color, leaving link text
+      // invisible even after the cluster's color is bumped (the "unknown" class —
+      // opaque bg painted, text still invisible). Localized to this cluster only.
+      blocks.push(`${forceContrastSelector(h)} * {\n  color: ${readable} !important;\n}`);
       rulesEmitted++;
     }
     // BG-aware contrast: for pixel-invisible clusters (text invisible against its
@@ -376,14 +381,33 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
     // color readable against it. Guard: skip clusters with background images (thumbnails)
     // so content images are never painted over.
     if (opts.pixelInvisibleTargets?.length) {
-      const baseTone = deriveBaseTone(canvasBg);
-      const baseParsed = parseColor(baseTone);
-      const readableBg = baseParsed ? baseTone : '#ffffff';
-      const readableText = baseParsed ? pickReadableText(baseParsed) : '#111111';
+      // Phase-1 root-cause fix (wrong-bg failure class): the OLD code derived ONE
+      // bg+text pair for ALL pixel-invisible clusters from `deriveBaseTone(canvasBg)`
+      // — the CANVAS bg, not the surface each cluster's text actually sits on. A
+      // cluster on a dark ancestor-painted panel got a canvas-derived pair (light bg
+      // + dark text), which stays invisible against the dark panel it really lives
+      // on. Per-handle: derive the readable bg from the cluster's EFFECTIVE bg
+      // (verify's parent-chain walk captured it as contrastTargetBgs[h]), then the
+      // rule's own bg, then the cluster's original bg, then the canvas tone. Each
+      // invisible cluster now gets a pair painted on its REAL surface.
+      const canvasTone = deriveBaseTone(canvasBg);
+      const canvasParsed = parseColor(canvasTone);
       for (const h of new Set(opts.pixelInvisibleTargets)) {
         const cl = byHandle.get(h);
-        if (!cl || cl.style.hasBgImage) continue;
-        blocks.push(`${cl.selector} {\n  background: ${readableBg} !important;\n  color: ${readableText} !important;\n}`);
+        if (!cl) { droppedProps.push(`pixelInvisible(${h}:handle-vanished — cascade-loss: the handle dropped from the live perception, possibly an op removed it or an SPA re-render stripped [data-wm-c])`); continue; }
+        if (cl.style.hasBgImage) { droppedProps.push(`pixelInvisible(${h}:image-bg — protected, no pair emitted)`); continue; }
+        const effBg = opaqueOr(opts.contrastTargetBgs?.[h]) ?? opaqueOr(specBg.get(h)) ?? opaqueOr(cl.style.background) ?? canvasTone;
+        const baseTone = deriveBaseTone(effBg);
+        const baseParsed = parseColor(baseTone) ?? canvasParsed;
+        const readableBg = baseParsed ? baseTone : '#ffffff';
+        const readableText = baseParsed ? pickReadableText(baseParsed) : '#111111';
+        blocks.push(`${forceContrastSelector(h)} {\n  background: ${readableBg} !important;\n  background-image: none !important;\n  color: ${readableText} !important;\n}`);
+        // Force the color onto descendants too: the text is often in a child <a>/<span>
+        // with its own `color` that overrides the inherited parent color — so the opaque
+        // bg is painted but the link text stays invisible (the "unknown" class). The bg
+        // stays on the cluster only (children transparent, showing the opaque surface);
+        // only `color` is pushed onto descendants. Localized to this invisible cluster.
+        blocks.push(`${forceContrastSelector(h)} * {\n  color: ${readableText} !important;\n}`);
         rulesEmitted++;
       }
     }
@@ -578,7 +602,7 @@ function firstNonEmpty(...vals: (string | undefined)[]): string {
  * per line (width ÷ (16×0.5)) would wrap every word — the narrow-column failure.
  * Refuse the offending sizing keys; the cluster keeps its other layout. Pure
  * geometry: only fixed px values are checked (%, clamp(), min() are already fluid).
- * `ponytail: 16px default font + 0.5 avg-char-width ratio — same heuristic as
+ * `16px default font + 0.5 avg-char-width ratio — same heuristic as
  *  verify.findSqueezeTargets; a real font-measure would be tighter, but this
  *  matches the verify side so the two gates agree`.
  */
@@ -682,7 +706,7 @@ function percentifyClusterWidth(layout: LayoutDecls, cluster: Cluster | undefine
  * or image cluster keeps its framing (it has content to show). A normal card with a
  * modest border + small padding is NOT a void — only LARGE padding + THICK framing on
  * a content-less cluster is.
- * `ponytail: the void signal is a heuristic (no text + large pad + thick frame); a
+ * `the void signal is a heuristic (no text + large pad + thick frame); a
  *  real content measure would catch the edge case of a content-less card, but the
  *  large-pad + thick-frame gate avoids false positives on normal framed cards.`
  */
@@ -746,10 +770,39 @@ function stripDecorativeVoidGrowth(styles: StyleDecls, cluster: Cluster | undefi
  * parseable color — the base coat just needs to be luminance-compatible with the
  * canvas, not an exact match.
  */
-function deriveBaseTone(canvasBg: string): string {
+export function deriveBaseTone(canvasBg: string): string {
   const parsed = parseColor(canvasBg);
   if (parsed) return canvasBg; // solid color — use directly
   // gradient/keyword — extract first hex/rgb color from the string
   const m = canvasBg.match(/#[0-9a-f]{3,8}|rgba?\([^)]+\)/i);
   return m ? m[0] : canvasBg;
+}
+
+/**
+ * Cascade-proof selector for the deterministic forceContrast pair. The base
+ * cluster selector `[data-wm-c="…"]` is specificity (0,1,0); a site rule with a
+ * higher-specificity selector + !important beats our pair — the cascade-loss
+ * failure class (the pair is emitted but loses the cascade, so the cluster stays
+ * invisible). Doubling the attribute selector lifts specificity to (0,2,0) +
+ * !important, beating class-level site !important (the common case). Emitted last
+ * in the cascade, so it also wins source-order.
+ * `id-level site !important (1,1,0+) still wins; the severe-invisible
+ *  Critic escalation (repair/index.ts) redesigns the surface for those — an
+ *  inline-style fallback (inline + !important beats any stylesheet rule) is the
+ *  upgrade path if a real run shows id-level cascade-loss survivors persist.` */
+function forceContrastSelector(handle: string): string {
+  return `[data-wm-c="${handle}"][data-wm-c="${handle}"]`;
+}
+
+/** Transparent/empty bg is "no surface" — returns null so the effBg `??` chain
+ *  falls through to the opaque canvas tone. Without this, `deriveBaseTone` returns
+ *  translucent strings verbatim (parseColor accepts any alpha) and the backstop
+ *  paints `background: rgba(…,0.5) !important` — a translucent bg the dark surface
+ *  bleeds through, so the text (sized for the opaque color) is invisible on the
+ *  rendered composite (the wrong-bg failure class). Requires FULL opacity (a===1):
+ *  translucent model washes are "no reliable surface" → fall to the opaque canvas. */
+function opaqueOr(bg?: string | null): string | null {
+  if (!bg) return null;
+  const p = parseColor(bg);
+  return p && p[3] === 1 ? bg : null;
 }
