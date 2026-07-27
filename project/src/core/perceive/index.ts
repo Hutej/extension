@@ -11,8 +11,12 @@
  * CSS variables for pure compile/verify.
  */
 
-import { STYLE_ELEMENT_ID } from '../laws/index.ts';
-import { isTransparent, parseColor } from '../../shared/color.ts';
+import { STYLE_ELEMENT_ID, SIDE_RAIL_MIN_FRAC, SIDE_RAIL_MAX_FRAC } from '../laws/index.ts';
+import { isTransparent, parseColor, colorfulness } from '../../shared/color.ts';
+import {
+  classifyRole, rankDominance, detectGrouping, summarizeComposition, hash as semanticHash,
+  type ClusterSignals, type PageContext, type DesignRole, type CompositionSummary,
+} from './semantic.ts';
 
 const IGNORED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'BR', 'HR', 'WBR', 'LINK', 'META', 'TEMPLATE', 'SLOT', 'PATH', 'DEFS']);
 const ESCAPE_UI_ID = 'webmorph-escape-ui';
@@ -24,7 +28,7 @@ const TIER1_FULL_DETAIL_COUNT = 80; // top clusters by prominence get full seria
 // Adaptive serialization budget (the budget is TIME, not chars). The fast path
 // keeps FULL detail up to the soft ceiling; the compact/drop trim fires only when
 // the serialized perception exceeds the HARD ceiling (a genuinely large page where
-// the token cost would threaten the time budget). `ponytail: the hard ceiling is a
+// the token cost would threaten the time budget). `the hard ceiling is a
 // measured-size heuristic, not a precise model — a real serialize-time gate would
 // be tighter, but the char ceiling is a stable proxy for the token/time cost and
 // the role prompts are smaller than the old monolith, so the fast path keeps detail
@@ -42,6 +46,7 @@ export interface ClusterStyle {
   boxShadow: string; fontFamily: string; fontSize: string; fontWeight: string;
   padding: string; display: string;
   hasBgImage: boolean;   // own background-image is a url() — a CONTENT image (thumbnail). Gradients don't count.
+  naturalAspect?: number; // intrinsic w÷h for img/video — the design model needs this to avoid distortion (the distortion root cause: today naturalWidth/Height is used only in verify/capture for screenshot decoding; the design step never sees it).
 }
 
 export interface ClusterLayout {
@@ -55,6 +60,7 @@ export interface ClusterLayout {
   isPassiveWrapper: boolean;             // safe to collapse via display:contents
   isOpaqueWrapper: boolean;              // large solid-bg container hiding the canvas backdrop
   depth: number;
+  siblingGapPx?: number;                 // gap to the next sibling (Phase 4: feeds the design-token spacing scale)
 }
 
 export interface Cluster {
@@ -84,6 +90,21 @@ export interface Cluster {
   /** DOM document-order index at capture. Cheap running counter; lets the
    *  model see source-vs-visual order divergence (a reorder opportunity). */
   sourceOrder: number;
+  /** Phase 1 — the closed-vocabulary DESIGN role (page-title/article-body/nav-primary
+   *  …) the cluster was deterministically classified into. The PRIMARY representation
+   *  the model reasons over; the ARIA `role` above is a signal, not the contract. */
+  designRole: DesignRole;
+  /** Phase 1 — the classifier's confidence in the design role (0..1 = the winning
+   *  score). Low confidence flags a cluster the human should check; the probe reports
+   *  the low-confidence clusters per site for honest misclassification review. */
+  designRoleConfidence: number;
+  /** Phase 1 — per-region dominance rank (area × position × contrast weight, 0..1).
+   *  A designer signal the old serialization omitted: which regions read as loud. */
+  dominanceRank: number;
+  /** Phase 1 — the sibling-group id this cluster belongs to (clusters that read as
+   *  one unit — a row of cards, a stack of nav links). null if the cluster is not in a
+   *  detected group. A designer signal the old serialization omitted: grouping. */
+  group: string | null;
 }
 
 export interface LayoutSkeleton {
@@ -116,6 +137,16 @@ export interface Perception {
   opaqueWrappers: Set<string>;          // handles of large solid-bg wrappers that hide the canvas
   scrollables: { handle: string; axis: 'x' | 'y' | 'both' }[];  // scrollable containers (req D)
   viewport: { w: number; h: number };   // for area-fraction math (accent-trim budget)
+  /** Structural reflow opportunities detected from the skeleton (sidebar→top-bar,
+   *  etc.). The Architect is REQUIRED to address each (an op OR a grid change) or
+   *  verify's reflowSkipped gate fails the run. Pure structural detection — role +
+   *  geometry, no domain logic. */
+  reflowOpportunity: { kind: 'side-rail'; handle: string }[];
+  /** Phase 1 — the page-level composition summary: the dominant regions, column
+   *  count, top nav / rails, sibling-group count, and a one-line natural-language
+   *  composition ("article-body is dominant + nav-primary(top); 2 columns, top nav
+   *  band, right rail"). The model sees this UP FRONT, before any node. */
+  composition: CompositionSummary;
   shadowRoots: ShadowRoot[];            // open shadow roots for downstream CSS injection
 }
 
@@ -126,7 +157,7 @@ export interface LayoutFingerprint {
   typeSizesPx: number[];
   overlapCount: number;
   bleedCount: number;
-  scrollWidth: number;                  // ponytail: for delta-overflow in verify (Phase 3)
+  scrollWidth: number;                  // for delta-overflow in verify (Phase 3)
 }
 
 interface Candidate {
@@ -226,6 +257,13 @@ export function perceive(): Perception {
     const bg = cs.backgroundColor;
     const solidBg = !isTransparent(bg);
     const hasBgImage = /url\(/i.test(cs.backgroundImage);  // content image (thumbnail) — never paint over it
+    // Image natural aspect ratio — the intrinsic dimensions the design model needs
+    // to avoid distortion. img only for now; video (videoWidth/Height) and
+    // svg (viewBox) are rarer and can be added when a distortion case proves them needed.
+    let naturalAspect: number | undefined;
+    if (tag === 'IMG' && el instanceof HTMLImageElement && el.naturalWidth && el.naturalHeight) {
+      naturalAspect = Math.round((el.naturalWidth / el.naturalHeight) * 100) / 100;
+    }
     const border = normalizeBorder(cs);
     const hasShadow = cs.boxShadow !== 'none';
     const hasText = directTextLength(el) > 0;
@@ -248,6 +286,7 @@ export function perceive(): Perception {
           fontFamily: firstFamily(cs.fontFamily), fontSize: cs.fontSize, fontWeight: cs.fontWeight,
           padding: cs.padding, display: cs.display,
           hasBgImage,
+          naturalAspect,
         },
       });
     }
@@ -262,6 +301,22 @@ export function perceive(): Perception {
   const cssVarMap = resolveVarMap(cssVars);
   const skeleton = buildSkeleton(clusters, vpW);
   const scrollables = findScrollables(clusters);
+  const reflowOpportunity = detectReflowOpportunity(clusters);
+
+  // Phase 1 — semantic enrichment: classify each cluster onto the closed design-role
+  // vocabulary, rank dominance, detect sibling groups, and summarize the page
+  // composition. ENRICHMENT, not a rewrite — geometry/tokens/detectors all stay; the
+  // design role is ADDED to each cluster and the composition summary to the perception.
+  // The representative element per cluster is read live (signals need the DOM); the
+  // pure classifier lives in ./semantic.ts. Returns the ranked+positioned regions the
+  // composition summary needs (real rect x/y, not the cluster's w/h-only rect).
+  const ranked = enrichSemantic(clusters, { w: vpW, h: window.innerHeight || 800 });
+  const composition = summarizeComposition(
+    ranked,
+    skeleton.columnCount,
+    new Set(clusters.map((c) => c.group).filter(Boolean)).size,
+    { w: vpW, h: window.innerHeight || 800 },
+  );
 
   return {
     builtInMs: Math.round(performance.now() - t0),
@@ -272,8 +327,33 @@ export function perceive(): Perception {
     opaqueWrappers: new Set(clusters.filter((c) => c.layout.isOpaqueWrapper).map((c) => c.handle)),
     scrollables,
     viewport: { w: vpW, h: window.innerHeight || 800 },
+    reflowOpportunity,
+    composition,
     shadowRoots,
   };
+}
+
+/** Detect structural reflow opportunities (sidebar→top-bar etc.). A SIDE RAIL is a
+ *  region with role navigation/complementary/banner (or tag aside/nav) whose
+ *  widthRatio is in [SIDE_RAIL_MIN_FRAC, SIDE_RAIL_MAX_FRAC] AND that has a
+ *  main/article sibling in the skeleton. Pure structural — no domain logic, no
+ *  aesthetic lookup. The Architect is required to address each (op or grid change)
+ *  or verify's reflowSkipped gate fails the run. */
+function detectReflowOpportunity(clusters: Cluster[]): { kind: 'side-rail'; handle: string }[] {
+  const out: { kind: 'side-rail'; handle: string }[] = [];
+  const hasMain = clusters.some((c) => c.role === 'main' || c.role === 'article' || c.tag === 'main' || c.tag === 'article');
+  if (!hasMain) return out;       // no main content → no side-rail relationship
+  const seen = new Set<string>();
+  for (const c of clusters) {
+    if (seen.has(c.handle)) continue;
+    const isRailRole = c.role === 'navigation' || c.role === 'complementary' || c.role === 'banner' || c.tag === 'aside' || c.tag === 'nav';
+    if (!isRailRole) continue;
+    const frac = c.layout.widthRatio;
+    if (frac < SIDE_RAIL_MIN_FRAC || frac > SIDE_RAIL_MAX_FRAC) continue;
+    seen.add(c.handle);
+    out.push({ kind: 'side-rail', handle: c.handle });
+  }
+  return out;
 }
 
 /** Detect scrollable containers among stamped clusters (req D). A page can have
@@ -288,7 +368,7 @@ function findScrollables(clusters: Cluster[]): { handle: string; axis: 'x' | 'y'
     const el = document.querySelector(cl.selector) as HTMLElement | null;
     if (!el) continue;
     const r = el.getBoundingClientRect();
-    if (r.width < 100 || r.height < 100) continue;       // ponytail: skip tiny overflow clips
+    if (r.width < 100 || r.height < 100) continue;       // skip tiny overflow clips
     const cs = getComputedStyle(el);
     const sx = cs.overflowX === 'auto' || cs.overflowX === 'scroll';
     const sy = cs.overflowY === 'auto' || cs.overflowY === 'scroll';
@@ -330,6 +410,9 @@ function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): 
       hasSolidBg: rep.hasSolidBg, rect: rep.rect, samples, style: rep.style,
       layout: placeholderLayout(rep, vpW), prominence, widthFractionOfParent: 1,
       emptinessScore: 0, moveSafety: 'safe', sourceOrder: 0, _members: members,
+      // Phase 1 design-role fields — set by enrichSemantic after stamping (needs the
+      // live representative's signals). Defaults until then.
+      designRole: 'ad-or-void', designRoleConfidence: 0, dominanceRank: 0, group: null,
     });
   }
 
@@ -405,13 +488,25 @@ function enrichLayout(cluster: Cluster, rep: Candidate, _vpW: number): void {
   } else {
     cluster.widthFractionOfParent = 1;
   }
+  // Sibling gap: the vertical space between this element and the next visible
+  // sibling. Feeds the design-token spacing scale (Phase 3's spacingScale, now
+  // populated here). vertical gap only — the common case (stacked
+  // siblings); horizontal gaps in row flows can be added when a density case
+  // proves them needed.
+  const thisRect = rep.el.getBoundingClientRect();
+  let next: Element | null = rep.el.nextElementSibling;
+  while (next && (!(next instanceof HTMLElement) || next.getBoundingClientRect().height <= 1)) next = next.nextElementSibling;
+  if (next instanceof HTMLElement) {
+    const gap = Math.round(next.getBoundingClientRect().top - thisRect.bottom);
+    if (gap >= 0) cluster.layout.siblingGapPx = gap;
+  }
 }
 
 /** Emptiness: how much of the cluster's painted area is real text/media vs dead
  *  space. A large box with short text and no background image scores near 1
  *  (the empty-capsule / dead-band failures). Pure-ish: reads rect + samples +
  *  hasBgImage — no per-pixel scan. 0 = content-dense, 1 = empty. */
-const EMPTINESS_TEXT_CHARS_PER_KPX = 8; // ponytail: ~8 chars/kpx² of box = "has real content"; a coarse content-density heuristic, recalibrate from the grid.
+const EMPTINESS_TEXT_CHARS_PER_KPX = 8; // ~8 chars/kpx² of box = "has real content"; a coarse content-density heuristic, recalibrate from the grid.
 
 function computeEmptiness(cluster: Cluster): number {
   const areaKpx = (cluster.rect.w * cluster.rect.h) / 1000;
@@ -428,7 +523,7 @@ function computeEmptiness(cluster: Cluster): number {
   // Content-density: chars per kpx². Below the threshold = sparse → high emptiness.
   const density = textLen / areaKpx;
   // Map density → emptiness (inverse, floored at 0, ceiling 1).
-  // ponytail: a linear inverse is a coarse heuristic — the void detector +
+  // a linear inverse is a coarse heuristic — the void detector +
   // pixel scan are the real gate; this is the model's advisory score.
   return Math.max(0, Math.min(1, 1 - density / EMPTINESS_TEXT_CHARS_PER_KPX));
 }
@@ -463,6 +558,109 @@ function enrichSafety(cluster: Cluster, rep: Candidate): void {
     depth++;
   }
   cluster.moveSafety = 'safe';
+}
+
+// ── Phase 1 — semantic enrichment (design role + dominance + grouping) ───
+
+/** The design-role classifier needs a representative element per cluster to read
+ *  the signals (text length, link count, heading level, position, class tokens).
+ *  One representative per handle (the first stamped member). The signals are
+ *  generic and site-agnostic; the pure classifier lives in ./semantic.ts. */
+function representativeFor(cluster: Cluster): HTMLElement | null {
+  const el = document.querySelector<HTMLElement>(cluster.selector);
+  return el;
+}
+
+/** Gather the deterministic, generic signals for one cluster from its live
+ *  representative. Zero site-specific rules — the class/id tokens (nav/search/
+ *  comment/footer…) are universal conventions, not site recipes; geometric + text
+ *  signals are the fallback when tokens don't match. */
+function gatherSignals(cluster: Cluster, el: HTMLElement, viewport: { w: number; h: number }): ClusterSignals {
+  const rect = el.getBoundingClientRect();
+  const textLen = (el.textContent || '').replace(/\s+/g, ' ').trim().length;
+  const linkCount = el.querySelectorAll('a[href]').length;
+  // Heading level: the cluster's own tag if it's a heading, else the deepest heading inside.
+  let headingLevel: number | null = null;
+  const tag = el.tagName.toLowerCase();
+  const hMatch = tag.match(/^h([1-6])$/);
+  if (hMatch) headingLevel = parseInt(hMatch[1], 10);
+  const innerHeadings = el.querySelectorAll('h1, h2, h3, h4, h5, h6');
+  const hasHeading = innerHeadings.length > 0 || headingLevel != null;
+  if (headingLevel == null && innerHeadings.length) {
+    // The shallowest heading inside = the cluster's effective level.
+    let shallowest = 6;
+    for (const h of Array.from(innerHeadings)) {
+      const m = h.tagName.toLowerCase().match(/^h([1-6])$/);
+      if (m) shallowest = Math.min(shallowest, parseInt(m[1], 10));
+    }
+    headingLevel = shallowest;
+  }
+  const cs = getComputedStyle(el);
+  const classTokens = ((el.id || '') + ' ' + (typeof el.className === 'string' ? el.className : '')).toLowerCase();
+  const fontSize = parseFloat(cs.fontSize) || 16;
+  return {
+    ariaRole: cluster.role,
+    tag,
+    textLen,
+    linkCount,
+    headingLevel,
+    hasHeading,
+    rectX: rect.x, rectY: rect.y, rectW: rect.width, rectH: rect.height,
+    widthRatio: cluster.layout.widthRatio,
+    count: cluster.count,
+    classTokens,
+    emptinessScore: cluster.emptinessScore,
+    hasBgImage: cluster.style.hasBgImage,
+    fontSize,
+    isNativeControl: cluster.isNativeControl,
+    hasSolidBg: cluster.hasSolidBg,
+  };
+}
+
+/** Phase 1 enrichment: for each cluster, gather signals, classify onto the closed
+ *  design-role vocabulary, rank dominance, and assign a sibling-group id. Mutates the
+ *  clusters in place (sets designRole/designRoleConfidence/dominanceRank/group).
+ *  Returns the ranked+positioned regions the composition summary needs. */
+function enrichSemantic(clusters: Cluster[], viewport: { w: number; h: number }): { handle: string; role: DesignRole; rank: number; rectX: number; rectY: number; widthRatio: number }[] {
+  const ctx: PageContext = { viewport };
+  const ranked: { handle: string; role: DesignRole; rank: number; rectX: number; rectY: number; widthRatio: number }[] = [];
+  for (const cluster of clusters) {
+    const el = representativeFor(cluster);
+    // Default to ad-or-void/0 confidence if the representative vanished (an op removed
+    // it, or the stamp didn't take) — the classifier never throws, and a vanished
+    // cluster has no signals to classify.
+    if (!el) {
+      cluster.designRole = 'ad-or-void';
+      cluster.designRoleConfidence = 0;
+      cluster.dominanceRank = 0;
+      cluster.group = null;
+      continue;
+    }
+    const signals = gatherSignals(cluster, el, viewport);
+    const cls = classifyRole(signals, ctx);
+    cluster.designRole = cls.role;
+    cluster.designRoleConfidence = cls.confidence;
+    const cs = getComputedStyle(el);
+    cluster.dominanceRank = rankDominance({
+      rectX: signals.rectX, rectY: signals.rectY, rectW: signals.rectW, rectH: signals.rectH,
+      widthRatio: cluster.layout.widthRatio,
+      hasSolidBg: cluster.hasSolidBg,
+      hasBorder: cluster.style.border !== 'none',
+      hasShadow: cs.boxShadow !== 'none',
+      fontSize: signals.fontSize,
+      isColorful: colorfulness(parseColor(cluster.style.background) ?? [0, 0, 0, 0]) > 0.1,
+    }, viewport);
+    ranked.push({ handle: cluster.handle, role: cluster.designRole, rank: cluster.dominanceRank, rectX: signals.rectX, rectY: signals.rectY, widthRatio: cluster.layout.widthRatio });
+  }
+  // Sibling grouping — clusters that read as one unit (a row of cards, a stack of
+  // nav links). detectGrouping is pure; feed it the stamped positions + parentage.
+  const groupMap = detectGrouping(clusters.map((c) => {
+    const el = representativeFor(c);
+    const r = el ? el.getBoundingClientRect() : new DOMRect();
+    return { handle: c.handle, parentHandle: c.layout.parentHandle, rectX: r.x, rectY: r.y, rectW: r.width, rectH: r.height };
+  }));
+  for (const c of clusters) c.group = groupMap.get(c.handle) ?? null;
+  return ranked;
 }
 
 /** Coarsened signature: 4px buckets for size, 8-step quantize for colors.
@@ -714,10 +912,81 @@ export function clearHandles(): void {
 
 // ── Serialize for the AI — hierarchical tree, two-tier detail ───────
 
+// ── Design tokens (Phase 3: deterministic scale extraction) ──────────
+
+export interface DesignTokens {
+  typeScale: { px: number; role: string }[];
+  palette: { dominantBg: string; accents: string[]; textColors: string[] };
+  // spacingScale — distinct sibling gaps quantized to 8px (the design
+  // 8pt grid). Phase 4 populates this from cluster.layout.siblingGapPx.
+  spacingScale: number[];
+}
+
+/** Extract a compact design-token summary from the perception — the page's type
+ *  scale (px → role), palette (dominant bg, accent candidates, text colors), and
+ *  spacing scale. Pure: takes Perception as data, no DOM access. Feeds a compact
+ *  DESIGN TOKENS block into the design prompt so the model works with the page's
+ *  actual systematic scale (not per-cluster ad hoc values), constraining the
+ *  choice-space (a quality guard) and trimming redundant per-cluster font strings
+ *  (a token/speed win). */
+export function extractDesignTokens(p: Perception): DesignTokens {
+  // Type scale: collect fontSize values, classify by frequency + size.
+  const fontSizes = new Map<number, number>();
+  for (const c of p.clusters) {
+    const px = parseFloat(c.style.fontSize);
+    if (!isNaN(px) && px > 0) fontSizes.set(px, (fontSizes.get(px) ?? 0) + 1);
+  }
+  const sortedSizes = [...fontSizes.entries()].sort((a, b) => a[0] - b[0]);
+  const bodyPx = sortedSizes.length ? sortedSizes.reduce((a, b) => a[1] >= b[1] ? a : b)[0] : 16;
+  const typeScale = sortedSizes.map(([px]) => ({
+    px,
+    role: px < bodyPx - 1 ? 'small' : px <= bodyPx + 1 ? 'body' : px < bodyPx * 1.5 ? 'heading' : 'display',
+  }));
+
+  // Palette: dominant bg (canvas), accent candidates (colorful solid-bg clusters),
+  // text colors. Reuses the shared colorfulness + parseColor (one color parser).
+  const dominantBg = short(p.canvas.bg);
+  const textColors = new Set<string>();
+  for (const c of p.clusters) if (c.style.color) textColors.add(short(c.style.color));
+  const accents = p.clusters
+    .filter((c) => c.hasSolidBg)
+    .map((c) => ({ color: short(c.style.background), parsed: parseColor(c.style.background) }))
+    .filter((c) => c.parsed && c.color !== dominantBg && colorfulness(c.parsed) > 0.1)
+    .sort((a, b) => colorfulness(b.parsed!) - colorfulness(a.parsed!))
+    .slice(0, 5)
+    .map((c) => c.color);
+
+  // Spacing scale: distinct sibling gaps quantized to 8px (the design 8pt grid).
+  const gapSet = new Set<number>();
+  for (const c of p.clusters) {
+    if (c.layout.siblingGapPx != null && c.layout.siblingGapPx > 0) {
+      gapSet.add(Math.round(c.layout.siblingGapPx / 8) * 8);
+    }
+  }
+  const spacingScale = [...gapSet].sort((a, b) => a - b).slice(0, 6);
+
+  return { typeScale, palette: { dominantBg, accents, textColors: [...textColors].slice(0, 5) }, spacingScale };
+}
+
+function formatDesignTokens(tokens: DesignTokens): string {
+  const lines: string[] = ['DESIGN TOKENS:'];
+  if (tokens.typeScale.length) lines.push('  type: ' + tokens.typeScale.map((t) => `${t.px}px=${t.role}`).join(', '));
+  lines.push(`  canvas: ${tokens.palette.dominantBg}`);
+  if (tokens.palette.accents.length) lines.push('  accents: ' + tokens.palette.accents.join(', '));
+  if (tokens.palette.textColors.length) lines.push('  text: ' + tokens.palette.textColors.join(', '));
+  if (tokens.spacingScale.length) lines.push('  spacing: ' + tokens.spacingScale.map((g) => `${g}px`).join(', '));
+  return lines.join('\n');
+}
+
 export function serializePerception(p: Perception): string {
   const header: string[] = [];
   header.push(`PAGE ${p.viewport.w}x${p.viewport.h} site:${p.site.host} "${p.site.title}" bg:${short(p.canvas.bg)} text:${short(p.canvas.color)} font:${p.canvas.fontFamily} ${p.canvas.fontSize}`);
   header.push(`COLS ${p.skeleton.columnCount} CONTENT ${p.skeleton.contentMaxWidthPx ?? '?'}px`);
+  // Phase 1 — the COMPOSITION summary: the page's macro shape, UP FRONT, before any
+  // node. The model sees what the page IS (article-body dominant + top nav + right
+  // rail) before it reads a single rectangle. This is the senior-dev fix: the model
+  // was rediscovering the page's meaning each run; now the page's meaning is stated.
+  header.push(`COMPOSITION ${p.composition.summary}`);
   if (p.skeleton.regions.length) {
     header.push('REGIONS ' + p.skeleton.regions.map((r) => `${r.handle}=${r.role}(${Math.round(r.widthRatio * 100)}%w,${r.rect.w}x${r.rect.h})`).join(' '));
   }
@@ -727,6 +996,14 @@ export function serializePerception(p: Perception): string {
   if (p.scrollables.length) {
     header.push('SCROLLABLES ' + p.scrollables.map((s) => `${s.handle}=${s.axis}`).join(' '));
   }
+  if (p.reflowOpportunity.length) {
+    header.push('REFLOW ' + p.reflowOpportunity.map((r) => `${r.kind}:${r.handle}`).join(' '));
+  }
+
+  // Design tokens: a compact scale summary (type scale + palette) prepended to the
+  // serialized perception. The model sees the page's systematic scale up front and
+  // the per-cluster lines drop the redundant font-family (it's in the header + tokens).
+  header.push(formatDesignTokens(extractDesignTokens(p)));
 
   // Two-tier: top N by prominence get full detail; rest get compact one-liners.
   const byProminence = [...p.clusters].sort((a, b) => b.prominence - a.prominence);
@@ -802,7 +1079,14 @@ export function serializePerception(p: Perception): string {
 
 function formatFull(c: Cluster): string {
   const L = c.layout;
-  const parts = [
+  // Phase 1 — the DESIGN ROLE leads the line (the PRIMARY representation). The
+  // handle + geometry + colors follow as ATTRIBUTES. The ARIA role stays as a
+  // secondary signal (in <tag>); the design role is the contract. Group + dominance
+  // are designer signals the old serialization omitted. Inverted from the old
+  // `${handle} <tag> role` lead — the model reasons about WHAT (a nav-primary) not
+  // WHICH (handle c1a2b3).
+  const parts: string[] = [
+    `${c.designRole}${c.group ? '@' + c.group : ''} dom${Math.round(c.dominanceRank * 10)}`,
     `${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
     `${c.rect.w}x${c.rect.h} ${Math.round(L.widthRatio * 100)}%w ${Math.round(c.widthFractionOfParent * 100)}%ofP`,
     `${L.display}${L.isContainer ? '/container' : ''}`,
@@ -810,11 +1094,16 @@ function formatFull(c: Cluster): string {
   ];
   if (c.style.border !== 'none') parts.push(`border:${short(c.style.border)}`);
   if (c.style.borderRadius !== '0px') parts.push(`r:${c.style.borderRadius}`);
-  parts.push(`font:${c.style.fontFamily}/${c.style.fontSize}/${c.style.fontWeight}`);
+  // Font family is in the PAGE header + DESIGN TOKENS; per-cluster keeps just size/weight.
+  parts.push(`font:${c.style.fontSize}/${c.style.fontWeight}`);
   if (c.isNativeControl) parts.push('[native]');
-  if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) parts.push('[image]');
+  if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) {
+    parts.push('[image]');
+    if (c.style.naturalAspect) parts.push(`aspect:${c.style.naturalAspect}`);
+  }
   if (L.isPassiveWrapper) parts.push('[passive]');
   if (L.isOpaqueWrapper) parts.push('[opaque]');
+  if (L.siblingGapPx != null && L.siblingGapPx > 0) parts.push(`gap:${L.siblingGapPx}px`);
   // Structural op cues (advisory for the Architect). Compact: only when the
   // signal is actionable — a near-empty cluster (remove candidate) or a non-safe
   // move target. Keeps the serialize budget on large pages.
@@ -826,12 +1115,17 @@ function formatFull(c: Cluster): string {
 }
 
 function formatCompact(c: Cluster): string {
+  // Phase 1 — the DESIGN ROLE leads even the compact line. The handle + geometry
+  // follow; the design role is the backbone the model reads at a glance.
   const parts = [
-    `${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
+    `${c.designRole} ${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
     `${c.rect.w}x${c.rect.h} ${Math.round(c.layout.widthRatio * 100)}%w`,
   ];
   if (c.hasSolidBg) parts.push(`bg:${short(c.style.background)}`);
-  if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) parts.push('[image]');
+  if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) {
+    parts.push('[image]');
+    if (c.style.naturalAspect) parts.push(`aspect:${c.style.naturalAspect}`);
+  }
   // Near-empty cue in compact too (so demoted clusters still flag the op).
   if (c.emptinessScore >= 0.6) parts.push(`empty${Math.round(c.emptinessScore * 10)}`);
   return parts.join(' ');
