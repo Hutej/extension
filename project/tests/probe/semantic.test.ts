@@ -13,7 +13,7 @@ function sig(partial: Partial<ClusterSignals>): ClusterSignals {
     ariaRole: null, tag: 'div', textLen: 0, linkCount: 0, headingLevel: null,
     hasHeading: false, rectX: 0, rectY: 0, rectW: 100, rectH: 100, widthRatio: 0.1,
     count: 1, classTokens: '', emptinessScore: 0, hasBgImage: false, fontSize: 16,
-    isNativeControl: false, hasSolidBg: false,
+    isNativeControl: false, hasSolidBg: false, codeHint: false, inArticleFlow: false,
     ...partial,
   };
 }
@@ -56,6 +56,31 @@ assert(classifyRole(sig({ classTokens: 'ad-slot sponsor', textLen: 0, widthRatio
 
 // comments: comment token.
 assert(classifyRole(sig({ classTokens: 'comment-section', textLen: 800, widthRatio: 0.8, rectW: 1024, rectH: 600 }), ctx).role === 'comments', 'comment token → comments');
+
+// Phase 2 — the code-example trap: a bare <pre> without a figure parent, text-less
+// + image-less, in article flow with real height, must classify media, NOT ad-or-void.
+// (gatherSignals sets codeHint=true for a <pre>; the classifier reads it.)
+const codePre = classifyRole(sig({ tag: 'pre', codeHint: true, textLen: 0, hasBgImage: false, rectH: 240, widthRatio: 0.6, rectW: 768, inArticleFlow: true }), ctx);
+assert(codePre.role === 'media', 'bare <pre> in article flow → media, not ad-or-void (the MDN code-example trap)');
+assert(codePre.role !== 'ad-or-void', 'code block never ad-or-void');
+// A codeHint by class token alone (a div with class="code-example", in flow).
+assert(classifyRole(sig({ classTokens: 'example code-example', codeHint: true, textLen: 0, rectH: 120, widthRatio: 0.5, rectW: 640, inArticleFlow: true }), ctx).role === 'media', 'code-hint class token in flow → media');
+// A text-less+image-less block in article flow with real height but NO code hint
+// is still content material, not a void (the trap's broader form).
+assert(classifyRole(sig({ tag: 'div', textLen: 0, hasBgImage: false, rectH: 200, widthRatio: 0.5, rectW: 640, inArticleFlow: true }), ctx).role !== 'ad-or-void', 'real-height in-flow block not ad-or-void');
+// A genuine ad token still wins ad-or-void even in flow (the void token beats the contentBlock guard).
+assert(classifyRole(sig({ classTokens: 'ad-slot', textLen: 0, hasBgImage: false, rectH: 200, widthRatio: 0.5, rectW: 640, inArticleFlow: true }), ctx).role === 'ad-or-void', 'ad token in flow still ad-or-void');
+// A near-empty text-less image-less block (the real MDN voids: h≈0, high emptiness)
+// out of flow with an ad token stays ad-or-void.
+assert(classifyRole(sig({ classTokens: 'ad-slot', textLen: 0, hasBgImage: false, rectH: 0, emptinessScore: 0.9, widthRatio: 0.4, rectW: 512 }), ctx).role === 'ad-or-void', 'near-empty ad-slot out of flow → ad-or-void');
+
+// Phase 2 — page-title: a short top nav span/link must NOT win page-title. The
+// BBC/GitHub trap: "Pricing"/"Sign in" (4-7 chars at 16px) stole page-title@0.3.
+assert(classifyRole(sig({ tag: 'a', textLen: 7, fontSize: 16, rectY: 0, rectH: 32, widthRatio: 0.05 }), ctx).role !== 'page-title', 'short 16px nav link not page-title');
+// The real page title (h1, large) still wins.
+assert(classifyRole(sig({ tag: 'h1', headingLevel: 1, textLen: 30, fontSize: 32, rectY: 0, rectH: 48, widthRatio: 0.9, rectW: 1152 }), ctx).role === 'page-title', 'real h1 still page-title');
+// A large non-h1 display heading (a styled div title, ≥20px) can be page-title.
+assert(classifyRole(sig({ tag: 'div', textLen: 20, fontSize: 28, rectY: 0, rectH: 60, widthRatio: 0.9, rectW: 1152 }), ctx).role === 'page-title', 'large display-type div can be page-title');
 
 // Dominance: a large top region ranks higher than a small buried one.
 const big = rankDominance({ rectX: 0, rectY: 0, rectW: 1280, rectH: 400, widthRatio: 1, hasSolidBg: true, hasBorder: true, hasShadow: true, fontSize: 24, isColorful: true }, ctx.viewport);

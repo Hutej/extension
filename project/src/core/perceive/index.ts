@@ -598,6 +598,23 @@ function gatherSignals(cluster: Cluster, el: HTMLElement, viewport: { w: number;
   const cs = getComputedStyle(el);
   const classTokens = ((el.id || '') + ' ' + (typeof el.className === 'string' ? el.className : '')).toLowerCase();
   const fontSize = parseFloat(cs.fontSize) || 16;
+  // Phase 2 — codeHint: the cluster IS or CONTAINS a code block. Universal
+  // convention tokens (code/syntax/highlight/brush/example) — not a site recipe.
+  const codeHint = tag === 'pre' || tag === 'code' ||
+    /\b(pre|code|syntax|highlight|brush|example)\b/.test(classTokens) ||
+    el.querySelector('pre, code, .syntaxhighlight, [class*="highlight"], [class*="code"]') != null;
+  // Phase 2 — inArticleFlow: the cluster sits inside a main/article region. A
+  // text-less+image-less block with real height in article flow is content, not
+  // a void (the MDN code-example trap).
+  let inArticleFlow = false;
+  let p: Element | null = el.parentElement;
+  let hops = 0;
+  while (p && hops < 16) {
+    const r = p.getAttribute('role') || p.tagName.toLowerCase();
+    if (r === 'article' || r === 'main') { inArticleFlow = true; break; }
+    p = p.parentElement;
+    hops++;
+  }
   return {
     ariaRole: cluster.role,
     tag,
@@ -614,6 +631,8 @@ function gatherSignals(cluster: Cluster, el: HTMLElement, viewport: { w: number;
     fontSize,
     isNativeControl: cluster.isNativeControl,
     hasSolidBg: cluster.hasSolidBg,
+    codeHint,
+    inArticleFlow,
   };
 }
 

@@ -41,6 +41,12 @@ export interface OpValidationResult {
  *  content — refuse. The empty-capsule / dead-band failures score ~0.9+. */
 export const REMOVE_EMPTINESS_FLOOR = 0.6;
 
+/** HARD SAFETY RULE (Phase 2, permanent): a destructive op (remove) is FORBIDDEN
+ *  on any role below the confidence threshold — the classifier is < 0.5 sure what
+ *  this region is, so collapsing it risks removing content it misread. A confident
+ *  ad-or-void stays removable (subject to the emptiness floor below). */
+export const DESTRUCTIVE_CONFIDENCE_FLOOR = 0.5;
+
 /**
  * Validate the op set against guard laws. Pure. Returns the accepted ops + the
  * refusals (compile logs refusals like droppedProps). Idempotency (skip-if-
@@ -116,6 +122,9 @@ function refuseRemove(c: Cluster): string | null {
   if (c.layout.isOpaqueWrapper) return 'opaque-wrapper';
   if (c.rect.h > 300) return 'tall-content';
   if (c.count > 40) return 'repeated-content';
+  // HARD SAFETY RULE: refuse remove on an uncertain role (< 0.5 confidence) — the
+  // classifier isn't sure what this is, so collapsing it could delete misread content.
+  if (c.designRoleConfidence < DESTRUCTIVE_CONFIDENCE_FLOOR) return 'low-confidence-role';
   if ((c.emptinessScore ?? 0) < REMOVE_EMPTINESS_FLOOR) return 'not-empty';
   return null;
 }

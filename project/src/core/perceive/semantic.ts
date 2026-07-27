@@ -50,6 +50,15 @@ export interface ClusterSignals {
   fontSize: number;               // px
   isNativeControl: boolean;
   hasSolidBg: boolean;
+  /** Phase 2 — the cluster IS or CONTAINS a code block: a <pre>/<code>/syntax-
+   *  highlight element, or a class/id token like 'code'/'syntax'/'highlight'.
+   *  A text-less+image-less code container must classify as media, never ad-or-void
+   *  (the MDN code-example trap). Universal convention, not a site recipe. */
+  codeHint: boolean;
+  /** Phase 2 — the cluster sits inside article flow (a main/article ancestor). A
+   *  text-less+image-less block with real height in article flow is content, not a
+   *  void — it classifies as media, never ad-or-void. */
+  inArticleFlow: boolean;
 }
 
 export interface PageContext {
@@ -81,12 +90,18 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
 
   const scores: Partial<Record<DesignRole, number>> = {};
 
-  // page-title: the page's primary heading — an h1, large, top, short.
-  scores['page-title'] =
-    (s.headingLevel === 1 ? 0.5 : 0) +
-    (s.fontSize >= 24 ? 0.2 : 0) +
-    (isTop ? 0.2 : 0) +
-    (textLen < 120 ? 0.1 : 0);
+  // page-title: the page's primary heading — an h1, large, top, short. A short
+  // top nav span/link ("Pricing", "Sign in", 4-7 chars at 16px) must NOT win
+  // this — a page title is DISPLAY type. A non-h1 cluster needs large type
+  // (≥20px) to score at all; without it the 0.3 from isTop+short would steal
+  // page-title from the real h1 on GitHub/BBC.
+  const isPageTitleShape = s.headingLevel === 1 || s.fontSize >= 20;
+  scores['page-title'] = isPageTitleShape
+    ? (s.headingLevel === 1 ? 0.5 : 0) +
+      (s.fontSize >= 24 ? 0.2 : 0) +
+      (isTop ? 0.2 : 0) +
+      (textLen < 120 ? 0.1 : 0)
+    : 0;
 
   // article-body: the main prose — main/article role OR high text + low link density.
   scores['article-body'] =
@@ -149,10 +164,16 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
     (s.fontSize < 13 && textLen < 60 && s.rectH < 40 ? 0.3 : 0) +
     (hasMetaToken && s.rectH < 60 ? 0.2 : 0);
 
-  // media: image/video/figure — media tag, or a content-image bg, little text.
+  // media: image/video/figure — media tag, or a content-image bg, little text. A
+  // code block (pre/code/syntax-highlight, text-less + image-less) reads as media
+  // too — code is content material, not a void (the MDN code-example trap: a bare
+  // <pre> without a figure parent scored ad-or-void because it carried no text the
+  // classifier sampled and no image). Boost media so it beats ad-or-void here.
+  const codeScore = s.codeHint ? 0.5 : 0;
   scores['media'] =
     (mediaTag ? 0.6 : 0) +
     (s.hasBgImage ? 0.4 : 0) +
+    codeScore +
     (textLen < 40 ? 0.1 : 0);
 
   // listing: a repeated list of items — count > 2, list/listitem role. A repeated
@@ -177,11 +198,27 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
     (textLen < 300 ? 0.1 : 0);
 
   // ad-or-void: ad slots or empty/decorative — ad/sponsor/promo tokens, emptiness,
-  // or a large text-less image-less region.
-  scores['ad-or-void'] =
-    (has(/(advert|\bad\b|sponsor|promo)/) ? 0.5 : 0) +
-    (s.emptinessScore >= 0.7 ? 0.3 : s.emptinessScore >= 0.5 ? 0.2 : 0) +
-    (textLen < 10 && !s.hasBgImage && s.widthRatio > 0.3 ? 0.2 : 0);
+  // or a large text-less image-less region. GUARDED: a code container (pre/code/
+  // syntax) or a text-less+image-less block with REAL height inside article flow is
+  // content material, NOT a void — it must classify media/article-body, never
+  // ad-or-void (the MDN code-example trap). Suppress the void score in those cases —
+  // EXCEPT a genuine void TOKEN (ad/sponsor/promo) wins regardless: an explicit ad
+  // slot is a void even in article flow.
+  const realHeight = s.rectH >= 60;
+  const voidToken = has(/(advert|\bad\b|sponsor|promo)/);
+  const isContentBlock = s.codeHint || (s.inArticleFlow && realHeight);
+  if (voidToken) {
+    // A genuine void TOKEN is a decisive signal — 0.6 beats the geometric ties
+    // (toolbar/nav-primary at 0.4-0.5) the ad-or-void role would otherwise lose to
+    // on DESIGN_ROLES tie-break order (ad-or-void is last in the array).
+    scores['ad-or-void'] = 0.6 + (s.emptinessScore >= 0.7 ? 0.2 : s.emptinessScore >= 0.5 ? 0.1 : 0);
+  } else if (isContentBlock) {
+    scores['ad-or-void'] = 0;
+  } else {
+    scores['ad-or-void'] =
+      (s.emptinessScore >= 0.7 ? 0.5 : s.emptinessScore >= 0.5 ? 0.3 : 0) +
+      (textLen < 10 && !s.hasBgImage && s.widthRatio > 0.3 ? 0.2 : 0);
+  }
 
   // Pick the highest-scoring role. Ties broken by the order in DESIGN_ROLES (stable).
   let best: DesignRole = 'ad-or-void';

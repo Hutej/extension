@@ -548,12 +548,25 @@ function planAccentKeep(spec: DesignSpec, byHandle: Map<string, Cluster>, percep
  * guarded removal of peripheral chrome. Never primary content, never wrappers
  * (they contain the page), never page-scale containers or huge repeated
  * clusters (likely content lists).
+ *
+ * HARD SAFETY RULE (Phase 2, permanent): a destructive intent (hide) is
+ * FORBIDDEN on any role below the confidence threshold — the classifier is less
+ * than coin-flip sure what this region is, so deleting it risks removing content
+ * it misread. Low-confidence roles get conservative treatment only. The
+ * threshold (0.5) is the value below which a role is "uncertain"; a confident
+ * ad-or-void/nav-chrome stays hideable. Enforced here (the expander), not just
+ * the prompt.
  */
+const DESTRUCTIVE_CONFIDENCE_FLOOR = 0.5;
 function hideRefusal(c: Cluster): string | null {
   if (c.role === 'main' || c.role === 'article') return 'primary-content';
   if (c.layout.isPassiveWrapper || c.layout.isOpaqueWrapper) return 'wrapper';
   if (c.layout.widthRatio >= MAX_HIDDEN_WIDTH_RATIO && c.rect.h > MAX_HIDDEN_HEIGHT_PX) return 'page-scale';
   if (c.rect.h > 300) return 'tall-content'; // content sections are tall; chrome is short
+  // Confidence gate: refuse hide on an uncertain role (the classifier is < 0.5
+  // sure what this is). The one role hide exists to prune — ad-or-void — is only
+  // hideable when the classifier is confident it's really a void/ad.
+  if (c.designRoleConfidence < DESTRUCTIVE_CONFIDENCE_FLOOR) return 'low-confidence-role';
   if (c.count > MAX_HIDDEN_MEMBERS) return 'repeated-content';
   return null;
 }
