@@ -11,13 +11,14 @@
  *     repaint derived from the canvas (not just ≤12 skeleton regions)
  */
 
-import type { DesignSpec, StyleDecls, LayoutDecls } from '../spec';
+import type { DesignSpec, DesignRule, StyleDecls, LayoutDecls } from '../spec';
 import type { Perception, Cluster } from '../perceive';
 import { buildDeclarations } from '../capabilities/style/index.ts';
 import { buildLayoutDeclarations } from '../capabilities/structure/index.ts';
 import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, luminanceCompatible, fluidizeRawPxSizing, MIN_CHARS_PER_LINE, MIN_CONTENT_WIDTH_FRACTION, MIN_COMPONENT_WIDTH_FRACTION, COMPONENT_WIDE_FRACTION } from '../laws/index.ts';
 import { parseColor, colorfulness, pickReadableText, extractGradientStops, pickReadableTextForGradient } from '../../shared/color.ts';
 import { validateOps, type ValidatedOp } from '../ops/index.ts';
+import { expandIntents } from './expand.ts';
 
 export interface CompileOptions {
   forceContrast?: boolean;
@@ -48,11 +49,23 @@ export interface CompileResult {
   /** Structural ops accepted by the guard laws (content.ts executes them live).
    *  Refused ops are in droppedProps as `kind(target:reason)`. */
   ops: ValidatedOp[];
+  /** Phase 2 — handles the model ALSO gave raw rules for (the escape hatch).
+   *  Logged loudly; the count + the FRACTION = the vocabulary-gap metric. */
+  escapeHatchUses?: string[];
+  escapeHatchFraction?: number;
+  /** Phase 2 — every handle the intents resolved to (the expander's allTargets).
+   *  The model coverage gate + the escape-hatch denominator count these — Phase 2
+   *  moved the model's output from raw rules to intents, so pre-expansion spec.rules
+   *  (the raw escape-hatch only) undercount what the model addressed. */
+  expandedTargets?: string[];
+  /** Phase 2 — the expander's per-intent notes (refusals, topbar/collapse
+   *  derivations). Surfaced on the run report. */
+  expandNotes?: string[];
 }
 
 const PADDING_KEYS = ['padding', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'];
 
-export function compileSpec(spec: DesignSpec, perception: Perception, opts: CompileOptions = {}): CompileResult {
+export function compileSpec(specIn: DesignSpec, perception: Perception, opts: CompileOptions = {}): CompileResult {
   const byHandle = new Map<string, Cluster>();
   for (const c of perception.clusters) byHandle.set(c.handle, c);
 
@@ -61,6 +74,61 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
   const droppedProps: string[] = [];
   let rulesEmitted = 0;
   let baseCoatCount = 0;
+
+  // Phase 2 — the expander: if the spec has intents (the primary model output),
+  // map intents + the pack + the Phase 1 semantic graph to concrete
+  // rules/composition/ops. Merge with the spec's raw escape-hatch rules (raw
+  // wins per-handle — the escape hatch is the model's explicit override). The
+  // expander is pure, deterministic, free (0 model calls).
+  let escapeHatchUses: string[] = [];
+  let escapeHatchFraction = 0;
+  let expandNotes: string[] = [];
+  let expandedTargets: string[] = [];
+  let spec = specIn;
+  if (specIn.intents && specIn.intents.length) {
+    const exp = expandIntents(specIn, perception);
+    escapeHatchUses = exp.escapeHatchUses;
+    escapeHatchFraction = exp.escapeHatchFraction;
+    expandNotes = exp.notes;
+    expandedTargets = exp.expandedTargets;
+    // Merge: expanded rules are the base; raw escape-hatch rules override per
+    // handle (the model's explicit low-level override beats the derived intent).
+    const rulesByHandle = new Map<string, DesignRule>();
+    for (const r of exp.rules) rulesByHandle.set(r.target, { ...r });
+    for (const r of specIn.rules) {
+      const existing = rulesByHandle.get(r.target);
+      if (existing) {
+        // Raw wins: the escape hatch overrides the expanded intent on its handle.
+        if (r.styles) existing.styles = { ...(existing.styles ?? {}), ...r.styles };
+        if (r.layout) existing.layout = { ...(existing.layout ?? {}), ...r.layout };
+        if (r.hover) existing.hover = { ...r.hover };
+        if (r.focusVisible) existing.focusVisible = { ...r.focusVisible };
+        if (r.hide) existing.hide = true;
+      } else {
+        rulesByHandle.set(r.target, { ...r });
+      }
+    }
+    // Composition: expanded composition is the base; raw composition overrides.
+    const compByHandle = new Map<string, DesignRule>();
+    for (const r of exp.composition) compByHandle.set(r.target, { ...r });
+    if (specIn.composition) for (const r of specIn.composition) {
+      const existing = compByHandle.get(r.target);
+      if (existing) {
+        if (r.styles) existing.styles = { ...(existing.styles ?? {}), ...r.styles };
+        if (r.layout) existing.layout = { ...(existing.layout ?? {}), ...r.layout };
+        if (r.hide) existing.hide = true;
+      } else compByHandle.set(r.target, { ...r });
+    }
+    // Ops: expanded ops first, then raw ops (raw wins by target+kind; validateOps
+    // dedups by target+kind, first wins — so put the model's raw ops first).
+    const ops = [...(specIn.ops ?? []), ...exp.ops];
+    spec = {
+      ...specIn,
+      rules: [...rulesByHandle.values()].filter((r) => r.styles || r.layout || r.hover || r.focusVisible || r.hide),
+      composition: [...compByHandle.values()].filter((r) => r.styles || r.layout || r.hide),
+      ops,
+    };
+  }
 
   // Structural ops: validate against guard laws (pure). content.ts executes the
   // accepted ops against the live DOM; refusals land in droppedProps like any
@@ -486,7 +554,10 @@ export function compileSpec(spec: DesignSpec, perception: Perception, opts: Comp
   const { css: fluidCss, leaks: rawPxLeaks } = fluidizeRawPxSizing(blocks.join('\n\n'));
   for (const leak of rawPxLeaks) droppedProps.push(`fluidize(${leak})`);
 
-  return { css: fluidCss, rulesEmitted, invalidTargets, droppedProps, baseCoatCount, ops: validatedOps };
+  return {
+    css: fluidCss, rulesEmitted, invalidTargets, droppedProps, baseCoatCount, ops: validatedOps,
+    ...(escapeHatchUses.length || specIn.intents?.length ? { escapeHatchUses, escapeHatchFraction, expandNotes, expandedTargets } : {}),
+  };
 }
 
 function indent(decls: string[]): string { return decls.map((d) => '  ' + d).join('\n'); }

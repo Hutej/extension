@@ -15,8 +15,27 @@ import {
   luminanceCompatible, MIN_CHARS_PER_LINE,
 } from '../laws/index.ts';
 import { parseColor, contrastRatio, colorfulness, colorDistance, extractGradientStops, type RGBA } from '../../shared/color.ts';
+import { packForSpec } from '../compile/expand.ts';
+import type { DesignSpec } from '../spec/index.ts';
 
 const OVERLAP_TOLERANCE = 2; // allow minor noise / a couple of self-inflicted-but-benign overlaps
+
+/** Phase 2 — conformance: a deterministic, FREE check that the emitted CSS follows
+ *  its own declared design system (the pack the expander resolved). The first
+ *  CONSTRUCTIVE verification (everything before was defensive). Reported per run
+ *  alongside the defensive checks; the violations are listed VERBATIM in the end
+ *  report so we can calibrate before promoting conformance to a hard gate (next
+ *  phase). Pure: takes the emitted CSS + the spec + the pack as data. */
+export interface ConformanceResult {
+  ok: boolean;
+  /** Every violation, verbatim — for the end report (calibrate before enforcing). */
+  violations: string[];
+  /** The pack the expander resolved (the declared system the CSS is checked against). */
+  packId: string;
+  /** Handles the model gave raw rules for (the escape hatch) — the vocabulary-gap metric. */
+  escapeHatchUses: string[];
+  escapeHatchFraction: number;
+}
 
 export interface VerifyResult {
   passed: boolean;
@@ -49,6 +68,11 @@ export interface VerifyResult {
    *  Architect left untouched (same width+position, no op). Empty when the reflow
    *  was addressed (op on the handle) OR no reflow was warranted. */
   reflowSkippedHandles: string[];
+  /** Phase 2 — conformance to the declared pack (spacing ∈ scale, type ∈ ramp,
+   *  colors ∈ relationships). Logged (constructive signal, not a hard gate this
+   *  phase); the violations are listed verbatim in the end report. null when the
+   *  spec had no intents/pack (a raw-only or restyle-only run — no declared system). */
+  conformance?: ConformanceResult;
   details: string[];
 }
 
@@ -636,3 +660,142 @@ function alphaBlend(fg: RGBA, bg: RGBA): RGBA {
 }
 
 function clamp01(n: number): number { return Math.max(0, Math.min(1, n)); }
+
+// ── Phase 2 — conformance (constructive verification) ───────────────
+
+/** Tolerance for matching a spacing value to the scale (a value within this many
+ *  px of a scale step counts as "on the scale" — base-coat + the structure path's
+ *  min()/clamp() wraps introduce small derivations). */
+const SPACING_TOLERANCE_PX = 2;
+
+/** The set of colors the pack declares — the canvas, the text, the subtle, and
+ *  every named accent. A color the emitted CSS uses that ISN'T one of these (and
+ *  isn't a derived contrast pair the compiler computed) is an off-system color. */
+function declaredColorSet(spec: DesignSpec, packId: string): Set<string> {
+  const pack = packForSpec(spec);
+  const out = new Set<string>();
+  const add = (c?: string) => { if (c) { const p = parseColor(c); out.add(p ? `rgb(${Math.round(p[0])},${Math.round(p[1])},${Math.round(p[2])})` : c.toLowerCase()); } };
+  add(pack.colors.canvas); add(pack.colors.text); add(pack.colors.subtle);
+  for (const hex of Object.values(pack.colors.accents)) add(hex);
+  for (const s of Object.values(pack.surfaces)) { add(s.bg); }
+  // The canvas the Painter set (it may override the pack's canvas) is declared too.
+  if (spec.canvas?.background) add(spec.canvas.background);
+  if (spec.canvas?.color) add(spec.canvas.color);
+  return out;
+}
+
+/** Extract every `value` from `prop: value !important;` declarations for a set of
+ *  CSS property names in the emitted CSS string. Pure. */
+function cssValuesForProps(css: string, props: string[]): string[] {
+  const out: string[] = [];
+  const propSet = new Set(props);
+  // Match `prop: value !important;` or `prop: value;` (value up to ; or }).
+  const re = /([a-z-]+)\s*:\s*([^;{}]+?)\s*(?:!important)?\s*(?:;|})/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(css)) !== null) {
+    if (propSet.has(m[1])) out.push(m[2].trim());
+  }
+  return out;
+}
+
+/** Extract px values from a CSS value string (e.g. "12px" or "0 2px 8px rgba(...)"
+ *  → [2, 8]). Pure. */
+function pxValues(value: string): number[] {
+  const out: number[] = [];
+  const re = /(\d+(?:\.\d+)?)px/gi;
+  let m: RegExpExecArray | null;
+  while ((m = re.exec(value)) !== null) out.push(parseFloat(m[1]));
+  return out;
+}
+
+/** Check the emitted CSS against the pack the expander resolved. Pure, free,
+ *  deterministic. Returns the violations VERBATIM (for the end report) + the
+ *  escape-hatch metric. A conformance failure is LOGGED this phase (constructive
+ *  signal, not a hard gate — calibrate from the grid before promoting it). */
+export function checkConformance(css: string, spec: DesignSpec, escapeHatchUses: string[], totalTargets: number): ConformanceResult {
+  const pack = packForSpec(spec);
+  const violations: string[] = [];
+
+  // Only check when the spec declared a system (intents or a pack choice). A
+  // raw-only or restyle-only run with no intents has no declared system —
+  // conformance is null at the call site; this returns ok with no violations.
+  if (!spec.intents?.length && !spec.pack) {
+    return { ok: true, violations, packId: pack.id, escapeHatchUses, escapeHatchFraction: 0 };
+  }
+
+  // 1) Spacing ∈ declared scale. Every padding/gap/margin px value should be a
+  //    step on the pack's spacingScale (±tolerance). A value off the scale is a
+  //    violation (the model emitted a raw px the expander didn't clamp, or an
+  //    escape-hatch rule with an off-system spacing).
+  const spacingProps = ['padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'gap', 'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'margin-inline', 'margin-block'];
+  const spacingValues = cssValuesForProps(css, spacingProps);
+  const scale = pack.spacingScale;
+  let spacingOff = 0;
+  for (const v of spacingValues) {
+    for (const px of pxValues(v)) {
+      if (px === 0) continue;   // 0 is always on the scale.
+      const onScale = scale.some((s) => Math.abs(s - px) <= SPACING_TOLERANCE_PX);
+      if (!onScale) { spacingOff++; violations.push(`spacing off-scale: ${px}px not in [${scale.join(',')}]px`); }
+    }
+  }
+
+  // 2) Type sizes ∈ declared ramp. Every font-size px value should be a ramp
+  //    value (the pack's typeRamp). A value off the ramp is a violation.
+  const typeValues = cssValuesForProps(css, ['font-size']);
+  const ramp = Object.values(pack.typeRamp);
+  let typeOff = 0;
+  for (const v of typeValues) {
+    for (const px of pxValues(v)) {
+      if (ramp.includes(px)) continue;
+      // clamp()/min() wrappers may carry a ramp value — check the bare px only.
+      if (v.includes('clamp(') || v.includes('min(')) continue;
+      typeOff++; violations.push(`type off-ramp: ${px}px not in ramp [${ramp.join(',')}]px`);
+    }
+  }
+
+  // 3) Colors ∈ declared relationships. Every background/color/border-color the
+  //    emitted CSS uses should be the canvas/text/subtle/a named accent/a pack
+  //    surface — no off-system hex. (The contrast pairs the compiler computes are
+  //    readable-text picks against a declared surface, so they're derived from the
+  //    declared system — accept them as on-system if they're close to a declared
+  //    color, else flag.) A loose check: the color must match a declared color OR
+  //    be a near-black/near-white readable pair (the compiler's pickReadableText).
+  const declared = declaredColorSet(spec, pack.id);
+  const colorProps = ['background', 'color', 'border-color', 'background-color'];
+  const colorValues = cssValuesForProps(css, colorProps);
+  let colorOff = 0;
+  for (const v of colorValues) {
+    if (v.includes('var(') || v.includes('gradient') || v === 'none' || v === 'transparent') continue;
+    const p = parseColor(v);
+    if (!p) continue;   // unparseable (a gradient/keyword) — not a flat color.
+    const norm = `rgb(${Math.round(p[0])},${Math.round(p[1])},${Math.round(p[2])})`;
+    if (declared.has(norm)) continue;
+    // A near-black or near-white readable pair the compiler picked — accept (it's
+    // derived from the declared system, not an off-system invention).
+    const lum = (p[0] + p[1] + p[2]) / 3;
+    if (lum < 24 || lum > 231) continue;
+    colorOff++; violations.push(`color off-system: ${v} not a declared canvas/text/subtle/accent/surface`);
+  }
+
+  // 4) Family consistency — every member of a group/role the model targeted got
+  //    the same intent. Checked from the spec's intents: two intents on the same
+  //    role/group with different emphasis/density/measure/aesthetic is a
+  //    contradiction (the family is half-styled). This catches the model emitting
+  //    conflicting intents on the same family.
+  const byTarget = new Map<string, Set<string>>();
+  for (const intent of spec.intents ?? []) {
+    const key = `${intent.targetKind ?? ''}:${intent.target}`;
+    const sig = [intent.emphasis, intent.density, intent.measure, intent.aesthetic ? JSON.stringify(intent.aesthetic) : ''].filter(Boolean).join('|');
+    const set = byTarget.get(key) ?? new Set<string>();
+    set.add(sig);
+    byTarget.set(key, set);
+  }
+  let familyInconsistency = 0;
+  for (const [key, sigs] of byTarget) {
+    if (sigs.size > 1) { familyInconsistency++; violations.push(`family inconsistency: target ${key} has ${sigs.size} distinct intents — ${[...sigs].join(' / ')}`); }
+  }
+
+  const ok = spacingOff === 0 && typeOff === 0 && colorOff === 0 && familyInconsistency === 0;
+  const escapeHatchFraction = totalTargets > 0 ? escapeHatchUses.filter((h) => true).length / Math.max(1, totalTargets) : 0;
+  return { ok, violations, packId: pack.id, escapeHatchUses, escapeHatchFraction };
+}

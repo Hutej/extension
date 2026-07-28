@@ -12,6 +12,7 @@
  */
 
 import { STYLE_ELEMENT_ID, SIDE_RAIL_MIN_FRAC, SIDE_RAIL_MAX_FRAC } from '../laws/index.ts';
+import { formatPacks } from '../design/packs.ts';
 import { isTransparent, parseColor, colorfulness } from '../../shared/color.ts';
 import {
   classifyRole, rankDominance, detectGrouping, summarizeComposition, hash as semanticHash,
@@ -1023,6 +1024,10 @@ export function serializePerception(p: Perception): string {
   // serialized perception. The model sees the page's systematic scale up front and
   // the per-cluster lines drop the redundant font-family (it's in the header + tokens).
   header.push(formatDesignTokens(extractDesignTokens(p)));
+  // Phase 2 — the design-language PACKS library. The model picks a pack by id,
+  // references its tokens, and emits per-role intents the expander resolves
+  // against the pack. Every pack field is model-overridable via packOverrides.
+  header.push(formatPacks());
 
   // Two-tier: top N by prominence get full detail; rest get compact one-liners.
   const byProminence = [...p.clusters].sort((a, b) => b.prominence - a.prominence);
@@ -1094,6 +1099,47 @@ export function serializePerception(p: Perception): string {
   }
 
   return result;
+}
+
+/**
+ * Phase 2 — Painter-specific perception. The Painter decides the SURFACE (pack +
+ * overrides + canvas + per-role aesthetics), not the layout, so it does not need
+ * the per-cluster geometry/colors that dominate the full serialization. It DOES
+ * need the role/group/handle identity to target `role@group` aesthetic intents
+ * (a specific sidebar vs the news rail). This emits the header (site identity +
+ * COMPOSITION + DESIGN TOKENS + DESIGN PACKS) + a compact role-grouped inventory
+ * (one line per cluster: role@group handle x<count> <tag> [image] [native] [empty]
+ * e.g.sample) — no geometry, no colors, no tree nesting. Cuts the Painter's prompt
+ * ~40-50% (the TREE is the bulk), so the Painter's wall-clock drops (work item B).
+ * The Architect keeps the full `serializePerception` (it needs geometry for reflow).
+ * Pure: takes Perception as data. */
+export function serializePainterPerception(p: Perception): string {
+  const header: string[] = [];
+  header.push(`PAGE ${p.viewport.w}x${p.viewport.h} site:${p.site.host} "${p.site.title}"`);
+  header.push(`COMPOSITION ${p.composition.summary}`);
+  if (p.skeleton.regions.length) {
+    header.push('REGIONS ' + p.skeleton.regions.map((r) => `${r.handle}=${r.role}`).join(' '));
+  }
+  header.push(formatDesignTokens(extractDesignTokens(p)));
+  header.push(formatPacks());
+
+  // Compact role-grouped inventory — every cluster, identity only (no geometry/
+  // colors). Sorted by prominence so the Painter reads the major regions first;
+  // grouped by role so a role intent's fan-out is visible at a glance.
+  const ordered = [...p.clusters].sort((a, b) => b.prominence - a.prominence);
+  const lines = ordered.map((c) => {
+    const parts = [`${c.designRole}${c.group ? '@' + c.group : ''} ${c.handle} x${c.count} <${c.tag}>`];
+    if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) {
+      parts.push('[image]');
+      if (c.style.naturalAspect) parts.push(`aspect:${c.style.naturalAspect}`);
+    }
+    if (c.isNativeControl) parts.push('[native]');
+    if (c.emptinessScore >= 0.6) parts.push(`empty${Math.round(c.emptinessScore * 10)}`);
+    let line = parts.join(' ');
+    if (c.samples.length) line += ` e.g.${c.samples.slice(0, 2).map((s) => JSON.stringify(s.slice(0, 20))).join(',')}`;
+    return line;
+  });
+  return [...header, 'ROLE INVENTORY:', ...lines.map((l) => '  ' + l)].join('\n');
 }
 
 function formatFull(c: Cluster): string {

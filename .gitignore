@@ -7,9 +7,10 @@ experiments
 .kiro
 .mimocode
 tests
-!project/tests/
+project/tests/
 project/tests/*
-!project/tests/probe/
+project/tests/probe/
+project/*.log
 AGENTS.md
 CLAUDE.md
 .claude

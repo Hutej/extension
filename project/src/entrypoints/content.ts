@@ -10,10 +10,11 @@
  * persistence (origin + normalized pathname).
  */
 
-import { perceive, serializePerception, clearHandles, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
+import { perceive, serializePerception, serializePainterPerception, clearHandles, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
 import { compileSpec, deriveBaseTone, type CompileOptions } from '@/core/compile';
+import { expandIntents } from '@/core/compile/expand.ts';
 import { sanitizeCss } from '@/core/sanitize';
-import { verifyStyle, type VerifyResult } from '@/core/verify';
+import { verifyStyle, checkConformance, type VerifyResult, type ConformanceResult } from '@/core/verify';
 import { pixelVerify, classifyInvisibleFailures, type PixelVerifyResult, type InvisibleBreakdown, type PixelInput, type ClusterRect } from '@/core/verify/pixel';
 import { screenshotToPixelInput } from '@/core/verify/capture';
 import { planRepair, bestNonBroken, type Attempt } from '@/core/repair';
@@ -57,6 +58,14 @@ export interface Ledger {
   opsExecuted: number;      // structural DOM ops executed (remove/move/reorder/wrap)
   opsRefused: number;       // ops refused by guard laws (logged with reasons)
   opsRefusedReasons: string[]; // the `kind(handle:reason)` refusal strings (observability)
+  /** Phase-2 — escape-hatch metric: handles the model gave raw rules for (the
+   *  vocabulary-gap metric). Fraction > ~0.20 = a loud pivot-failure flag. */
+  escapeHatchUses?: string[];
+  escapeHatchFraction?: number;
+  /** Phase-2 — conformance to the declared pack (ok + violation count). The
+   *  violations are listed verbatim on TransformOutcome.conformance. */
+  conformanceOk?: boolean;
+  conformanceViolations?: number;
 }
 
 export interface TransformOutcome {
@@ -76,6 +85,10 @@ export interface TransformOutcome {
   /** Phase-1: count of low-contrast text nodes WITHOUT a [data-wm-c] ancestor —
    *  invisible to handle-targeted repair and the pixel detector. */
   contrastNoHandle?: number;
+  /** Phase-2: conformance to the declared pack (spacing ∈ scale, type ∈ ramp,
+   *  colors ∈ relationships, family consistency). The violations are listed
+   *  verbatim in the end report. null when the spec declared no system. */
+  conformance?: ConformanceResult;
   perceiveMs?: number;
   clusters?: number;
   changeScore?: number;
@@ -382,6 +395,20 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
   void chrome.storage.local.set({ webmorphRunInFlight: Date.now() });
   try {
     return await runStyleImpl(intent, restyleOnly);
+  } catch (err) {
+    // A throw anywhere in runStyleImpl (after the model calls, before markApplied)
+    // would silently reject this Promise → the popup's chrome.tabs.sendMessage
+    // callback gets chrome.runtime.lastError → "Cannot reach the page" — AND the
+    // DOM marker is never set, so the harness waits the full timeout. Catch it,
+    // log it loudly, mark failed, and return a clean error outcome so the popup
+    // gets a real error message (not a "Cannot reach the page" lie) and the
+    // harness sees the failed marker. The Phase-2 conformance block + the expander
+    // are the prime throw risks (a malformed packOverrides can spread a non-object).
+    const msg = (err as Error)?.message || 'Transform crashed (internal error).';
+    logDebug(`RUN CRASHED: ${msg}` + (err && (err as Error).stack ? `\n${(err as Error).stack}` : ''));
+    removeStyleEverywhere(activeShadowRoots);
+    markFailed('internal error');
+    return { ok: false, kind: 'bad_output', message: msg, paidCalls: 0, wallMs: 0 };
   } finally {
     keepalivePort.disconnect();
     void chrome.storage.local.remove('webmorphRunInFlight');
@@ -409,6 +436,12 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   activeShadowRoots = perception.shadowRoots;
   const serialized = serializePerception(perception);
   const serializeChars = serialized.length;
+  // Phase 2 — the Painter decides surface (not layout), so it gets a TRIMMED
+  // perception: header + role/group inventory, no per-cluster geometry/colors
+  // (work item B — cuts Painter prompt ~40% + its wall-clock). The Architect keeps
+  // the full serialization (it needs geometry for reflow). Logged for the ledger.
+  const painterSerialized = serializePainterPerception(perception);
+  logDebug(`painter perception trimmed: ${painterSerialized.length}chars (full=${serializeChars})`);
   // Capture the reflow opportunities from the ORIGINAL page (before any op
   // re-perceive). The verify gate checks whether the Architect addressed each; the
   // post-op perception may have dropped a removed side-rail, so we hold the
@@ -445,12 +478,12 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   let archRes: SpecResponse = { ok: false };
   let paintRes: SpecResponse;
   if (restyleOnly) {
-    paintRes = await askForSpec('painter', intent, serialized);
+    paintRes = await askForSpec('painter', intent, painterSerialized);
     recordCall('painter', paintRes);
   } else {
     [archRes, paintRes] = await Promise.all([
       askForSpec('architect', intent, serialized),
-      askForSpec('painter', intent, serialized),
+      askForSpec('painter', intent, painterSerialized),
     ]);
     recordCall('architect', archRes);
     recordCall('painter', paintRes);
@@ -471,6 +504,18 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   let spec = mergeSpecs(archRes.ok ? archRes.spec : undefined, paintRes.ok ? paintRes.spec : undefined);
   logDebug(`architect=${archRes.ok ? 'ok' : (restyleOnly ? 'skipped' : 'FAIL')} painter=${paintRes.ok ? 'ok' : 'FAIL'} merged rules=${spec.rules.length} composition=${spec.composition?.length ?? 0} clusters=${perception.clusters.length}`);
   logDebug(`paletteMode=${spec.paletteMode ?? 'restrained(default)'} rules=${spec.rules.length}`);
+
+  // Phase 2 evidence dump — the model's intents + pack + overrides + the expander's
+  // resolved rules/composition/escape-hatch. This is the missing observability next
+  // to the already-logged conformance + escape-hatch aggregate; it lets a run be
+  // diagnosed by LAYER (model intents vs expander mapping) without a debugger.
+  {
+    const exp = expandIntents(spec, perception);
+    logDebug(`PHASE2 EVIDENCE pack=${spec.pack ?? 'default'} packOverrides=${spec.packOverrides ? JSON.stringify(spec.packOverrides).slice(0, 400) : 'none'}`);
+    logDebug(`PHASE2 INTENTS (${spec.intents?.length ?? 0}): ${(spec.intents ?? []).map((i) => JSON.stringify({ target: i.target, emphasis: i.emphasis, density: i.density, placement: i.placement, measure: i.measure, aesthetic: i.aesthetic })).join(' | ')}`);
+    logDebug(`PHASE2 EXPANDED rules=${exp.rules.length} composition=${exp.composition.length} ops=${exp.ops.length} escapeHatch=${exp.escapeHatchUses.length}/${exp.expandedTargets.length}=${(exp.escapeHatchFraction * 100).toFixed(0)}%${exp.notes.length ? ` notes=${exp.notes.slice(0, 6).join('; ')}` : ''}`);
+  }
+
 
   // Completeness contract — BEFORE apply. Log only; base-coat harmonizes
   // unaccounted clusters and the post-apply !c.covered gate catches under-coverage.
@@ -523,12 +568,24 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     }
   }
   if (spec.ops) for (const op of spec.ops) modelAddressed.add(op.target);
+  // Phase 2 — the intents expand to per-handle rules. Count the expander's resolved
+  // targets as model-addressed too, or the coverage gate undercounts (modelCov) and
+  // the escape-hatch denominator is wrong: the raw escape-hatch rules ÷ pre-expansion
+  // spec.rules reads ~100% (a false pivot-failure flag) when the model emitted 8 raw
+  // overrides on top of 111 intent-expanded rules. A role/group intent that fanned
+  // out to 60 handles counts all 60 as model work, not 0. The expander is pure + free
+  // (0 model calls); resolving the targets once here (the same call compileSpec makes
+  // internally) keeps the coverage gate honest for BOTH paints' verify passes.
+  if (spec.intents?.length) {
+    for (const h of expandIntents(spec, perception).expandedTargets) modelAddressed.add(h);
+  }
 
   let options: CompileOptions = { paletteMode: spec.paletteMode };
   const attempts: Attempt[] = [];
   let lastVerify: VerifyResult | null = null;
   let lastPixel: PixelVerifyResult | null = null;
   let lastBreakdown: InvisibleBreakdown | null = null;
+  let lastCompiled: ReturnType<typeof compileSpec> | null = null;   // Phase 2 — escape-hatch + conformance inputs
   let compileMsTotal = 0, applyMsTotal = 0, verifyMsTotal = 0, pixelVerifyMsTotal = 0;
 
   // Batched repair: apply once (paint 1) → verify (DOM + pixel) → compute ALL
@@ -607,7 +664,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   let phase1Verify: VerifyResult | null = null;
   try {
     const p1 = await applyOnce(spec, options);
-    phase1Sanitized = p1.sanitized; phase1Verify = p1.verify; lastVerify = p1.verify; lastPixel = p1.pixel; lastBreakdown = p1.breakdown;
+    phase1Sanitized = p1.sanitized; phase1Verify = p1.verify; lastVerify = p1.verify; lastPixel = p1.pixel; lastBreakdown = p1.breakdown; lastCompiled = p1.compiled;
     attempts.push({ spec, css: p1.sanitized, notBroken: p1.verify.checks.notBlank && p1.verify.checks.noOverflow && p1.verify.checks.noOverlap && p1.verify.checks.contrastOk && p1.verify.checks.contentCollapsed && p1.verify.checks.contentVisible, changeScore: p1.verify.changeScore, covered: p1.verify.checks.covered, coherent: p1.verify.checks.coherent, changed: p1.verify.checks.changed, contentCollapsed: p1.verify.checks.contentCollapsed });
     logDebug(`paint1: rules=${p1.compiled.rulesEmitted} baseCoat=${p1.compiled.baseCoatCount} checks=${JSON.stringify(p1.verify.checks)} pixel(passed=${p1.pixel.passed} voids=${p1.pixel.voids.length} invisible=${p1.pixel.invisibleText.length} squeeze=${p1.pixel.squeeze.length}) change=${p1.verify.changeScore.toFixed(3)} accent=${p1.verify.accentFraction.toFixed(3)} coverage=${p1.verify.coverageFraction.toFixed(3)} modelCov=${p1.verify.modelCoverageFraction.toFixed(3)}${p1.compiled.droppedProps.length ? ' dropped=[' + p1.compiled.droppedProps.slice(0, 12).join(',') + ']' : ''}`);
     logDebug(`  detail: ${p1.verify.details.join(' | ')}`);
@@ -667,7 +724,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
           // ── Paint 2: re-apply with the corrected spec ──
           try {
             const p2 = await applyOnce(spec, options);
-            lastVerify = p2.verify; lastPixel = p2.pixel; lastBreakdown = p2.breakdown;
+            lastVerify = p2.verify; lastPixel = p2.pixel; lastBreakdown = p2.breakdown; lastCompiled = p2.compiled; lastCompiled = p2.compiled;
             attempts.push({ spec, css: p2.sanitized, notBroken: p2.verify.checks.notBlank && p2.verify.checks.noOverflow && p2.verify.checks.noOverlap && p2.verify.checks.contrastOk && p2.verify.checks.contentCollapsed && p2.verify.checks.contentVisible, changeScore: p2.verify.changeScore, covered: p2.verify.checks.covered, coherent: p2.verify.checks.coherent, changed: p2.verify.checks.changed, contentCollapsed: p2.verify.checks.contentCollapsed });
             logDebug(`paint2(critic): checks=${JSON.stringify(p2.verify.checks)} pixel(passed=${p2.pixel.passed})`);
             // If paint 2 is broken, rollback+fail (no 3rd paint to revert).
@@ -693,7 +750,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       options = batchedOpts;
       try {
         const p2 = await applyOnce(spec, options);
-        lastVerify = p2.verify; lastPixel = p2.pixel; lastBreakdown = p2.breakdown;
+        lastVerify = p2.verify; lastPixel = p2.pixel; lastBreakdown = p2.breakdown; lastCompiled = p2.compiled;
         attempts.push({ spec, css: p2.sanitized, notBroken: p2.verify.checks.notBlank && p2.verify.checks.noOverflow && p2.verify.checks.noOverlap && p2.verify.checks.contrastOk && p2.verify.checks.contentCollapsed && p2.verify.checks.contentVisible, changeScore: p2.verify.changeScore, covered: p2.verify.checks.covered, coherent: p2.verify.checks.coherent, changed: p2.verify.checks.changed, contentCollapsed: p2.verify.checks.contentCollapsed });
         logDebug(`paint2(repair): checks=${JSON.stringify(p2.verify.checks)} pixel(passed=${p2.pixel.passed}) change=${p2.verify.changeScore.toFixed(3)} accent=${p2.verify.accentFraction.toFixed(3)}`);
         if (!(p2.verify.checks.notBlank && p2.verify.checks.contentCollapsed)) {
@@ -718,6 +775,38 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   document.documentElement.dataset['webmorphPaintCount'] = String(paintCount);
   const finalPaintCount = paintCount;
   if (finalPaintCount > 2) logDebug(`PAINT BUDGET EXCEEDED: ${finalPaintCount} > 2 (visible repair theater)`);
+
+  // Phase 2 — conformance: a free, deterministic check that the emitted CSS
+  // follows its own declared design system (the pack the expander resolved).
+  // The first constructive verification. Computed on the final applied CSS +
+  // the spec + the escape-hatch from the last compile. The violations are
+  // logged VERBATIM (calibrate before promoting to a hard gate next phase);
+  // the escape-hatch FRACTION > ~20% is a loud pivot-failure flag (the model is
+  // dodging the intent DSL) — logged + surfaced even when the design applies.
+  let conformance: ConformanceResult | null = null;
+  if (lastCompiled && lastVerify) {
+    const escapeHatchUses = lastCompiled.escapeHatchUses ?? [];
+    // Total targets = every handle a rule/composition/op targeted OR the intents
+    // expanded to. modelAddressed (built above) already folds in the expander's
+    // resolved targets, so this is the honest denominator for the escape-hatch
+    // fraction (raw-ruled handles ÷ all model-targeted handles). >20% = the model
+    // is dodging the intent DSL — a pivot-failure flag.
+    const totalTargets = Math.max(1, modelAddressed.size);
+    // Conformance is a CONSTRUCTIVE signal, not a hard gate this phase — it must
+    // never break the transform. A malformed packOverrides (the model emits
+    // packOverrides with no value-level validation in validateSpec) can spread a
+    // non-object in resolvePack/declaredColorSet and throw. Catch it, log it,
+    // and ship the design without conformance (runStyle's catch backstops this
+    // too, but a local catch keeps the design alive instead of failing the run).
+    try {
+      conformance = checkConformance(lastCompiled.css || '', spec, escapeHatchUses, totalTargets);
+      lastVerify.conformance = conformance;
+      logDebug(`CONFORMANCE pack=${conformance.packId} ok=${conformance.ok} violations=${conformance.violations.length} escapeHatch=${escapeHatchUses.length}/${totalTargets} (${(conformance.escapeHatchFraction * 100).toFixed(0)}%)${conformance.violations.length ? `\n  violations:\n` + conformance.violations.slice(0, 20).map((v) => `    - ${v}`).join('\n') : ''}${lastCompiled.expandNotes?.length ? `\n  expand notes: ${lastCompiled.expandNotes.slice(0, 8).join('; ')}` : ''}`);
+      if (conformance.escapeHatchFraction > 0.20) logDebug(`ESCAPE-HATCH FRACTION >20%: ${(conformance.escapeHatchFraction * 100).toFixed(0)}% of targets used raw rules — the model is dodging the intent DSL (a pivot-failure flag even if the design applies)`);
+    } catch (err) {
+      logDebug(`CONFORMANCE skipped (threw — a malformed packOverrides?): ${(err as Error)?.message}`);
+    }
+  }
 
 
   // Persist + defend + mark applied. Time the persist stage too.
@@ -753,6 +842,12 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     unaccountedMs: Math.max(0, totalMs - stagesMs),
     totalMs, paidCalls: paidCalls(), repairRounds, paintCount: finalPaintCount,
     opsExecuted: opsResult.executed, opsRefused: opsResult.refused, opsRefusedReasons: opsResult.reasons,
+    ...(conformance ? {
+      escapeHatchUses: conformance.escapeHatchUses,
+      escapeHatchFraction: conformance.escapeHatchFraction,
+      conformanceOk: conformance.ok,
+      conformanceViolations: conformance.violations.length,
+    } : {}),
   };
   const rolesStr = roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ');
   logDebug(`LEDGER perceive=${ledger.perceiveMs}ms serialize=${serializeChars}chars${lastSerializeBudget.before > lastSerializeBudget.after ? `(budget ${lastSerializeBudget.before}->${lastSerializeBudget.after})` : ''} roles=[${rolesStr}] compile=${ledger.compileMs}ms apply=${ledger.applyMs}ms verify=${ledger.verifyMs}ms pixelVerify=${ledger.pixelVerifyMs}ms persist=${persistMs}ms unaccounted=${ledger.unaccountedMs}ms total=${totalMs}ms paidCalls=${ledger.paidCalls} repairRounds=${repairRounds} paints=${finalPaintCount} ops=${opsResult.executed}/${opsResult.refused}`);
@@ -763,6 +858,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     pixel: lastPixel ? { passed: lastPixel.passed, voids: lastPixel.voids.length, invisibleText: lastPixel.invisibleText.length, squeeze: lastPixel.squeeze.length } : undefined,
     invisibleBreakdown: lastBreakdown,
     contrastNoHandle: lastVerify?.contrastNoHandle,
+    conformance: conformance ?? undefined,
     perceiveMs: perception.builtInMs, clusters: perception.clusters.length,
     changeScore: lastVerify?.changeScore, accentFraction: lastVerify?.accentFraction,
     modelCoverageFraction: lastVerify?.modelCoverageFraction,
@@ -1192,7 +1288,26 @@ export default defineContentScript({
           // replays stale design-path ops; runStyle clears it again before recording.
           txnLog.clear(); activeOps = [];
           const kind = classifyIntent(intent);
-          const runner = kind === 'hide' ? fastHidePath(intent) : kind === 'move' ? fastMovePath(intent) : kind === 'restyle-only' ? restyleOnlyPath(intent) : runStyle(intent);
+          // ONE runner-catch at the listener: wraps whichever runner is chosen
+          // (fastHidePath / fastMovePath / restyleOnlyPath / runStyle). A throw
+          // ANYWHERE in a runner (before runStyleImpl's own catch, in a fast path
+          // with no catch, or a sync throw in classifyIntent/runner construction)
+          // would reject the returned Promise → the popup's sendMessage callback
+          // gets chrome.runtime.lastError → "Cannot reach the page" — and no DOM
+          // marker is set, so the harness waits the full 130s. Catch it here: log
+          // the stack loudly, mark the FAILED marker, return a clean bad_output so
+          // the popup shows the REAL error and the harness fails fast. This is the
+          // invisible-failure hole closed at the root (all four paths route here).
+          const runner = (async (): Promise<TransformOutcome> => {
+            const chosen = kind === 'hide' ? fastHidePath(intent) : kind === 'move' ? fastMovePath(intent) : kind === 'restyle-only' ? restyleOnlyPath(intent) : runStyle(intent);
+            return await chosen;
+          })().catch((err) => {
+            const msg = (err as Error)?.message || 'Transform crashed (internal error).';
+            logDebug(`LISTENER RUNNER CRASHED: ${msg}` + (err && (err as Error).stack ? `\n${(err as Error).stack}` : ''));
+            removeStyleEverywhere(activeShadowRoots);
+            markFailed('internal error');
+            return { ok: false, kind: 'bad_output', message: msg, paidCalls: 0, wallMs: 0 };
+          });
           inFlight = runner.finally(() => { inFlight = null; });
         }
         return inFlight;
