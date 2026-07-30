@@ -180,6 +180,47 @@ the classifier's viewport-coupled thresholds, or pull Phase 5 (role-anchored sta
 the solver — which would stabilize both role and YouTube identity. This blocked report is the honest
 outcome the phase sanctioned.
 
+**Step 1.5 RESULT — DIAGNOSE, NORMALIZE, RE-GATE ON SLOT-ASSIGNMENT STABILITY:**
+
+The reframe: role LABEL stability is not what the architecture needs — what must be stable is THE SLOT
+a node lands in. Role stability is demoted to a diagnostic. The exclusion registry (1.5C) and slot
+assignment (1.5D) were pulled forward ahead of the solver.
+
+- [x] **HK** — `.gitignore` narrowed (`.kiro/*` + negation for steering, `/tests` root-only, AGENTS.md
+  un-ignored). Committed `eaba048`. `.kiro/steering/ponytail.md` doesn't exist on disk.
+- [x] **1.5A** — Diagnostics run (probe run 1/2). Role instability appears at BOTH viewport-change and
+  fixed-viewport perturbations (same handles flip). Does NOT contradict Phase 1's 0.990 (Phase 1
+  measured reloads; this probe measures perturbations). FillParent artifact confirmed: `c3wemee`
+  flips at widthRatio 0.850↔1.000 (not near 0.97 — a different cluster; the 0.97 threshold flip is on
+  `cv8hsve` at 1.000→0.600 on GitHub mut-reorder).
+- [x] **1.5B** — Viewport-normalized the classifier: `normWidth = widthFractionOfParent < 1 ?
+  widthFractionOfParent : widthRatio`. 7 width thresholds changed from `s.widthRatio` to `normWidth`.
+  Run 2/2: 3/5 role gate PASS (was 2/5). Wikipedia 0.875→0.925+, MDN 0.924→0.958+, BBC unchanged.
+  GitHub slightly WORSE (0.812→0.800) — widened nav-local threshold (0.40→0.45) created overlap zone.
+  Per B4 anti-fitting protocol: thresholds NOT adjusted after seeing results.
+- [x] **1.5C** — Exclusion registry built (`exclusions.ts`). 7 detection patterns (shadow-root,
+  media-tag, editable, carousel, virtualization, js-controlled-layout, map). Per-site excluded:
+  Wikipedia 2/81 (2%), MDN 1/96 (1%), BBC 0/50 (0%), GitHub 4/85 (5%), YouTube 4/99 (4%).
+  **YouTube hypothesis: NOT confined** — eligible-only identity (0.810) = all-nodes identity (0.810).
+  The virtualization detector didn't catch YouTube's feed (different technique than abs+translate).
+  Phase 5 may need to move.
+- [x] **1.5D** — Documentation language (`documentation.ts`) + slot assigner (`assign.ts`) built.
+  `sidebar` merged into `nav-local` slot (principled: on Documentation pages, a sidebar IS side nav).
+  **SLOT-ASSIGNMENT STABILITY GATE (eligible nodes):**
+  - MDN: min=**0.958** → **PASS** (gate: ≥0.95)
+  - Wikipedia: min=**0.949** → **FAIL** (by 0.001 — 2 `actions-primary→nav-local` flips remain)
+  - GitHub: min=**0.877** → **FAIL** (`listing→nav-local` 3x, `nav-local→nav-primary` 1x per perturbation)
+  - BBC: min=0.959 (advisory — would pass)
+  - YouTube: min=0.830 (advisory)
+  - Overflow counts: Wikipedia 0, MDN 37 (high — many `ad-or-void`), BBC 1, GitHub 0, YouTube 4.
+
+**BLOCKED: 1/3 Documentation sites pass the slot-assignment gate.** MDN passes. Wikipedia is 0.001
+below (one design decision away). GitHub's `listing↔nav-local` and `nav-local→nav-primary` flips are
+genuine classifier threshold issues — GitHub's elements have `widthFractionOfParent=1.0` (no parent
+cluster or full-width parent), so the 1.5B normalization had no effect. The solver (Step 5) is NOT
+authorized. Next decision: the user reviews whether the remaining instability is acceptable for solver
+construction, or whether further classifier work is needed first.
+
 ## Status update protocol (for ALL agents)
 
 - Flip a sub-phase checkbox to `[x]` ONLY after it is genuinely, honestly done: proven by eye on real

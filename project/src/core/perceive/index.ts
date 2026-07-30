@@ -659,6 +659,7 @@ function gatherSignals(cluster: Cluster, el: HTMLElement, viewport: { w: number;
     hasHeading,
     rectX: rect.x, rectY: rect.y, rectW: rect.width, rectH: rect.height,
     widthRatio: cluster.layout.widthRatio,
+    widthFractionOfParent: cluster.widthFractionOfParent,
     count: cluster.count,
     classTokens,
     emptinessScore: cluster.emptinessScore,

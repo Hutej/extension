@@ -43,6 +43,7 @@ export interface ClusterSignals {
   hasHeading: boolean;            // contains h1-h6
   rectX: number; rectY: number; rectW: number; rectH: number;
   widthRatio: number;             // rectW / viewport.w
+  widthFractionOfParent: number;  // rectW / parentClusterRect.w (1.0 when no parent cluster)
   count: number;                  // repeated members (a listing signal)
   classTokens: string;            // lowercased id + className (for convention tokens)
   emptinessScore: number;         // 0..1 (computed in perceive)
@@ -82,6 +83,12 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
   const linkDensity = textLen > 0 ? s.linkCount / textLen : 0;
   const tok = s.classTokens;
   const has = (re: RegExp) => re.test(tok);
+  // 1.5B — normalized width: parent-relative when a parent cluster exists, viewport-relative
+  // fallback for top-level elements. Stable under viewport resize (element + parent shrink
+  // proportionally → ratio is constant). The raw viewport-relative widthRatio flips at the
+  // 0.4/0.45/0.5 knife-edges under resize, causing nav-local <-> sidebar <-> nav-primary
+  // role churn.
+  const normWidth = s.widthFractionOfParent < 1 ? s.widthFractionOfParent : s.widthRatio;
   const isTop = s.rectY < vp.h * 0.25;
   const isBottom = s.rectY > vp.h * 0.6;
   const isLeft = s.rectX < vp.w * 0.2;
@@ -113,28 +120,28 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
   // nav-primary: horizontal nav band — nav/banner role, wide, top, link-dense.
   scores['nav-primary'] =
     (s.ariaRole === 'navigation' || s.ariaRole === 'banner' ? 0.4 : 0) +
-    (s.widthRatio >= 0.5 ? 0.2 : 0) +
+    (normWidth >= 0.5 ? 0.2 : 0) +
     (isTop ? 0.2 : 0) +
     (s.linkCount >= 3 || linkDensity > 0.1 ? 0.2 : 0);
 
   // nav-local: vertical/side nav — nav role, narrow, on a side.
   scores['nav-local'] =
     (s.ariaRole === 'navigation' ? 0.4 : 0) +
-    (s.widthRatio <= 0.4 && s.widthRatio >= 0.1 ? 0.3 : 0) +
+    (normWidth <= 0.45 && normWidth >= 0.1 ? 0.3 : 0) +
     ((isLeft || isRight) ? 0.2 : 0) +
     (s.linkCount >= 3 ? 0.1 : 0);
 
   // sidebar: aside/complementary content (not nav) — aside role, side-rail width.
   scores['sidebar'] =
     (s.ariaRole === 'complementary' || s.tag === 'aside' ? 0.5 : 0) +
-    (s.widthRatio <= 0.45 && s.widthRatio >= 0.1 ? 0.3 : 0) +
+    (normWidth <= 0.50 && normWidth >= 0.1 ? 0.3 : 0) +
     (linkDensity < 0.1 ? 0.1 : 0) +
     (s.hasHeading ? 0.1 : 0);
 
   // toolbar: a horizontal action bar — interactive-dense, wide + short, low text.
   scores['toolbar'] =
     ((s.linkCount + (s.isNativeControl ? 1 : 0)) >= 3 ? 0.3 : 0) +
-    (s.widthRatio >= 0.4 && s.rectH < 120 ? 0.3 : 0) +
+    (normWidth >= 0.4 && s.rectH < 120 ? 0.3 : 0) +
     (textLen < 100 ? 0.2 : 0) +
     (s.ariaRole === 'banner' || has(/toolbar/) ? 0.2 : 0);
 
@@ -147,7 +154,7 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
   // actions-primary: a small cluster of prominent action buttons (a CTA group) —
   // narrow, short, button/link-dense, a solid colorful surface.
   scores['actions-primary'] =
-    (s.widthRatio < 0.4 && s.rectH < 100 && (s.isNativeControl || s.linkCount >= 1) && textLen < 60 ? 0.3 : 0) +
+    (normWidth < 0.4 && s.rectH < 100 && (s.isNativeControl || s.linkCount >= 1) && textLen < 60 ? 0.3 : 0) +
     (s.hasSolidBg ? 0.2 : 0) +
     (s.rectH < 80 ? 0.2 : 0) +
     (s.ariaRole === 'button' ? 0.2 : 0);
@@ -183,7 +190,7 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
   scores['listing'] =
     (s.count > 5 ? 0.5 : s.count > 2 ? 0.3 : 0) +
     (s.ariaRole === 'list' || s.ariaRole === 'listitem' ? 0.3 : 0) +
-    (textLen > 0 && s.widthRatio > 0.2 ? 0.15 : 0) +
+    (textLen > 0 && normWidth > 0.2 ? 0.15 : 0) +
     (s.count > 2 && textLen > 0 && textLen < 200 ? 0.2 : 0);   // repeated short-text cards → listing
 
   // comments: a comment section — 'comment' token or comments role.
@@ -217,7 +224,7 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
   } else {
     scores['ad-or-void'] =
       (s.emptinessScore >= 0.7 ? 0.5 : s.emptinessScore >= 0.5 ? 0.3 : 0) +
-      (textLen < 10 && !s.hasBgImage && s.widthRatio > 0.3 ? 0.2 : 0);
+      (textLen < 10 && !s.hasBgImage && normWidth > 0.3 ? 0.2 : 0);
   }
 
   // Pick the highest-scoring role. Ties broken by the order in DESIGN_ROLES (stable).

@@ -7,8 +7,7 @@ experiments
 .kiro/*
 !.kiro/steering/
 .mimocode
-tests
-project/tests/probe/
+/tests
 project/tests/artifacts/
 project/*.log
 CLAUDE.md
