@@ -14,7 +14,7 @@ function sig(partial: Partial<ClusterSignals>): ClusterSignals {
     hasHeading: false, rectX: 0, rectY: 0, rectW: 100, rectH: 100, widthRatio: 0.1,
     count: 1, classTokens: '', emptinessScore: 0, hasBgImage: false, fontSize: 16,
     isNativeControl: false, hasSolidBg: false, codeHint: false, inArticleFlow: false,
-    widthFractionOfParent: 1, normWidthFromParent: false,
+    widthFractionOfParent: 1, normWidthFromParent: false, tocHint: false,
     ...partial,
   };
 }
@@ -58,14 +58,16 @@ assert(classifyRole(sig({ classTokens: 'ad-slot sponsor', textLen: 0, widthRatio
 // comments: comment token.
 assert(classifyRole(sig({ classTokens: 'comment-section', textLen: 800, widthRatio: 0.8, rectW: 1024, rectH: 600 }), ctx).role === 'comments', 'comment token → comments');
 
-// Phase 2 — the code-example trap: a bare <pre> without a figure parent, text-less
-// + image-less, in article flow with real height, must classify media, NOT ad-or-void.
+// Phase 2 / X1 — the code-example trap: a bare <pre> without a figure parent, text-less
+// + image-less, in article flow with real height, must classify article-body, NOT ad-or-void.
 // (gatherSignals sets codeHint=true for a <pre>; the classifier reads it.)
+// X1: code blocks are CONTENT (article-body), not media — "code is a photograph" was the
+// old lie; the role-style layer would have applied aspect-ratio/object-fit to source code.
 const codePre = classifyRole(sig({ tag: 'pre', codeHint: true, textLen: 0, hasBgImage: false, rectH: 240, widthRatio: 0.6, rectW: 768, inArticleFlow: true }), ctx);
-assert(codePre.role === 'media', 'bare <pre> in article flow → media, not ad-or-void (the MDN code-example trap)');
+assert(codePre.role === 'article-body', 'bare <pre> in article flow → article-body, not ad-or-void (the MDN code-example trap)');
 assert(codePre.role !== 'ad-or-void', 'code block never ad-or-void');
 // A codeHint by class token alone (a div with class="code-example", in flow).
-assert(classifyRole(sig({ classTokens: 'example code-example', codeHint: true, textLen: 0, rectH: 120, widthRatio: 0.5, rectW: 640, inArticleFlow: true }), ctx).role === 'media', 'code-hint class token in flow → media');
+assert(classifyRole(sig({ classTokens: 'example code-example', codeHint: true, textLen: 0, rectH: 120, widthRatio: 0.5, rectW: 640, inArticleFlow: true }), ctx).role === 'article-body', 'code-hint class token in flow → article-body');
 // A text-less+image-less block in article flow with real height but NO code hint
 // is still content material, not a void (the trap's broader form).
 assert(classifyRole(sig({ tag: 'div', textLen: 0, hasBgImage: false, rectH: 200, widthRatio: 0.5, rectW: 640, inArticleFlow: true }), ctx).role !== 'ad-or-void', 'real-height in-flow block not ad-or-void');
@@ -82,6 +84,10 @@ assert(classifyRole(sig({ tag: 'a', textLen: 7, fontSize: 16, rectY: 0, rectH: 3
 assert(classifyRole(sig({ tag: 'h1', headingLevel: 1, textLen: 30, fontSize: 32, rectY: 0, rectH: 48, widthRatio: 0.9, rectW: 1152 }), ctx).role === 'page-title', 'real h1 still page-title');
 // A large non-h1 display heading (a styled div title, ≥20px) can be page-title.
 assert(classifyRole(sig({ tag: 'div', textLen: 20, fontSize: 28, rectY: 0, rectH: 60, widthRatio: 0.9, rectW: 1152 }), ctx).role === 'page-title', 'large display-type div can be page-title');
+
+// X2 — toc role: tocHint signal drives the toc role.
+assert(classifyRole(sig({ tocHint: true, ariaRole: 'navigation', widthRatio: 0.2, rectW: 256, linkCount: 8, textLen: 200 }), ctx).role === 'toc', 'tocHint → toc role');
+assert(classifyRole(sig({ tocHint: false, ariaRole: 'navigation', widthRatio: 0.2, rectW: 256, linkCount: 8, textLen: 200 }), ctx).role !== 'toc', 'no tocHint → not toc');
 
 // Dominance: a large top region ranks higher than a small buried one.
 const big = rankDominance({ rectX: 0, rectY: 0, rectW: 1280, rectH: 400, widthRatio: 1, hasSolidBg: true, hasBorder: true, hasShadow: true, fontSize: 24, isColorful: true }, ctx.viewport);

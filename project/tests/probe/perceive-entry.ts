@@ -12,10 +12,11 @@
  * does NOT need is dropped here to keep the eval payload small.
  */
 
-import { perceive, clearHandles, serializePerception } from '../../src/core/perceive/index.ts';
+import { perceive, clearHandles, serializePerception, clearRoleCache } from '../../src/core/perceive/index.ts';
 import { extractLayoutIR, currentConstraints } from '../../src/core/layout/ir.ts';
 import { detectExclusions } from '../../src/core/layout/exclusions.ts';
 import { assignSlots } from '../../src/core/layout/assign.ts';
+import { solve } from '../../src/core/layout/solve.ts';
 
 // Exposed on window by the bundled module (see probe.ts build).
 (globalThis as unknown as { __wmPerceive: typeof perceive; __wmClearHandles: typeof clearHandles; __wmSerialize: typeof serializePerception }).__wmPerceive = perceive;
@@ -28,3 +29,7 @@ import { assignSlots } from '../../src/core/layout/assign.ts';
 // Phase 2.5 Step 1.5C/D — exclusion detection + slot assignment.
 (globalThis as unknown as { __wmDetectExclusions: typeof detectExclusions }).__wmDetectExclusions = detectExclusions;
 (globalThis as unknown as { __wmAssignSlots: typeof assignSlots }).__wmAssignSlots = assignSlots;
+// P5.2 — sticky role cache: cleared on navigation (session-scoped, not page-persisted).
+(globalThis as unknown as { __wmClearRoleCache: typeof clearRoleCache }).__wmClearRoleCache = clearRoleCache;
+// Step 2 — the v2 solver (behind layoutCompiler=v2 flag).
+(globalThis as unknown as { __wmSolve: typeof solve }).__wmSolve = solve;

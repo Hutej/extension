@@ -5,6 +5,11 @@
  */
 
 export const AI_CONFIG = {
+  // Pipeline flag: v1 (legacy compile) or v2 (Layout IR -> Solver). Default v1.
+  // Override via WM_LAYOUT_COMPILER env var or the popup dev toggle. The two
+  // paths are NOT intertwined — the pipeline forks once; no shared mutable state.
+  layoutCompiler: (process.env.WM_LAYOUT_COMPILER ?? 'v1') as 'v1' | 'v2',
+
   // Per-role models. The monolithic call is SPLIT: Architect (composition) +
   // Painter (palette) run in parallel; Critic (repair) runs on the fastest model.
   // The design path = Architect + Painter + Critic rounds; restyle-only = Painter

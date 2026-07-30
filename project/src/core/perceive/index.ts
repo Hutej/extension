@@ -389,6 +389,64 @@ function findScrollables(clusters: Cluster[]): { handle: string; axis: 'x' | 'y'
 
 // ── Clustering + retention + layout enrichment ─────────────────────
 
+// P5.1 — structural identity. The handle is derived from DOM STRUCTURE, not
+// appearance: tag + nth-of-type chain from a stable ancestor, with stable
+// attributes (id, data-testid, role, aria-label, name) short-circuiting the
+// climb. FORBIDDEN as identity inputs: geometry, rects, widths, position,
+// colours, the visual-signature hash, the semantic role. The 7-char format
+// ('c' + 6-char hash) is preserved so nothing downstream breaks.
+// The visual signature is STILL used for CLUSTERING (grouping visually similar
+// elements); the handle is the cluster's STRUCTURAL identity.
+function structuralPath(el: HTMLElement): string {
+  const parts: string[] = [];
+  let node: HTMLElement | null = el;
+  let depth = 0;
+  while (node && node !== document.body && node !== document.documentElement && depth < 15) {
+    const tag = node.tagName.toLowerCase();
+    // Stable attributes (preferred over nth-of-type) — but DON'T break early:
+    // duplicate IDs on a page would collide. The full ancestor chain guarantees
+    // uniqueness even with duplicate ids.
+    const id = node.id;
+    const testid = node.getAttribute('data-testid');
+    const role = node.getAttribute('role');
+    const ariaLabel = node.getAttribute('aria-label');
+    const name = node.getAttribute('name');
+    if (id) parts.unshift(`${tag}#${id}`);
+    else if (testid) parts.unshift(`${tag}[t=${testid}]`);
+    else if (role) parts.unshift(`${tag}[r=${role}]`);
+    else if (ariaLabel) parts.unshift(`${tag}[a=${ariaLabel.slice(0, 20)}]`);
+    else if (name) parts.unshift(`${tag}[n=${name}]`);
+    else {
+      // nth-of-type among same-tag siblings
+      let n = 0;
+      let sib = node.previousElementSibling;
+      while (sib) { if (sib.tagName === node.tagName) n++; sib = sib.previousElementSibling as Element | null; }
+      parts.unshift(`${tag}:${n + 1}`);
+    }
+    node = node.parentElement;
+    depth++;
+  }
+  return parts.join('/');
+}
+
+// P5.2 — sticky roles. Classify ONCE per handle per session; cache the result
+// against the stable handle and REUSE it on every subsequent perception. Re-
+// classification is permitted ONLY when the node's own structural signature
+// changes (which means a new handle → cache miss → fresh classification). The
+// cache is session-scoped and cleared on navigation. Stored on globalThis so
+// it persists across the probe's `new Function(src)()` re-executions.
+const ROLE_CACHE_KEY = '__wmRoleCache';
+interface RoleCacheEntry { role: DesignRole; confidence: number; }
+function getRoleCache(): Map<string, RoleCacheEntry> {
+  const w = globalThis as unknown as { [ROLE_CACHE_KEY]?: Map<string, RoleCacheEntry> };
+  if (!w[ROLE_CACHE_KEY]) w[ROLE_CACHE_KEY] = new Map();
+  return w[ROLE_CACHE_KEY]!;
+}
+export function clearRoleCache(): void {
+  const w = globalThis as unknown as { [ROLE_CACHE_KEY]?: Map<string, RoleCacheEntry> };
+  w[ROLE_CACHE_KEY] = new Map();
+}
+
 function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): Cluster[] {
   const groups = new Map<string, Candidate[]>();
   for (const c of candidates) {
@@ -399,11 +457,20 @@ function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): 
 
   interface Raw extends Cluster { _members: Candidate[]; }
   const raws: Raw[] = [];
+  const usedHandles = new Set<string>();
   for (const [sig, members] of groups) {
     const rep = members[0];
     const cappedArea = members.reduce((s, m) => s + Math.min(m.area, vpArea), 0);
     const prominence = cappedArea / vpArea + members.length;
-    const handle = 'c' + hash(sig);
+    // P5.1: handle derived from STRUCTURE (the representative's DOM path), not
+    // the visual signature. The visual signature (sig) is still the grouping key.
+    // P5.1 fix: collision resolution — if two structural paths hash to the same
+    // 6-char value, append a deterministic counter salt to guarantee uniqueness.
+    const sp = structuralPath(rep.el);
+    let handle = 'c' + hash(sp);
+    let salt = 0;
+    while (usedHandles.has(handle)) { salt++; handle = 'c' + hash(sp + '#' + salt); }
+    usedHandles.add(handle);
     const samples: string[] = [];
     for (const m of members) {
       const s = m.sample.trim();
@@ -656,6 +723,11 @@ function gatherSignals(cluster: Cluster, el: HTMLElement, viewport: { w: number;
     p = p.parentElement;
     hops++;
   }
+  // X2 — tocHint: a table-of-contents. Principled detection: a nav/aside/ol/ul
+  // landmark whose links are predominantly same-page fragment anchors (href^="#")
+  // pointing at headings in the main content, positioned OUTSIDE main flow.
+  // No site names, no selectors — universal structural signature.
+  const tocHint = !inArticleFlow && detectToc(el);
   return {
     ariaRole: cluster.role,
     tag,
@@ -676,7 +748,39 @@ function gatherSignals(cluster: Cluster, el: HTMLElement, viewport: { w: number;
     hasSolidBg: cluster.hasSolidBg,
     codeHint,
     inArticleFlow,
+    tocHint,
   };
+}
+
+/** X2 — detect a table-of-contents. Principled, no site names: a nav/aside/ol/ul
+ *  landmark whose links are predominantly same-page fragment anchors (href^="#")
+ *  pointing at headings (h1-h6 or [id] targets) in the main content. Returns true
+ *  only when the structural signature is strong. */
+function detectToc(el: HTMLElement): boolean {
+  const tag = el.tagName.toLowerCase();
+  const role = el.getAttribute('role');
+  const isTocLandmark = tag === 'nav' || tag === 'aside' || tag === 'ol' || tag === 'ul' ||
+    role === 'navigation' || role === 'complementary' || role === 'list';
+  if (!isTocLandmark) return false;
+  const links = Array.from(el.querySelectorAll('a[href]'));
+  if (links.length < 3) return false;       // a TOC has multiple entries
+  // Fragment anchors: href starts with "#"
+  const fragLinks = links.filter((a) => (a.getAttribute('href') || '').startsWith('#'));
+  if (fragLinks.length / links.length < 0.6) return false;  // predominantly fragment links
+  // The anchors must point at real targets (ids) in the document — heading-adjacent
+  const targets = fragLinks.map((a) => a.getAttribute('href')!.slice(1)).filter(Boolean);
+  let found = 0;
+  for (const id of targets) {
+    const target = document.getElementById(id);
+    if (!target) continue;
+    // The target is a heading or near a heading (the TOC entry's destination)
+    if (/^h[1-6]$/.test(target.tagName.toLowerCase())) { found++; continue; }
+    const near = target.querySelector('h1, h2, h3, h4, h5, h6');
+    if (near) { found++; continue; }
+    // An id on any element counts — it's a valid anchor target
+    found++;
+  }
+  return found / targets.length >= 0.5;
 }
 
 /** Phase 1 enrichment: for each cluster, gather signals, classify onto the closed
@@ -689,11 +793,11 @@ function enrichSemantic(clusters: Cluster[], viewport: { w: number; h: number })
   for (const cluster of clusters) {
     const el = representativeFor(cluster);
     // 1.6B: a vanished representative that was pre/code at stamping time is content
-    // (media), not a void — the MDN code-example trap. The stamping-time tag is the
-    // only signal left; use it rather than defaulting everything to ad-or-void/0.
+    // (article-body), not a void — the MDN code-example trap. The stamping-time tag
+    // is the only signal left; use it rather than defaulting everything to ad-or-void/0.
     if (!el) {
       if (cluster.tag === 'pre' || cluster.tag === 'code') {
-        cluster.designRole = 'media';
+        cluster.designRole = 'article-body';
         cluster.designRoleConfidence = 0.5;
       } else {
         cluster.designRole = 'ad-or-void';
@@ -704,9 +808,23 @@ function enrichSemantic(clusters: Cluster[], viewport: { w: number; h: number })
       continue;
     }
     const signals = gatherSignals(cluster, el, viewport);
-    const cls = classifyRole(signals, ctx);
-    cluster.designRole = cls.role;
-    cluster.designRoleConfidence = cls.confidence;
+    // P5.2 — sticky roles: classify ONCE per handle per session, cache, reuse.
+    // The handle is structural (P5.1), so a cache hit means the node's structural
+    // position hasn't changed → the role should not change. A cache miss means
+    // the structural position changed (new handle) or it's a new node → classify
+    // fresh and cache. Do NOT touch any classifier threshold — we are removing
+    // the repeated dice roll, not changing the dice.
+    const cache = getRoleCache();
+    const cached = cache.get(cluster.handle);
+    if (cached) {
+      cluster.designRole = cached.role;
+      cluster.designRoleConfidence = cached.confidence;
+    } else {
+      const cls = classifyRole(signals, ctx);
+      cluster.designRole = cls.role;
+      cluster.designRoleConfidence = cls.confidence;
+      cache.set(cluster.handle, { role: cls.role, confidence: cls.confidence });
+    }
     const cs = getComputedStyle(el);
     cluster.dominanceRank = rankDominance({
       rectX: signals.rectX, rectY: signals.rectY, rectW: signals.rectW, rectH: signals.rectH,
@@ -1276,5 +1394,8 @@ function short(color: string): string { return color.replace(/\s+/g, ''); }
 function hash(str: string): string {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
-  return (h >>> 0).toString(36).padStart(6, '0').slice(-6);
+  // P5.1 fix: modulo 36^6 (2176782336) ensures the value fits in 6 base36 digits.
+  // The old .slice(-6) dropped the most significant digit for values >= 36^6,
+  // causing handle collisions (two different paths → same handle).
+  return ((h >>> 0) % 2176782336).toString(36).padStart(6, '0');
 }

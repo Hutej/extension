@@ -93,6 +93,7 @@ const KINDS = ['FillParent', 'Centered', 'StackVertically', 'WrapOnOverflow', 'M
 const ROLE_TO_SLOT_MERGED: Record<string, string> = {
   'page-title': 'masthead', 'nav-primary': 'masthead', 'search': 'masthead', 'toolbar': 'masthead', 'actions-primary': 'masthead',
   'nav-local': 'nav-local', 'sidebar': 'nav-local',  // merged (1.5D)
+  'toc': 'toc',
   'article-body': 'main', 'listing': 'main', 'media': 'main', 'comments': 'main', 'metadata': 'main',
   'footer-chrome': 'footer',
   // ad-or-void → overflow
@@ -393,6 +394,8 @@ async function baselineAndAt(page: Page, bundle: string, url: string, settleMs: 
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
   await page.setViewportSize({ width: BASE_W, height: BASE_H });
   await page.waitForTimeout(settleMs);
+  // P5.2 — clear the sticky role cache on navigation (session-scoped, not page-persisted).
+  await page.evaluate(() => { (globalThis as unknown as { __wmClearRoleCache?: () => void }).__wmClearRoleCache?.(); });
   return runIR(page, bundle);
 }
 
@@ -711,6 +714,41 @@ async function main(): Promise<void> {
     }
   }
   printReport(results);
+
+  // Step 2 — run the v2 solver on MDN (or the smoke site) and report what it emitted.
+  const solverSite = process.env.WM_RUN_SOLVER ? (SMOKE ? sites[0] : sites.find((s) => s.name === 'MDN') ?? sites[0]) : null;
+  if (solverSite) {
+    console.log(`\n\n========== STEP 2 — V2 SOLVER OUTPUT (${solverSite.name}) ==========`);
+    await page.goto(solverSite.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.setViewportSize({ width: BASE_W, height: BASE_H });
+    await page.waitForTimeout(solverSite.settleMs);
+    await page.evaluate(() => { (globalThis as unknown as { __wmClearRoleCache?: () => void }).__wmClearRoleCache?.(); });
+    const solverResult = await page.evaluate(async (src: string) => {
+      new Function(src)();
+      const perceive = (window as unknown as { __wmPerceive: () => unknown }).__wmPerceive;
+      const clearHandles = (window as unknown as { __wmClearHandles: () => void }).__wmClearHandles;
+      const extractIR = (window as unknown as { __wmExtractLayoutIR: (p: unknown) => any }).__wmExtractLayoutIR;
+      const detectExcl = (window as unknown as { __wmDetectExclusions: (c: any[]) => Map<string, string> }).__wmDetectExclusions;
+      const assignS = (window as unknown as { __wmAssignSlots: (n: any[], e: Set<string>) => any }).__wmAssignSlots;
+      const solve = (window as unknown as { __wmSolve: (i: any) => any }).__wmSolve;
+      clearHandles();
+      const p = perceive() as any;
+      const ir = extractIR(p);
+      const excludedRaw = detectExcl(p.clusters);
+      const excludedSet = new Set<string>();
+      for (const [h] of excludedRaw) excludedSet.add(h);
+      const assignment = assignS(ir.nodes, excludedSet);
+      const result = solve({ ir, assignment, excluded: excludedSet });
+      return { css: result.css, rulesEmitted: result.rulesEmitted, matchedTargets: result.matchedTargets,
+        impossibleNodes: result.impossibleNodes, droppedOptionals: result.droppedOptionals,
+        nodeCount: ir.nodes.length, slotMap: [...assignment.handleToSlot.entries()].reduce((o, [h, s]) => { (o as any)[h] = s; return o; }, {}) };
+    }, bundle);
+    console.log(`  nodes: ${solverResult.nodeCount}, rules emitted: ${solverResult.rulesEmitted}, matched: ${solverResult.matchedTargets}`);
+    console.log(`  impossible nodes: ${solverResult.impossibleNodes.length === 0 ? 'none' : solverResult.impossibleNodes.join(', ')}`);
+    console.log(`  dropped optionals: ${solverResult.droppedOptionals.length === 0 ? 'none' : solverResult.droppedOptionals.map((d: any) => `${d.handle}:${d.kind}`).join(', ')}`);
+    console.log(`\n--- CSS (first 4000 chars) ---\n${solverResult.css.slice(0, 4000)}${solverResult.css.length > 4000 ? '\n... (truncated)' : ''}`);
+  }
+
   await context.close();
   const pass = results.filter((r) => r.gate === 'PASS').length;
   process.exit(pass === results.length ? 0 : 1);

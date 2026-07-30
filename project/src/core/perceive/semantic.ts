@@ -24,12 +24,12 @@
 export type DesignRole =
   | 'page-title' | 'article-body' | 'nav-primary' | 'nav-local' | 'sidebar'
   | 'toolbar' | 'search' | 'actions-primary' | 'metadata' | 'media' | 'listing'
-  | 'comments' | 'footer-chrome' | 'ad-or-void';
+  | 'comments' | 'footer-chrome' | 'ad-or-void' | 'toc';
 
 export const DESIGN_ROLES: readonly DesignRole[] = [
   'page-title', 'article-body', 'nav-primary', 'nav-local', 'sidebar',
   'toolbar', 'search', 'actions-primary', 'metadata', 'media', 'listing',
-  'comments', 'footer-chrome', 'ad-or-void',
+  'comments', 'footer-chrome', 'ad-or-void', 'toc',
 ] as const;
 
 // ── Per-cluster signals (gathered in perceive/index.ts, classified here) ──
@@ -54,13 +54,18 @@ export interface ClusterSignals {
   hasSolidBg: boolean;
   /** Phase 2 — the cluster IS or CONTAINS a code block: a <pre>/<code>/syntax-
    *  highlight element, or a class/id token like 'code'/'syntax'/'highlight'.
-   *  A text-less+image-less code container must classify as media, never ad-or-void
-   *  (the MDN code-example trap). Universal convention, not a site recipe. */
+   *  A text-less+image-less code container must classify as article-body, never
+   *  ad-or-void (the MDN code-example trap). Universal convention, not a site recipe. */
   codeHint: boolean;
   /** Phase 2 — the cluster sits inside article flow (a main/article ancestor). A
    *  text-less+image-less block with real height in article flow is content, not a
-   *  void — it classifies as media, never ad-or-void. */
+   *  void — it classifies as article-body, never ad-or-void. */
   inArticleFlow: boolean;
+  /** Phase 5/X2 — TOC signal: the cluster is a table-of-contents — a nav/aside/ol/ul
+   *  whose links are predominantly same-page fragment anchors (href^="#") pointing
+   *  at headings in the main content. Detected in gatherSignals (needs DOM); scored
+   *  here. Principled: no site names, no selectors. */
+  tocHint: boolean;
 }
 
 export interface PageContext {
@@ -175,17 +180,24 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
     (s.fontSize < 13 && textLen < 60 && s.rectH < 40 ? 0.3 : 0) +
     (hasMetaToken && s.rectH < 60 ? 0.2 : 0);
 
-  // media: image/video/figure — media tag, or a content-image bg, little text. A
-  // code block (pre/code/syntax-highlight, text-less + image-less) reads as media
-  // too — code is content material, not a void (the MDN code-example trap: a bare
-  // <pre> without a figure parent scored ad-or-void because it carried no text the
-  // classifier sampled and no image). Boost media so it beats ad-or-void here.
-  const codeScore = s.codeHint ? 0.5 : 0;
+  // media: image/video/figure — media tag, or a content-image bg, little text.
+  // (Code blocks are NO LONGER media — X1: they are article-body content, not
+  // photographs. The codeHint signal now boosts article-body, not media. The
+  // ad-or-void guard still suppresses void for code blocks — that is unchanged.)
   scores['media'] =
     (mediaTag ? 0.6 : 0) +
     (s.hasBgImage ? 0.4 : 0) +
-    codeScore +
     (textLen < 40 ? 0.1 : 0);
+
+  // article-body (continued): code blocks are content. A pre/code/syntax
+  // cluster reads as article-body — code is prose in monospace, not media. The
+  // codeHint boost is principled (universal convention tokens + monospace font +
+  // syntax-highlight token density), no site names. This maps code to `main`.
+  if (s.codeHint) {
+    scores['article-body'] = Math.max(scores['article-body'] ?? 0, 0.5 +
+      (textLen > 120 ? 0.15 : 0) +
+      (s.hasHeading ? 0.1 : 0));
+  }
 
   // listing: a repeated list of items — count > 2, list/listitem role. A repeated
   // short-text card (a recommendation feed row) reads as listing, not metadata — the
@@ -202,6 +214,14 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
     (has(/comment/) ? 0.7 : 0) +
     (s.ariaRole === 'comment' ? 0.3 : 0);
 
+  // toc: a table-of-contents — a nav/aside/ol/ul landmark whose links are
+  // predominantly same-page fragment anchors pointing at headings in main
+  // content. The tocHint signal (detected in gatherSignals with DOM access)
+  // is the sole driver. Decisive: 1.1 beats any nav score (max 1.0) so a TOC
+  // is never misclassified as nav-local. Confidence is capped at 1.0 by the
+  // classifier; 1.1 only affects the role-selection comparison.
+  scores['toc'] = s.tocHint ? 1.1 : 0;
+
   // footer-chrome: the footer — contentinfo role / footer tag, bottom, short-ish.
   scores['footer-chrome'] =
     (s.ariaRole === 'contentinfo' || s.tag === 'footer' ? 0.6 : 0) +
@@ -211,10 +231,10 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
   // ad-or-void: ad slots or empty/decorative — ad/sponsor/promo tokens, emptiness,
   // or a large text-less image-less region. GUARDED: a code container (pre/code/
   // syntax) or a text-less+image-less block with REAL height inside article flow is
-  // content material, NOT a void — it must classify media/article-body, never
-  // ad-or-void (the MDN code-example trap). Suppress the void score in those cases —
-  // EXCEPT a genuine void TOKEN (ad/sponsor/promo) wins regardless: an explicit ad
-  // slot is a void even in article flow.
+  // content, NOT a void — it must classify article-body, never ad-or-void (the MDN
+  // code-example trap). Suppress the void score in those cases — EXCEPT a genuine
+  // void TOKEN (ad/sponsor/promo) wins regardless: an explicit ad slot is a void
+  // even in article flow.
   const realHeight = s.rectH >= 60;
   const voidToken = has(/(advert|\bad\b|sponsor|promo)/);
   const isContentBlock = s.codeHint || (s.inArticleFlow && realHeight);

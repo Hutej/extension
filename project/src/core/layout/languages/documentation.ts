@@ -14,7 +14,7 @@ import type { DesignRole } from '../../perceive/semantic.ts';
 import type { ConstraintPriority } from '../ir.ts';
 
 export type SlotId =
-  | 'masthead' | 'nav-local' | 'toc' | 'main' | 'aside' | 'footer' | 'overflow';
+  | 'masthead' | 'nav-local' | 'toc' | 'main' | 'footer' | 'overflow';
 
 export interface SlotConstraint {
   kind: string;           // a ConstraintKind string (FillParent, MaxWidth, etc.)
@@ -62,7 +62,9 @@ export const DOCUMENTATION_SLOTS: readonly SlotDef[] = [
   },
   {
     id: 'toc',
-    allowedRoles: [],
+    // X2: TOC role wired here. A table-of-contents is detected by principled
+    // signals (fragment-anchor links pointing at headings, outside main flow).
+    allowedRoles: ['toc'],
     preferredWidth: 'side',
     flow: 'column',
     ordering: 'source',
@@ -83,21 +85,6 @@ export const DOCUMENTATION_SLOTS: readonly SlotDef[] = [
       { kind: 'MaxWidth', priority: 'preferred', value: 'prose' },
       { kind: 'StackVertically', priority: 'required' },
       { kind: 'FillParent', priority: 'preferred' },
-    ],
-  },
-  {
-    id: 'aside',
-    // No role directly maps to aside on Documentation pages — supplementary right-rail
-    // content typically classifies as sidebar (→ nav-local). The aside slot exists for
-    // future enrichment (a right-rail detector) and stays empty for now.
-    allowedRoles: [],
-    preferredWidth: 'side',
-    flow: 'column',
-    ordering: 'source',
-    minWidth: 200,
-    constraints: [
-      { kind: 'MaxWidth', priority: 'preferred', value: 'side' },
-      { kind: 'StackVertically', priority: 'required' },
     ],
   },
   {
