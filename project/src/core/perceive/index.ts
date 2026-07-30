@@ -62,6 +62,13 @@ export interface ClusterLayout {
   isOpaqueWrapper: boolean;              // large solid-bg container hiding the canvas backdrop
   depth: number;
   siblingGapPx?: number;                 // gap to the next sibling (Phase 4: feeds the design-token spacing scale)
+  // Phase 2.5 — Layout IR needs these authored-layout facts. Captured here (perception's job is
+  // "computed styles") so the IR extraction stays pure (no DOM). Enrichment, not a rebuild.
+  position: 'static' | 'relative' | 'absolute' | 'fixed' | 'sticky';
+  flexWrap: boolean;                      // flex-wrap: wrap
+  alignment: 'start' | 'center' | 'end' | 'stretch' | 'mixed';  // align-items + justify-content bucket
+  widthSizing: 'auto' | 'fixed' | 'fluid';                       // how the cluster's width is authored
+  centered: boolean;                                            // margin-inline: auto
 }
 
 export interface Cluster {
@@ -459,10 +466,17 @@ function placeholderLayout(rep: Candidate, vpW: number): ClusterLayout {
     isPassiveWrapper: rep.passive,
     isOpaqueWrapper,
     depth: rep.depth,
+    // Phase 2.5 — defaults; enrichLayout fills the real values from computed style.
+    position: 'static',
+    flexWrap: false,
+    alignment: 'start',
+    widthSizing: 'auto',
+    centered: false,
   };
 }
 
 function enrichLayout(cluster: Cluster, rep: Candidate, _vpW: number): void {
+  const cs = getComputedStyle(rep.el);   // Phase 2.5 — one computed-style read for the layout facts
   let owner: HTMLElement | null = null;
   let p = rep.el.parentElement;
   while (p && p !== document.body && p !== document.documentElement) {
@@ -472,6 +486,26 @@ function enrichLayout(cluster: Cluster, rep: Candidate, _vpW: number): void {
   }
   cluster.layout.ownedByFlexGrid = owner != null;
   cluster.layout.constraintOwnerHandle = owner?.getAttribute(CLUSTER_ATTR) || null;
+  // Phase 2.5 — authored-layout facts the IR needs (perception captures computed styles; the IR
+  // projection stays pure). Bucketed/coarsened so they're stable across near-identical renders.
+  cluster.layout.position = (['absolute', 'fixed', 'sticky', 'relative'].includes(cs.position)
+    ? cs.position as ClusterLayout['position'] : 'static');
+  cluster.layout.flexWrap = cs.flexWrap === 'wrap' || cs.flexWrap === 'wrap-reverse';
+  const alignBucket = (v: string): 'start' | 'center' | 'end' | 'stretch' => {
+    if (v === 'center' || v === 'stretch' || v === 'flex-end' || v === 'end') return v === 'flex-end' ? 'end' : v as 'center' | 'stretch';
+    if (v === 'flex-start' || v === 'start') return 'start';
+    return 'start';
+  };
+  const ai = alignBucket(cs.alignItems);
+  const jc = alignBucket(cs.justifyContent);
+  cluster.layout.alignment = ai === jc ? ai : 'mixed';
+  // widthSizing: auto vs a fixed px vs a fluid (%/clamp/calc) authored width.
+  const w = cs.width;
+  if (w === 'auto') cluster.layout.widthSizing = 'auto';
+  else if (/px$/.test(w)) cluster.layout.widthSizing = 'fixed';
+  else if (/%|clamp|calc|min|max|vw|em|rem/.test(w)) cluster.layout.widthSizing = 'fluid';
+  else cluster.layout.widthSizing = 'auto';
+  cluster.layout.centered = cs.marginLeft === 'auto' && cs.marginRight === 'auto';
   let parentClusterEl: HTMLElement | null = null;
   let a = rep.el.parentElement;
   while (a) {

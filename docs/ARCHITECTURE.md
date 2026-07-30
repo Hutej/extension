@@ -216,7 +216,33 @@ all 5 sites. Pre-authorized blocked outcome: if the gate fails ONLY on resize no
 expected (geometry-derived handles re-cluster) — STOP and recommend pulling Phase 5 ahead of the
 solver; never tune clustering to green the number.
 
-**Measured numbers:** *(filled after Step 1 runs — TODO until then).*
+**Measured numbers (full 5-site grid, 0 paid calls, 1 full-grid run):**
+
+| Site | worst id | worst pc | worst role | worst con(no-Order) | fields | GATE |
+|---|---|---|---|---|---|---|
+| Wikipedia | 0.964 | 0.938 | 0.875 | 0.988 | 1.00 | FAIL (role) |
+| MDN | 0.989 | 1.000 | 0.924 | 1.000 | 1.00 | PASS |
+| BBC | 0.922 | 1.000 | 0.959 | 0.980 | 1.00 | PASS |
+| GitHub | 0.988 | 0.965 | 0.812 | 0.965 | 1.00 | FAIL (role) |
+| YouTube | 0.808 | 0.979 | 0.773 | 1.000 | 1.00 | FAIL (identity+role) |
+
+**Verdict: BLOCKED (2/5 pass).** The IR *construction* (`extractLayoutIR` + `currentConstraints`) is
+stable — constraint(no-Ordering) 0.965–1.000 and the 5 new perception fields at 1.00 everywhere. The
+two failure classes live in the **perception layer** the IR projects verbatim:
+
+- **`role` instability (Wikipedia, GitHub):** `classifyRole` uses viewport-coupled geometry thresholds
+  (`isLeft`/`isRight`/`widthRatio`/`rectY`). Under resize/zoom/reorder the geometry shifts and clusters
+  near a threshold reclassify. This is a perception-CLASSIFIER property, not an IR-derivation defect.
+- **`handle identity` instability (YouTube):** handles are signature-hashed from visual signature;
+  YouTube's dense feed re-clusters ~18–19% of handles under *any* perturbation (not resize-only), so it
+  does NOT qualify for the pre-authorized resize-only-identity blocked outcome.
+
+Per the rules, the classifier and clustering were NOT tuned to pass. The amendment-#2 split was
+decisive: with-`Ordering` constraint stability collapses to 0.247–0.859 (Ordering flips 4–75%); the
+no-`Ordering` gate number is the stable one (0.965–1.000). Resolution is a user decision: accept
+role-label instability (treat role as advisory; the IR structure is stable), revisit the classifier's
+viewport-coupled thresholds, or pull Phase 5 (role-anchored stable handles) ahead of the solver —
+which would stabilize BOTH role and YouTube identity by decoupling from geometry/signature.
 
 ## Model transport (unchanged by v1/v2 split)
 
