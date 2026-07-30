@@ -1,0 +1,128 @@
+# WebMorph — AGENTS.md
+
+*(Keep this file SMALL — it is auto-loaded into every prompt. Details live in the files below; read them on demand.)*
+
+This is not just an extension — this is an AI agent that lives in your browser. WebMorph reshapes ANY website in plain English — locally, never the site's backend. Endgame: replace EVERY browser extension. The moat is generality: principles, not recipes.
+
+## Phase 2.5 pointers (read `.kiro/steering/product.md` before any work)
+
+- **One architectural rule:** the AI owns design decisions, the Layout IR owns structure, the solver
+  owns constraints, the compiler owns CSS. No layer takes over another's responsibility.
+- **Pipeline flag:** `layoutCompiler = 'v1' | 'v2'` (default `v1`; `WM_LAYOUT_COMPILER` env + popup dev
+  toggle). v2 is the Layout IR -> Solver path; the two are not intertwined.
+- **Target device:** DESKTOP/LAPTOP only. No mobile-viewport work.
+- **Never read screenshots or PNG files** — active models are text-only. ONE exception: an advisory,
+  never-in-pipeline self-check via `@cf/moonshotai/kimi-k2.7-code`, ≤1 call per run. The user's eye is
+  the only PASS authority.
+- **Ponytail ladder:** walk it before every change (below). Stop at the first rung that holds.
+
+## Repo map (root = WebMorph/)
+
+- `project/` — the real codebase: extension + test harness (WXT, TypeScript strict, MV3, Playwright). All code work happens in `project/src/` and `project/tests/`.
+- `.kiro/steering/product.md` — roadmap with ALL phases + sub-phases and the CURRENT POSITION. **Read before starting any task.**
+- `docs/ARCHITECTURE.md` — engine pipeline, laws/constants, model config, harness gotchas. **Read before touching `project/src/`.**
+- `BROWSER_LAWS/`, `RESEARCH/`, `all-about_webmorph.txt` — background reference; read only when relevant.
+- `roadmap.txt` - if you dont know in which phase you are, you can refer this and you have authority to make changes in it if the step is completed and moving on. User will not specify this in prompt you have to handle it own
+  
+## Absolute rules
+
+1. **Phase discipline:** only solve the CURRENT phase's problems (see product.md). Defer + flag everything else.
+2. **Zero site-specific hardcoding.** Principles, not recipes. No aesthetic lookup tables. Test grids rotate NOVEL prompts (never reuse one).
+3. **Real proof only:** real extension, real sites, real model calls, real popup→Transform flow. NEVER pass a test by loosening it. NEVER fake or overstate a result.
+4. **All or nothing:** any original-looking region after a redesign = FAILURE, even if every automated check is green. The human eye is the final gate.
+5. **One-shot mandate:** best design in exactly ONE paid model call; deterministic/free repair preferred; paid reReason budget 1 (log loudly as a failure signal); ≤120s hard abort per attempt; retries only on 429/5xx; log tokens per run.
+6. **Do not rebuild `perceive/`** unless the audit proves it wrong (Round 7 rebuilt it — full-page, no node cap, hierarchical, family-aware). No vision/screenshot input to the design model. (Enrichment of `perceive/` is allowed — additive fields like Phase 1's `designRole`; a rebuild is not.)
+7. **Security/git:** `.env` stays gitignored (public repo); push only after proven slices. Quality over speed.
+8. **Layout flag:** `layoutCompiler = 'v1' | 'v2'` (default `v1`). P2.5 builds v2 behind the flag; never
+   intertwine the two paths.
+
+## The ladder (walk it before every change)
+
+1. Does this need to exist? → no: skip it (YAGNI)
+2. Already in codebase? → reuse
+3. Stdlib? → use it
+4. Native platform feature? → use it
+5. Installed dependency? → use it
+6. One line? → one line
+7. Only then: the minimum that works
+
+## Run the harness
+
+```
+cd project && node --experimental-strip-types --env-file=.env tests/popup.test.ts
+```
+`WMGRID=smoke` for 1-site quick test, `WMGRID=full` (default) for 5-site grid.
+
+## Status updates (required duty)
+
+When a sub-phase is REALLY done — proven by eye on real sites, screenshots captured, honest report given — update `.kiro/steering/product.md`: flip that sub-phase's checkbox to done and rewrite the "Current position" section. NEVER flip a checkbox on green automated checks alone; "done" requires genuine, honest, by-eye completion. If in doubt, leave it open and say why.
+
+## Reporting
+
+End every task with an honest report: what shipped · what's proven (real numbers: wall-clock, paid calls, verdicts) · what failed · out-of-scope findings (flag and STOP — never expand scope on your own).
+
+# AGENTS.md
+
+Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
+
+**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
+
+## 1. Think Before Coding
+
+**Don't assume. Don't hide confusion. Surface tradeoffs.**
+
+Before implementing:
+- State your assumptions explicitly. If uncertain, ask.
+- If multiple interpretations exist, present them - don't pick silently.
+- If a simpler approach exists, say so. Push back when warranted.
+- If something is unclear, stop. Name what's confusing. Ask.
+
+## 2. Simplicity First
+
+**Minimum code that solves the problem. Nothing speculative.**
+
+- No features beyond what was asked.
+- No abstractions for single-use code.
+- No "flexibility" or "configurability" that wasn't requested.
+- No error handling for impossible scenarios.
+- If you write 200 lines and it could be 50, rewrite it.
+
+Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
+
+## 3. Surgical Changes
+
+**Touch only what you must. Clean up only your own mess.**
+
+When editing existing code:
+- Don't "improve" adjacent code, comments, or formatting.
+- Don't refactor things that aren't broken.
+- Match existing style, even if you'd do it differently.
+- If you notice unrelated dead code, mention it - don't delete it.
+
+When your changes create orphans:
+- Remove imports/variables/functions that YOUR changes made unused.
+- Don't remove pre-existing dead code unless asked.
+
+The test: Every changed line should trace directly to the user's request.
+
+## 4. Goal-Driven Execution
+
+**Define success criteria. Loop until verified.**
+
+Transform tasks into verifiable goals:
+- "Add validation" → "Write tests for invalid inputs, then make them pass"
+- "Fix the bug" → "Write a test that reproduces it, then make it pass"
+- "Refactor X" → "Ensure tests pass before and after"
+
+For multi-step tasks, state a brief plan:
+```
+1. [Step] → verify: [check]
+2. [Step] → verify: [check]
+3. [Step] → verify: [check]
+```
+
+Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
+
+---
+
+**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
