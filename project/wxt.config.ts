@@ -23,6 +23,7 @@ export default defineConfig({
       'process.env.WM_MODEL_PAINTER': process.env.WM_MODEL_PAINTER ? JSON.stringify(process.env.WM_MODEL_PAINTER) : 'undefined',
       'process.env.WM_MODEL_CRITIC': process.env.WM_MODEL_CRITIC ? JSON.stringify(process.env.WM_MODEL_CRITIC) : 'undefined',
       'process.env.WM_EFFORT': process.env.WM_EFFORT ? JSON.stringify(process.env.WM_EFFORT) : 'undefined',
+      'process.env.WM_LAYOUT_COMPILER': process.env.WM_LAYOUT_COMPILER ? JSON.stringify(process.env.WM_LAYOUT_COMPILER) : 'undefined',
     },
   }),
 });

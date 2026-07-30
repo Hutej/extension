@@ -389,44 +389,65 @@ function findScrollables(clusters: Cluster[]): { handle: string; axis: 'x' | 'y'
 
 // ── Clustering + retention + layout enrichment ─────────────────────
 
-// P5.1 — structural identity. The handle is derived from DOM STRUCTURE, not
-// appearance: tag + nth-of-type chain from a stable ancestor, with stable
-// attributes (id, data-testid, role, aria-label, name) short-circuiting the
-// climb. FORBIDDEN as identity inputs: geometry, rects, widths, position,
-// colours, the visual-signature hash, the semantic role. The 7-char format
-// ('c' + 6-char hash) is preserved so nothing downstream breaks.
-// The visual signature is STILL used for CLUSTERING (grouping visually similar
-// elements); the handle is the cluster's STRUCTURAL identity.
+// P5.1 + S3.5 — structural identity. The handle is derived from DOM STRUCTURE, not
+// appearance: tag + nth-of-type chain, with stable attributes (id, data-testid,
+// role, aria-label, name) short-circuiting the climb. FORBIDDEN as identity inputs:
+// geometry, rects, widths, position, colours, the visual-signature hash, the
+// semantic role. The visual signature is STILL used for CLUSTERING (grouping
+// visually similar elements); the handle is the cluster's STRUCTURAL identity.
+//
+// S3.5: Anchor at the NEAREST element (self or ancestor) carrying a stable
+// attribute. Only use nth-of-type in the chain BELOW the anchor. Long nth-of-type
+// chains are fragile to sibling insertion by construction — a new <div> before an
+// existing one shifts every subsequent sibling's nth-of-type. Anchoring at a
+// stable attribute makes the chain immune to insertions ABOVE the anchor (the
+// anchor's id/role/etc doesn't change under sibling reordering), so only the
+// specific sub-chain below the insertion point is affected. This improves
+// mutation identity without touching the format ('c' + 6-char hash).
 function structuralPath(el: HTMLElement): string {
-  const parts: string[] = [];
-  let node: HTMLElement | null = el;
-  let depth = 0;
-  while (node && node !== document.body && node !== document.documentElement && depth < 15) {
-    const tag = node.tagName.toLowerCase();
-    // Stable attributes (preferred over nth-of-type) — but DON'T break early:
-    // duplicate IDs on a page would collide. The full ancestor chain guarantees
-    // uniqueness even with duplicate ids.
-    const id = node.id;
-    const testid = node.getAttribute('data-testid');
-    const role = node.getAttribute('role');
-    const ariaLabel = node.getAttribute('aria-label');
-    const name = node.getAttribute('name');
-    if (id) parts.unshift(`${tag}#${id}`);
-    else if (testid) parts.unshift(`${tag}[t=${testid}]`);
-    else if (role) parts.unshift(`${tag}[r=${role}]`);
-    else if (ariaLabel) parts.unshift(`${tag}[a=${ariaLabel.slice(0, 20)}]`);
-    else if (name) parts.unshift(`${tag}[n=${name}]`);
-    else {
-      // nth-of-type among same-tag siblings
-      let n = 0;
-      let sib = node.previousElementSibling;
-      while (sib) { if (sib.tagName === node.tagName) n++; sib = sib.previousElementSibling as Element | null; }
-      parts.unshift(`${tag}:${n + 1}`);
+  // Find the nearest stable anchor (self or ancestor, excluding body/html).
+  let anchor: HTMLElement | null = null;
+  let n: HTMLElement | null = el;
+  let searchDepth = 0;
+  while (n && n !== document.body && n !== document.documentElement && searchDepth < 20) {
+    if (n.id || n.getAttribute('data-testid') || n.getAttribute('role') ||
+        n.getAttribute('aria-label') || n.getAttribute('name')) {
+      anchor = n;
+      break;
     }
-    node = node.parentElement;
-    depth++;
+    n = n.parentElement;
+    searchDepth++;
   }
-  return parts.join('/');
+
+  // Build the path: anchor identifier + nth-of-type chain from anchor down to el.
+  const parts: string[] = [];
+  if (anchor) {
+    const tag = anchor.tagName.toLowerCase();
+    if (anchor.id) parts.push(`${tag}#${anchor.id}`);
+    else if (anchor.getAttribute('data-testid')) parts.push(`${tag}[t=${anchor.getAttribute('data-testid')}]`);
+    else if (anchor.getAttribute('role')) parts.push(`${tag}[r=${anchor.getAttribute('role')}]`);
+    else if (anchor.getAttribute('aria-label')) parts.push(`${tag}[a=${anchor.getAttribute('aria-label')!.slice(0, 20)}]`);
+    else if (anchor.getAttribute('name')) parts.push(`${tag}[n=${anchor.getAttribute('name')}]`);
+  } else {
+    parts.push('body');
+  }
+
+  // nth-of-type chain from el UP to (but not including) the anchor, then reverse
+  // so the path reads anchor → ... → el (top to bottom, consistent with the old format).
+  const chain: string[] = [];
+  let node: HTMLElement | null = el;
+  let d = 0;
+  while (node && node !== anchor && d < 10) {
+    const tag = node.tagName.toLowerCase();
+    let cnt = 0;
+    let sib = node.previousElementSibling;
+    while (sib) { if (sib.tagName === node.tagName) cnt++; sib = sib.previousElementSibling as Element | null; }
+    chain.push(`${tag}:${cnt + 1}`);
+    node = node.parentElement;
+    d++;
+  }
+  chain.reverse();
+  return [...parts, ...chain].join('/');
 }
 
 // P5.2 — sticky roles. Classify ONCE per handle per session; cache the result
@@ -1093,6 +1114,38 @@ export function findPrimaryContentNode(): Element | null {
 
 export function clearHandles(): void {
   document.querySelectorAll(`[${CLUSTER_ATTR}]`).forEach((el) => el.removeAttribute(CLUSTER_ATTR));
+}
+
+/**
+ * S3.4 — Perception settle condition. Replaces the fixed settleMs stopwatch
+ * with a MutationObserver-based quiet window: proceed when no layout-affecting
+ * mutations (childList, style/class attribute changes) fire for `quietMs`. The
+ * existing `maxMs` is the hard ceiling (the old MAX_TIME_MS, kept as a safety
+ * net). Returns whether the page truly settled (true) or the timeout kicked in
+ * (false), plus the actual wait time. The MDN 96→77→95 node-count variance was
+ * a timing artifact — with the sticky cache, a half-loaded page can seed the
+ * cache and hold all session; the settle condition prevents that.
+ */
+export async function waitForSettle(quietMs = 500, maxMs = 6000): Promise<{ settled: boolean; waitMs: number }> {
+  const t0 = performance.now();
+  let lastMutation = t0;
+  return new Promise((resolve) => {
+    const observer = new MutationObserver((): void => { lastMutation = performance.now(); });
+    observer.observe(document.body, {
+      childList: true, subtree: true,
+      attributes: true, attributeFilter: ['style', 'class'],
+    });
+    const check = (): void => {
+      const now = performance.now();
+      if (now - lastMutation >= quietMs || now - t0 >= maxMs) {
+        observer.disconnect();
+        resolve({ settled: now - lastMutation >= quietMs, waitMs: Math.round(now - t0) });
+      } else {
+        setTimeout(check, 100);
+      }
+    };
+    setTimeout(check, quietMs);
+  });
 }
 
 // ── Serialize for the AI — hierarchical tree, two-tier detail ───────

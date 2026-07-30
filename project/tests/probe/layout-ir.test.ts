@@ -393,10 +393,19 @@ function compare(baseline: IRShape, perturbed: IRShape, name: string): PerturbRe
 async function baselineAndAt(page: Page, bundle: string, url: string, settleMs: number): Promise<IRShape> {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
   await page.setViewportSize({ width: BASE_W, height: BASE_H });
-  await page.waitForTimeout(settleMs);
+  // S3.4 — inject the bundle so waitForSettle is available, then use the
+  // MutationObserver settle condition instead of the fixed settleMs stopwatch.
+  await page.evaluate((src: string) => { new Function(src)(); }, bundle);
+  const settleResult = await page.evaluate(async () => {
+    const wfs = (globalThis as unknown as { __wmWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__wmWaitForSettle;
+    if (wfs) return await wfs(500, 6000);
+    return { settled: false, waitMs: 0 };
+  });
   // P5.2 — clear the sticky role cache on navigation (session-scoped, not page-persisted).
   await page.evaluate(() => { (globalThis as unknown as { __wmClearRoleCache?: () => void }).__wmClearRoleCache?.(); });
-  return runIR(page, bundle);
+  const ir = await runIR(page, bundle);
+  (ir as IRShape & { settleInfo?: { settled: boolean; waitMs: number } }).settleInfo = settleResult;
+  return ir;
 }
 
 async function atCurrentViewport(page: Page, bundle: string, settleMs: number): Promise<IRShape> {
@@ -524,7 +533,8 @@ function gateCheck(p: PerturbResult, reasonOut: string[]): boolean {
 async function measureSite(page: Page, bundle: string, site: { name: string; url: string; settleMs: number }): Promise<SiteResult> {
   console.log(`\n=== ${site.name} ===`);
   const base = await baselineAndAt(page, bundle, site.url, site.settleMs);
-  console.log(`  baseline: ${base.clusterCount} nodes @ ${BASE_W}x${BASE_H} — C3 normWidth: ${base.parentWidthFromParent} parent-relative / ${base.parentWidthFallback} viewport-fallback`);
+  const settle = (base as IRShape & { settleInfo?: { settled: boolean; waitMs: number } }).settleInfo;
+  console.log(`  baseline: ${base.clusterCount} nodes @ ${BASE_W}x${BASE_H} — settle: ${settle?.settled ? 'quiet' : 'timeout'} @ ${settle?.waitMs}ms — C3 normWidth: ${base.parentWidthFromParent} parent-relative / ${base.parentWidthFallback} viewport-fallback`);
   const perturbs: PerturbResult[] = [];
   perturbs.push(...await perturbResize(page, bundle, base, site.url, site.settleMs));
   perturbs.push(...await perturbZoom(page, bundle, base, site.settleMs));
@@ -699,6 +709,68 @@ function printReport(results: SiteResult[]): void {
   }
 }
 
+// ── S3.3 — Cross-run role agreement ──────────────────────────────────
+
+/** Two fresh loads (cache cleared) of each doc site. Measures whether the
+ *  first classification (now permanent via sticky cache) is consistent across
+ *  independent loads. Also reports node-count spread (S3.4 settle verification). */
+async function crossRunAgreement(page: Page, bundle: string, docSites: { name: string; url: string; settleMs: number }[]): Promise<void> {
+  console.log('\n\n========== S3.3 — CROSS-RUN ROLE AGREEMENT ==========\n');
+  console.log('Two fresh loads (cache cleared) of each doc site. Sticky roles are');
+  console.log('cleared between runs so each classifies fresh. Measures whether the');
+  console.log('first classification is consistent across independent loads.\n');
+
+  interface RunInfo { name: string; run1Nodes: number; run1Settle: string; run2Nodes: number; run2Settle: string; spread: number; shared: number; agreed: number; agreement: number; }
+  const results: RunInfo[] = [];
+
+  for (const site of docSites) {
+    console.log(`  --- ${site.name} ---`);
+    // Run 1
+    await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.setViewportSize({ width: BASE_W, height: BASE_H });
+    await page.evaluate((src: string) => { new Function(src)(); }, bundle);
+    const s1 = await page.evaluate(async () => {
+      const wfs = (globalThis as unknown as { __wmWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__wmWaitForSettle;
+      return wfs ? await wfs(500, 6000) : { settled: false, waitMs: 0 };
+    }) as { settled: boolean; waitMs: number };
+    await page.evaluate(() => { (globalThis as unknown as { __wmClearRoleCache?: () => void }).__wmClearRoleCache?.(); });
+    const ir1 = await runIR(page, bundle);
+
+    // Run 2 (fresh reload, cache cleared again)
+    await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
+    await page.setViewportSize({ width: BASE_W, height: BASE_H });
+    await page.evaluate((src: string) => { new Function(src)(); }, bundle);
+    const s2 = await page.evaluate(async () => {
+      const wfs = (globalThis as unknown as { __wmWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__wmWaitForSettle;
+      return wfs ? await wfs(500, 6000) : { settled: false, waitMs: 0 };
+    }) as { settled: boolean; waitMs: number };
+    await page.evaluate(() => { (globalThis as unknown as { __wmClearRoleCache?: () => void }).__wmClearRoleCache?.(); });
+    const ir2 = await runIR(page, bundle);
+
+    // Compare: for shared handles, fraction with same role.
+    const m1 = byHandle(ir1), m2 = byHandle(ir2);
+    let shared = 0, agreed = 0;
+    for (const [h, n1] of m1) {
+      const n2 = m2.get(h);
+      if (!n2) continue;
+      shared++;
+      if (n1.role === n2.role) agreed++;
+    }
+    const agreement = shared > 0 ? agreed / shared : 1;
+    const spread = Math.abs(ir1.clusterCount - ir2.clusterCount);
+    const r1s = `${s1.settled ? 'quiet' : 'timeout'}@${s1.waitMs}ms`;
+    const r2s = `${s2.settled ? 'quiet' : 'timeout'}@${s2.waitMs}ms`;
+    console.log(`    run1: ${ir1.clusterCount} nodes (${r1s}) | run2: ${ir2.clusterCount} nodes (${r2s}) | spread=${spread} | role agreement=${agreement.toFixed(3)} (${agreed}/${shared})`);
+    results.push({ name: site.name, run1Nodes: ir1.clusterCount, run1Settle: r1s, run2Nodes: ir2.clusterCount, run2Settle: r2s, spread, shared, agreed, agreement });
+  }
+
+  console.log('\n  --- Summary table ---');
+  console.log(`  ${'Site'.padEnd(12)} ${'Run1'.padEnd(8)} ${'Run2'.padEnd(8)} ${'Spread'.padEnd(7)} ${'Agreement'.padEnd(10)} ${'Agreed/Shared'.padEnd(14)}`);
+  for (const r of results) {
+    console.log(`  ${r.name.padEnd(12)} ${String(r.run1Nodes).padEnd(8)} ${String(r.run2Nodes).padEnd(8)} ${String(r.spread).padEnd(7)} ${r.agreement.toFixed(3).padEnd(10)} ${r.agreed}/${r.shared}`);
+  }
+}
+
 async function main(): Promise<void> {
   const bundle = await buildBundle();
   console.log(`bundle: ${bundle.length} chars (real perceive + extractLayoutIR, 0 model calls)`);
@@ -715,13 +787,24 @@ async function main(): Promise<void> {
   }
   printReport(results);
 
-  // Step 2 — run the v2 solver on MDN (or the smoke site) and report what it emitted.
+  // S3.3 — Cross-run role agreement (2 fresh loads of each doc site).
+  const docSiteNames = ['MDN', 'Wikipedia', 'GitHub'];
+  const docSitesForAgreement = sites.filter((s) => docSiteNames.includes(s.name));
+  await crossRunAgreement(page, bundle, docSitesForAgreement);
+
+  // Step 3 — run the v2 solver on MDN, execute the wrapper plan, show the shell grid.
   const solverSite = process.env.WM_RUN_SOLVER ? (SMOKE ? sites[0] : sites.find((s) => s.name === 'MDN') ?? sites[0]) : null;
   if (solverSite) {
-    console.log(`\n\n========== STEP 2 — V2 SOLVER OUTPUT (${solverSite.name}) ==========`);
+    console.log(`\n\n========== STEP 3 — V2 SOLVER + SLOT WRAPPERS (${solverSite.name}) ==========`);
     await page.goto(solverSite.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.setViewportSize({ width: BASE_W, height: BASE_H });
-    await page.waitForTimeout(solverSite.settleMs);
+    // S3.4 — settle condition, not fixed wait.
+    await page.evaluate((src: string) => { new Function(src)(); }, bundle);
+    const settleInfo = await page.evaluate(async () => {
+      const wfs = (globalThis as unknown as { __wmWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__wmWaitForSettle;
+      return wfs ? await wfs(500, 6000) : { settled: false, waitMs: 0 };
+    }) as { settled: boolean; waitMs: number };
+    console.log(`  settle: ${settleInfo.settled ? 'quiet' : 'timeout'} @ ${settleInfo.waitMs}ms`);
     await page.evaluate(() => { (globalThis as unknown as { __wmClearRoleCache?: () => void }).__wmClearRoleCache?.(); });
     const solverResult = await page.evaluate(async (src: string) => {
       new Function(src)();
@@ -731,6 +814,7 @@ async function main(): Promise<void> {
       const detectExcl = (window as unknown as { __wmDetectExclusions: (c: any[]) => Map<string, string> }).__wmDetectExclusions;
       const assignS = (window as unknown as { __wmAssignSlots: (n: any[], e: Set<string>) => any }).__wmAssignSlots;
       const solve = (window as unknown as { __wmSolve: (i: any) => any }).__wmSolve;
+      const applyWrappers = (window as unknown as { __wmApplySlotWrappers: (p: any, d: any, t: any) => any }).__wmApplySlotWrappers;
       clearHandles();
       const p = perceive() as any;
       const ir = extractIR(p);
@@ -739,13 +823,34 @@ async function main(): Promise<void> {
       for (const [h] of excludedRaw) excludedSet.add(h);
       const assignment = assignS(ir.nodes, excludedSet);
       const result = solve({ ir, assignment, excluded: excludedSet });
+      // S3.1 — execute the wrapper plan against the live DOM.
+      const wrapResult = applyWrappers
+        ? applyWrappers(result.wrappers, {
+            resolve: (h: string) => document.querySelector(`[data-wm-c="${h}"]`),
+            parent: (n: any) => n.parentNode,
+            nextSibling: (n: any) => n.nextSibling,
+            insertBefore: (p: any, n: any, r: any) => p.insertBefore(n, r),
+            appendChild: (p: any, n: any) => p.appendChild(n),
+            removeChild: (p: any, n: any) => p.removeChild(n),
+            createElement: (t: string) => document.createElement(t),
+            resolveDestination: () => null,
+          }, { record: () => {} } as any)
+        : { wrappersCreated: 0, nodesMoved: 0 };
+      // Count slot distribution
+      const slotDist: Record<string, number> = {};
+      for (const [h, s] of assignment.handleToSlot) slotDist[s] = (slotDist[s] ?? 0) + 1;
       return { css: result.css, rulesEmitted: result.rulesEmitted, matchedTargets: result.matchedTargets,
         impossibleNodes: result.impossibleNodes, droppedOptionals: result.droppedOptionals,
-        nodeCount: ir.nodes.length, slotMap: [...assignment.handleToSlot.entries()].reduce((o, [h, s]) => { (o as any)[h] = s; return o; }, {}) };
+        nodeCount: ir.nodes.length, wrappersCreated: wrapResult.wrappersCreated, nodesMoved: wrapResult.nodesMoved,
+        wrapperCount: result.wrappers.length, wrapperSlots: result.wrappers.map((w: any) => `${w.slotId}(${w.handles.length})`).join(', '),
+        slotDist };
     }, bundle);
     console.log(`  nodes: ${solverResult.nodeCount}, rules emitted: ${solverResult.rulesEmitted}, matched: ${solverResult.matchedTargets}`);
     console.log(`  impossible nodes: ${solverResult.impossibleNodes.length === 0 ? 'none' : solverResult.impossibleNodes.join(', ')}`);
     console.log(`  dropped optionals: ${solverResult.droppedOptionals.length === 0 ? 'none' : solverResult.droppedOptionals.map((d: any) => `${d.handle}:${d.kind}`).join(', ')}`);
+    console.log(`  slot wrappers: ${solverResult.wrapperCount} (${solverResult.wrapperSlots})`);
+    console.log(`  wrappers created: ${solverResult.wrappersCreated}, nodes moved: ${solverResult.nodesMoved}`);
+    console.log(`  slot distribution: ${Object.entries(solverResult.slotDist).map(([k, v]) => `${k}=${v}`).join(', ')}`);
     console.log(`\n--- CSS (first 4000 chars) ---\n${solverResult.css.slice(0, 4000)}${solverResult.css.length > 4000 ? '\n... (truncated)' : ''}`);
   }
 

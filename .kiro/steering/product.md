@@ -62,10 +62,11 @@ Each phase gets an explicit `GATE:` line. A phase is not done until its gate pas
   5/5 sites apply + the user's by-eye judgment — machinery green but the user said "nothing is good".
   The verdict is architectural (see Current position): the engine restyles the original DOM; it never
   re-lays-out the page.
-- **P2.5 Layout IR + Responsive Solver v1 — CURRENT (steps 1–8).** GATE (this phase): IR stability
+- **P2.5 Layout IR + Responsive Solver v1 — CURRENT (Step 3 done, by-eye gate pending user review).** GATE (this phase): IR stability
   gate (Step 1) + all 6 hard gates clean on the 3 validation sites + parity vs the original on those 3
   + resize 1920/1440/1280 no breakage + slot invariant + BBC/YouTube apply-without-rollback. The user's
-  eye is the only PASS authority.
+  eye is the only PASS authority. Step 3 shipped the page shell (S3.1–S3.6 done); hard gates still need
+  fixes (Wikipedia voids, GitHub overflow) before the by-eye gate can PASS.
 - **P2.6 Stress sites BBC + YouTube — 5/5-applied beauty gate returns here.** GATE: 5/5 sites applied
   + by-eye beauty on BBC + YouTube under the exclusion registry.
 - **P3 Migration completion + BRUTAL DELETION.** Only AFTER the v2 flag is switched on and parity
@@ -160,13 +161,14 @@ global layout optimization.
 
 ## Current position
 
-**P2.5 — Phase 5 DONE + Step 2 (solver) STARTED.** Phase 5 (structural identity + sticky roles)
-resolved the role/slot stability gate completely: role=1.000 and slot-stab=1.000 on all 5 sites, all
-perturbations. Zero role flips. The exit rule's (a), (b), (c) now all PASS (were failing); only (d)
-MDN overflow 36% remains (timing artifact, not a code regression). Step 2 (v1 solver) is built behind
-the `layoutCompiler=v2` flag and emits responsive CSS for MDN (88 rules, 0 impossible, 0 dropped
-optionals). YouTube identity 0.788 — NOT confined (JS re-renders DOM structure). 0 paid calls.
-Full-grid runs: 2/2 used.
+**P2.5 — Step 3 DONE (by-eye gate run).** Phase 5 + Step 2 shipped (d3e787e). Step 3 (S3.1–S3.6)
+built the page shell: the solver now emits a `[data-wm-shell]` grid with one `[data-wm-slot]`
+wrapper per slot, moving top-level slot nodes into their wrappers via `applySlotWrappers()`.
+Cross-run role agreement = 1.000 on all 3 doc sites (spread=0). Perception settle condition
+prevents half-loaded pages from seeding the sticky cache. Identity chain shortened (anchored at
+nearest stable attribute). By-eye gate run: MDN timed out (Painter 90s), Wikipedia + GitHub applied
+(4 wrappers each). Screenshots saved for user judgment. Hard gates: Wikipedia 2 voids, GitHub
+overflow on resize + 2 invisible-text. Full-grid runs: 1/2 used this session.
 
 **Phase 5 RESULT — STRUCTURAL IDENTITY + STICKY ROLES:**
 
@@ -213,6 +215,64 @@ Full-grid runs: 2/2 used.
   (side), `display: flex; flex-direction: column` (stack), `font-size: var(--wm-step-0/2)` (fluid text),
   `margin-inline: auto` (centered), `flex-wrap: wrap` (wrap-on-overflow). Excluded subtrees skipped.
   matched-targets=0 is a hard error. Reading order inviolable (no `order`/arbitrary `grid-area`).
+
+**Step 3 RESULT — THE PAGE SHELL, THEN THE BY-EYE GATE:**
+
+The Step 2 solver emitted per-node restyles. Step 3 makes it emit a PAGE SHELL: one grid on
+a shell container, one wrapper per slot, nodes moved into their wrappers. The solver now
+points at the page, not individual elements.
+
+- [x] **S3.1** — Slot containers. `solve()` builds a `WrapperPlan` (one entry per slot with ≥1
+  top-level node). `applySlotWrappers()` creates the shell at body level, one `[data-wm-slot]`
+  wrapper per slot, moves each slot's top-level nodes into their wrapper in DOM-source order.
+  Records an exact inverse per move in the transaction log for undo. Overflow + excluded nodes
+  NOT wrapped/moved. Top-level filter: a node whose parent is in the SAME slot moves with its
+  parent (skipped); a node whose parent is in a DIFFERENT slot gets its own wrapper. Shell
+  inserted at body level (prevents HierarchyRequestError when a moved node is an ancestor of
+  the shell's original position). MDN: 4 wrappers (masthead(8), nav-local(9), main(11), footer(1)),
+  25 nodes moved. Wikipedia: 4 wrappers, 19 nodes moved. GitHub: 4 wrappers, 40 nodes moved.
+- [x] **S3.2** — Shell grid. ONE `[data-wm-shell]` grid from the slot definitions. Side rails get
+  width from `minmax(minWidth, 20vw)` (never a frozen px literal). `max-width: 300px` DELETED.
+  `--wm-step-1` DELETED (dead token — IR doesn't carry heading levels). MDN grid:
+  `grid-template-columns: minmax(180px, 20vw) minmax(320px, 1fr)`. Slot wrappers get `grid-column`
+  placement (full=1/-1, side=1, content=2), `display: flex`, flex-direction from slot flow,
+  `gap: var(--wm-space-s/m)`, `max-width: 65ch` + `margin-inline: auto` on content slot.
+  Per-node CSS is minimal: fluid text sizing + `max-width: 100%` overflow safety only.
+- [x] **S3.3** — Cross-run role agreement. Two fresh loads (cache cleared) of each doc site:
+
+  | Site | Run1 | Run2 | Spread | Agreement | Agreed/Shared |
+  |---|---|---|---|---|---|
+  | Wikipedia | 81 | 81 | 0 | **1.000** | 81/81 |
+  | MDN | 78 | 78 | 0 | **1.000** | 78/78 |
+  | GitHub | 85 | 85 | 0 | **1.000** | 85/85 |
+
+  Perfect agreement on all 3 doc sites. The first classification (now permanent via sticky cache)
+  is consistent across independent loads.
+- [x] **S3.4** — Perception settle condition. Replaced fixed `settleMs` stopwatch with a
+  MutationObserver quiet window (`waitForSettle`): proceed when no layout-affecting mutations
+  for 500ms, with 6000ms hard ceiling. All sites settled quietly (not timeout): Wikipedia 726ms,
+  MDN 509ms, GitHub 1381ms, BBC 836ms, YouTube 5671ms. Node-count spread across S3.3 runs: 0 on
+  all 3 doc sites (was 96→77→95 variance pre-settle). The settle condition prevents a half-loaded
+  page from seeding the sticky cache.
+- [x] **S3.5** — Shorten identity chain. `structuralPath()` anchors at the NEAREST element
+  (self or ancestor) carrying a stable attribute (id/data-testid/role/aria-label/name), then uses
+  nth-of-type only below the anchor. Mutation identity before → after:
+  Wikipedia 0.646→**0.940** (improved), MDN 0.619→0.549 (slightly worse), GitHub 0.819→0.819
+  (unchanged). Mixed result: anchoring helps when stable attributes are high in the tree
+  (Wikipedia) but can hurt when the structure changes dramatically (MDN). Improvement is expected,
+  1.000 is not — some churn is correct.
+- [x] **S3.6** — By-eye gate. Real popup→Transform flow with `layoutCompiler=v2`, novel prompt
+  "botanical field guide", 1 paid call per site (Painter only). Screenshots saved at
+  `project/tests/artifacts/`:
+  - `after_MDN.png` — **FAILED** (Painter timed out at 90s, 1 paid call wasted). No transform applied.
+  - `after_Wikipedia.png` — **APPLIED** (33.3s, 1 paid call, 4 wrappers, 19 nodes moved). Hard
+    gates: 2 pixel voids, no invisible text, no squeeze, multiViewport=ok, zoom=ok, devtools=ok.
+    Voids suggest the shell grid leaves dead zones that the Painter didn't fill.
+  - `after_github.png` — **APPLIED** (73.5s, 1 paid call, 4 wrappers, 40 nodes moved). Hard
+    gates: 2 invisible-text clusters, overflow on resize (multiViewport=FAIL), zoom=FAIL,
+    devtools=FAIL. The shell grid causes overflow at smaller viewports on GitHub.
+  - Screenshots are for the USER to judge. DO NOT OPEN the PNGs (models are text-only).
+  - 3/3 paid calls used. 0 reReason calls (v2 path has no Critic). Full-grid budget: 1/2 used.
 
 **Step 1.5 RESULT — DIAGNOSE, NORMALIZE, RE-GATE ON SLOT-ASSIGNMENT STABILITY:**
 
@@ -288,13 +348,12 @@ The solver (Step 2) is NOT started. **Phase 5 (role-anchored stable handles) is 
 
 ## Current position (updated)
 
-**P2.5 — Step 1.6 BLOCKED → Phase 5 next.** The decontaminated gate shows the slot-assignment
-stability bar is not met: all three Documentation sites are below 0.95 (GitHub worst at 0.889),
-and MDN's overflow is still 21% at baseline (36% under mut-reorder). The codeHint fix cut MDN
-overflow from 39% to 21% but did not get it below 15%. Constraint stability is strong (≥0.963
-everywhere). Critical flip counts are within limits (max 3). The pre-committed exit rule fires
-the BLOCKED branch: **Phase 5 (role-anchored stable handles) is built next, ahead of the solver.**
-No third stability step. No threshold adjustments after seeing numbers.
+**P2.5 — Step 3 DONE (by-eye gate run).** The solver now emits a page shell (grid + slot wrappers),
+not per-node restyles. Cross-run role agreement = 1.000 on all 3 doc sites. Perception settles before
+classifying. By-eye gate: 2/3 sites applied (MDN timed out at 90s Painter). Screenshots saved for
+user judgment — the user's eye is the only PASS authority. Hard gates need work: Wikipedia has 2 voids,
+GitHub has overflow on resize + 2 invisible-text. Next: user reviews screenshots → fix hard gates →
+re-run by-eye gate. Full-grid runs: 1/2 used this session.
 
 ## Status update protocol (for ALL agents)
 

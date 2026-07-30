@@ -28,6 +28,10 @@ import type { DesignSpec } from '@/core/spec';
 import type { Perception } from '@/core/perceive';
 import { TransactionLog, type DomAdapter } from '@/core/ops/transaction';
 import { validateOps, type ValidatedOp } from '@/core/ops';
+import { extractLayoutIR } from '@/core/layout/ir';
+import { detectExclusions } from '@/core/layout/exclusions';
+import { assignSlots } from '@/core/layout/assign';
+import { solve, applySlotWrappers } from '@/core/layout/solve';
 
 interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?: string; usage?: unknown; model?: string; callMs?: number; }
 
@@ -468,6 +472,74 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   // A Critic repair round fits only if the remaining wall-clock clears the per-call
   // minimum; the budget is time, not a call count.
   const canReReason = (): boolean => (AI_CONFIG.designMaxMs - (Date.now() - t0)) > AI_CONFIG.criticMinMs;
+
+  // S3.6 — v2 path: solver structural CSS + Painter aesthetic CSS. One paid call
+  // (Painter only). The solver handles the page shell (grid + slot wrappers); the
+  // Painter handles the surface (colors, fonts, surfaces). Behind layoutCompiler=v2.
+  if (AI_CONFIG.layoutCompiler === 'v2' && !restyleOnly) {
+    // Undo any previous DOM ops (wrappers from a prior transform).
+    txnLog.undoAll(liveDom);
+    txnLog.clear();
+
+    // Painter only (one paid call). The solver handles structure.
+    const v2PaintRes = await askForSpec('painter', intent, painterSerialized);
+    recordCall('painter', v2PaintRes);
+    if (!v2PaintRes.ok || !v2PaintRes.spec) {
+      removeStyleEverywhere(activeShadowRoots);
+      markFailed(v2PaintRes.message || 'Painter failed');
+      return { ok: false, kind: v2PaintRes.kind, message: v2PaintRes.message, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
+    }
+    const v2Spec = v2PaintRes.spec;
+
+    // Structural layer: perceive → IR → slots → solve → wrappers + CSS.
+    const v2IR = extractLayoutIR(perception);
+    const v2ExcludedRaw = detectExclusions(perception.clusters);
+    const v2ExcludedSet = new Set<string>();
+    for (const [h] of v2ExcludedRaw) v2ExcludedSet.add(h);
+    const v2Assignment = assignSlots(v2IR.nodes, v2ExcludedSet);
+    const v2SolveResult = solve({ ir: v2IR, assignment: v2Assignment, excluded: v2ExcludedSet });
+
+    // Execute wrapper plan (DOM mutation, recorded for undo).
+    const v2WrapResult = applySlotWrappers(v2SolveResult.wrappers, liveDom, txnLog);
+    logDebug(`v2 solver: ${v2SolveResult.wrappers.length} slot wrappers, ${v2WrapResult.nodesMoved} nodes moved, ${v2SolveResult.rulesEmitted} CSS rules, ${v2SolveResult.matchedTargets} matched targets`);
+
+    // Aesthetic layer: compile the Painter's spec → surface CSS.
+    const v2Options: CompileOptions = { paletteMode: v2Spec.paletteMode };
+    const v2Compiled = compileSpec(v2Spec, perception, v2Options);
+    const v2StructuralCss = v2SolveResult.css;
+    const v2AestheticCss = sanitizeCss(v2Compiled.css).css;
+    const v2CombinedCss = sanitizeCss(v2StructuralCss + '\n' + v2AestheticCss).css;
+    if (!v2CombinedCss.trim()) {
+      removeStyleEverywhere(activeShadowRoots); markFailed('no styles');
+      return { ok: false, message: 'v2 produced no styles', paidCalls: paidCalls(), wallMs: Date.now() - t0 };
+    }
+
+    // Apply combined CSS (structural grid + aesthetic surface).
+    applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
+    document.documentElement.dataset['webmorphPaintCount'] = '1';
+
+    // Persist + defend + mark applied.
+    const v2Key = storageKey();
+    const v2State = await loadSiteState(v2Key);
+    const v2Id = `style_${Date.now()}`;
+    v2State.enabled = true;
+    v2State.style = { id: v2Id, intent, spec: v2Spec, css: v2CombinedCss, reasoning: v2Spec.reasoning, compileOptions: v2Options, createdAt: Date.now() };
+    await saveSiteState(v2Key, v2State);
+    startDefenseEverywhere(v2CombinedCss, activeShadowRoots);
+    activeSpec = v2Spec;
+    activeOpts = v2Options;
+    ensureEscapeUI(toggleSiteState);
+    markApplied(v2Id);
+
+    const v2TotalMs = Date.now() - t0;
+    logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms`).join(', ')}] total=${v2TotalMs}ms paidCalls=${paidCalls()} wrappers=${v2SolveResult.wrappers.length} nodesMoved=${v2WrapResult.nodesMoved}`);
+
+    return {
+      ok: true, spec: v2Spec,
+      paidCalls: paidCalls(), wallMs: v2TotalMs, paintCount: 1,
+      clusters: perception.clusters.length,
+    };
+  }
 
   // ── Design call: Architect + Painter in PARALLEL, then merge ──
   // The Architect sets the structure (composition/layout/canvasLayout/hide); the
