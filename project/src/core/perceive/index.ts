@@ -633,11 +633,17 @@ function gatherSignals(cluster: Cluster, el: HTMLElement, viewport: { w: number;
   const cs = getComputedStyle(el);
   const classTokens = ((el.id || '') + ' ' + (typeof el.className === 'string' ? el.className : '')).toLowerCase();
   const fontSize = parseFloat(cs.fontSize) || 16;
-  // Phase 2 — codeHint: the cluster IS or CONTAINS a code block. Universal
-  // convention tokens (code/syntax/highlight/brush/example) — not a site recipe.
+  // Phase 2 / 1.6B — codeHint: the cluster IS or CONTAINS a code block. Universal
+  // convention tokens (code/syntax/highlight/brush/example), monospace computed
+  // font-family, and syntax-highlight token density (Prism/highlight.js child spans
+  // with token/hljs/syntax classes). Principled signals only — no site names.
+  const isMonospace = /mono/i.test(cs.fontFamily) && tag !== 'input' && tag !== 'textarea' && tag !== 'button';
+  const syntaxTokenCount = el.querySelectorAll('[class*="token-"], [class*="hljs-"], [class*="syntax-"], [class*="hljs-"]').length;
   const codeHint = tag === 'pre' || tag === 'code' ||
     /\b(pre|code|syntax|highlight|brush|example)\b/.test(classTokens) ||
-    el.querySelector('pre, code, .syntaxhighlight, [class*="highlight"], [class*="code"]') != null;
+    el.querySelector('pre, code, .syntaxhighlight, [class*="highlight"], [class*="code"]') != null ||
+    isMonospace ||
+    syntaxTokenCount >= 3;
   // Phase 2 — inArticleFlow: the cluster sits inside a main/article region. A
   // text-less+image-less block with real height in article flow is content, not
   // a void (the MDN code-example trap).
@@ -660,6 +666,7 @@ function gatherSignals(cluster: Cluster, el: HTMLElement, viewport: { w: number;
     rectX: rect.x, rectY: rect.y, rectW: rect.width, rectH: rect.height,
     widthRatio: cluster.layout.widthRatio,
     widthFractionOfParent: cluster.widthFractionOfParent,
+    normWidthFromParent: cluster.widthFractionOfParent < 1,
     count: cluster.count,
     classTokens,
     emptinessScore: cluster.emptinessScore,
@@ -681,12 +688,17 @@ function enrichSemantic(clusters: Cluster[], viewport: { w: number; h: number })
   const ranked: { handle: string; role: DesignRole; rank: number; rectX: number; rectY: number; widthRatio: number }[] = [];
   for (const cluster of clusters) {
     const el = representativeFor(cluster);
-    // Default to ad-or-void/0 confidence if the representative vanished (an op removed
-    // it, or the stamp didn't take) — the classifier never throws, and a vanished
-    // cluster has no signals to classify.
+    // 1.6B: a vanished representative that was pre/code at stamping time is content
+    // (media), not a void — the MDN code-example trap. The stamping-time tag is the
+    // only signal left; use it rather than defaulting everything to ad-or-void/0.
     if (!el) {
-      cluster.designRole = 'ad-or-void';
-      cluster.designRoleConfidence = 0;
+      if (cluster.tag === 'pre' || cluster.tag === 'code') {
+        cluster.designRole = 'media';
+        cluster.designRoleConfidence = 0.5;
+      } else {
+        cluster.designRole = 'ad-or-void';
+        cluster.designRoleConfidence = 0;
+      }
       cluster.dominanceRank = 0;
       cluster.group = null;
       continue;

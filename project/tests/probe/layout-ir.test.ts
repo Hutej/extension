@@ -81,9 +81,35 @@ export interface IRShape {
   nodes: IRNodeShape[];
   slotMap: Record<string, string>;       // 1.5D: handle -> slotId
   excludedMap: Record<string, string>;    // 1.5C: handle -> exclusion reason
+  parentWidthFromParent: number;          // 1.6C: clusters using parent-relative path (widthFractionOfParent < 1)
+  parentWidthFallback: number;            // 1.6C: clusters using viewport fallback (widthFractionOfParent >= 1)
 }
 
 const KINDS = ['FillParent', 'Centered', 'StackVertically', 'WrapOnOverflow', 'MaxWidth', 'AspectRatio', 'Gap', 'Alignment', 'Ordering'] as const;
+
+// 1.6A — role → slot map (mirrors languages/documentation.ts). Used to classify flip
+// pairs as LAYOUT-CRITICAL (different slots) or COSMETIC (same slot). Test fixture, not
+// product code — no hostname branching, just a mirror of the slot language for analysis.
+const ROLE_TO_SLOT_MERGED: Record<string, string> = {
+  'page-title': 'masthead', 'nav-primary': 'masthead', 'search': 'masthead', 'toolbar': 'masthead', 'actions-primary': 'masthead',
+  'nav-local': 'nav-local', 'sidebar': 'nav-local',  // merged (1.5D)
+  'article-body': 'main', 'listing': 'main', 'media': 'main', 'comments': 'main', 'metadata': 'main',
+  'footer-chrome': 'footer',
+  // ad-or-void → overflow
+};
+const ROLE_TO_SLOT_UNMERGED: Record<string, string> = {
+  ...ROLE_TO_SLOT_MERGED,
+  'sidebar': 'sidebar',  // sidebar as its own slot (1.6A A2)
+};
+function slotFor(role: string, merged: boolean): string {
+  const map = merged ? ROLE_TO_SLOT_MERGED : ROLE_TO_SLOT_UNMERGED;
+  return map[role] ?? 'overflow';
+}
+/** A flip pair is LAYOUT-CRITICAL if the two roles land in DIFFERENT slots (the node
+ *  would change which region of the page it belongs to). COSMETIC if same slot. */
+function flipSeverity(from: string, to: string, merged: boolean): 'CRITICAL' | 'COSMETIC' {
+  return slotFor(from, merged) !== slotFor(to, merged) ? 'CRITICAL' : 'COSMETIC';
+}
 
 async function runIR(page: Page, bundle: string): Promise<IRShape> {
   return await page.evaluate(async (src: string): Promise<IRShape> => {
@@ -136,7 +162,9 @@ async function runIR(page: Page, bundle: string): Promise<IRShape> {
         kindTokens,
       };
     });
-    return { clusterCount: nodes.length, nodes, slotMap, excludedMap };
+    return { clusterCount: nodes.length, nodes, slotMap, excludedMap,
+      parentWidthFromParent: clusters.filter((c: any) => c.widthFractionOfParent < 1).length,
+      parentWidthFallback: clusters.filter((c: any) => c.widthFractionOfParent >= 1).length };
   }, bundle);
 }
 
@@ -179,7 +207,39 @@ function slotStability(a: IRShape, b: IRShape, eligibleOnly: boolean): number {
   return shared > 0 ? kept / shared : 1;
 }
 
-/** Field stability over eligible (non-excluded) handles only. */
+/** 1.6A A1: slot stability EXCLUDING pairs where both baseline and perturbed slot = overflow.
+ *  Overflow is a single flat slot — overflow→overflow pairs score a free 1.0 and inflate
+ *  the metric. THE GATE reads this number, not the raw slotStabEligible. */
+function slotStabilityExclOverflow(a: IRShape, b: IRShape, eligibleOnly: boolean): number {
+  const ma = byHandle(a), mb = byHandle(b);
+  let shared = 0, kept = 0;
+  for (const [h] of ma) {
+    if (!mb.has(h)) continue;
+    if (eligibleOnly && (a.excludedMap[h] || b.excludedMap[h])) continue;
+    if (a.slotMap[h] === 'overflow' && b.slotMap[h] === 'overflow') continue;  // skip free-1.0 pairs
+    shared++;
+    if (a.slotMap[h] === b.slotMap[h]) kept++;
+  }
+  return shared > 0 ? kept / shared : 1;
+}
+
+/** 1.6A A2: slot stability with sidebar as its OWN slot (unmerged), both with and without
+ *  overflow inflation. Reports the gate BOTH ways so the merge can be judged on design
+ *  grounds alone, not by the numbers it produces. */
+function slotStabilityUnmerged(a: IRShape, b: IRShape, eligibleOnly: boolean, exclOverflow: boolean): number {
+  const ma = byHandle(a), mb = byHandle(b);
+  const slotA = (h: string) => ma.get(h)?.role === 'sidebar' ? 'sidebar' : a.slotMap[h];
+  const slotB = (h: string) => mb.get(h)?.role === 'sidebar' ? 'sidebar' : b.slotMap[h];
+  let shared = 0, kept = 0;
+  for (const [h] of ma) {
+    if (!mb.has(h)) continue;
+    if (eligibleOnly && (a.excludedMap[h] || b.excludedMap[h])) continue;
+    if (exclOverflow && slotA(h) === 'overflow' && slotB(h) === 'overflow') continue;
+    shared++;
+    if (slotA(h) === slotB(h)) kept++;
+  }
+  return shared > 0 ? kept / shared : 1;
+}
 function fieldStabilityEligible(a: IRShape, b: IRShape, field: keyof IRNodeShape): number {
   const ma = byHandle(a), mb = byHandle(b);
   let shared = 0, kept = 0;
@@ -240,7 +300,14 @@ interface PerturbResult {
   slotStabEligible: number;           // slot-assignment stability (eligible only)
   // Old four metrics on eligible nodes (diagnostics)
   idElig: number; pcElig: number; roleElig: number; conNoOrderElig: number;
-  overflowCount: number;             // overflow slot membership (eligible nodes)
+  overflowCount: number;             // overflow slot membership (eligible nodes, perturbed)
+  // 1.6A — decontaminated slot stability
+  slotStabNoOverflow: number;         // (A1-ii) EXCLUDING overflow→overflow pairs — THE GATE NUMBER
+  slotStabUnmerged: number;           // (A2) sidebar as own slot
+  slotStabUnmergedNoOverflow: number; // (A2) sidebar as own slot, excl overflow
+  overflowPct: number;                // (A1-iii) overflow membership % of eligible nodes
+  overflowCountBase: number;          // baseline overflow membership (eligible)
+  maxCriticalFlipCount: number;       // (1.6F-b) max count of any single CRITICAL pair this perturbation
 }
 
 /** Role confusion pairs: every shared handle where role changed, with (from -> to). */
@@ -288,6 +355,9 @@ function compare(baseline: IRShape, perturbed: IRShape, name: string): PerturbRe
     fpFlips: fillParentFlipList(baseline, perturbed),
     slotStabAll: slotStability(baseline, perturbed, false),
     slotStabEligible: slotStability(baseline, perturbed, true),
+    slotStabNoOverflow: slotStabilityExclOverflow(baseline, perturbed, true),
+    slotStabUnmerged: slotStabilityUnmerged(baseline, perturbed, true, false),
+    slotStabUnmergedNoOverflow: slotStabilityUnmerged(baseline, perturbed, true, true),
     idElig: ((): number => {
       const ma = byHandle(baseline), mb = byHandle(perturbed);
       let inter = 0, union = 0;
@@ -299,6 +369,21 @@ function compare(baseline: IRShape, perturbed: IRShape, name: string): PerturbRe
     roleElig: fieldStabilityEligible(baseline, perturbed, 'role'),
     conNoOrderElig: constraintStabilityEligible(baseline, perturbed, false),
     overflowCount: Object.entries(perturbed.slotMap).filter(([h, s]) => s === 'overflow' && !perturbed.excludedMap[h]).length,
+    overflowCountBase: Object.entries(baseline.slotMap).filter(([h, s]) => s === 'overflow' && !baseline.excludedMap[h]).length,
+    overflowPct: (() => {
+      const eligTotal = Object.keys(perturbed.slotMap).filter((h) => !perturbed.excludedMap[h]).length;
+      return eligTotal > 0 ? Object.entries(perturbed.slotMap).filter(([h, s]) => s === 'overflow' && !perturbed.excludedMap[h]).length / eligTotal * 100 : 0;
+    })(),
+    maxCriticalFlipCount: (() => {
+      const pairCounts = new Map<string, number>();
+      for (const f of roleFlipList(baseline, perturbed)) {
+        if (flipSeverity(f.from, f.to, true) === 'CRITICAL') {
+          const k = `${f.from}->${f.to}`;
+          pairCounts.set(k, (pairCounts.get(k) ?? 0) + 1);
+        }
+      }
+      return pairCounts.size > 0 ? Math.max(...pairCounts.values()) : 0;
+    })(),
   };
 }
 
@@ -436,7 +521,7 @@ function gateCheck(p: PerturbResult, reasonOut: string[]): boolean {
 async function measureSite(page: Page, bundle: string, site: { name: string; url: string; settleMs: number }): Promise<SiteResult> {
   console.log(`\n=== ${site.name} ===`);
   const base = await baselineAndAt(page, bundle, site.url, site.settleMs);
-  console.log(`  baseline: ${base.clusterCount} nodes @ ${BASE_W}x${BASE_H}`);
+  console.log(`  baseline: ${base.clusterCount} nodes @ ${BASE_W}x${BASE_H} — C3 normWidth: ${base.parentWidthFromParent} parent-relative / ${base.parentWidthFallback} viewport-fallback`);
   const perturbs: PerturbResult[] = [];
   perturbs.push(...await perturbResize(page, bundle, base, site.url, site.settleMs));
   perturbs.push(...await perturbZoom(page, bundle, base, site.settleMs));
@@ -460,15 +545,19 @@ async function measureSite(page: Page, bundle: string, site: { name: string; url
   }
   for (const p of perturbs) {
     console.log(`  ${p.name.padEnd(22)} id=${p.nodeIdentity.toFixed(3)} pc=${p.parentChild.toFixed(3)} role=${p.role.toFixed(3)} con(noO)=${p.constraintNoOrder.toFixed(3)} con(wO)=${p.constraintWith.toFixed(3)}`);
-    console.log(`    slot-stab: all=${p.slotStabAll.toFixed(3)} eligible=${p.slotStabEligible.toFixed(3)} overflow=${p.overflowCount}`);
+    console.log(`    slot-stab: (i)all-elig=${p.slotStabEligible.toFixed(3)} (ii)excl-overflow=${p.slotStabNoOverflow.toFixed(3)} (iii)overflow=${p.overflowCount} (${p.overflowPct.toFixed(0)}%) [base-overflow=${p.overflowCountBase}]`);
+    console.log(`    slot-stab-unmerged: elig=${p.slotStabUnmerged.toFixed(3)} excl-overflow=${p.slotStabUnmergedNoOverflow.toFixed(3)}`);
     console.log(`    eligible-metrics: id=${p.idElig.toFixed(3)} pc=${p.pcElig.toFixed(3)} role=${p.roleElig.toFixed(3)} con(noO)=${p.conNoOrderElig.toFixed(3)}`);
     console.log(`    kind-flips: ${KINDS.map((k) => `${k}=${(p.kindFlips[k] * 100).toFixed(0)}%`).join(' ')}`);
     console.log(`    field-stab: pos=${p.fieldStab.position.toFixed(2)} flexWrap=${p.fieldStab.flexWrap.toFixed(2)} align=${p.fieldStab.alignment.toFixed(2)} widthSizing=${p.fieldStab.widthSizing.toFixed(2)} centered=${p.fieldStab.centered.toFixed(2)}`);
-    // A1: role confusion matrix per perturbation
+    // 1.6A A1/A3: role confusion matrix per perturbation, with CRITICAL/COSMETIC classification
+    // derived from the slot map (not asserted). Absolute counts per pair.
     if (p.roleFlips.length) {
       const pairCounts = new Map<string, number>();
       for (const f of p.roleFlips) { const k = `${f.from} -> ${f.to}`; pairCounts.set(k, (pairCounts.get(k) ?? 0) + 1); }
-      console.log(`    role-flips (${p.roleFlips.length} handles): ${[...pairCounts.entries()].map(([k, c]) => `${k} (${c})`).join(', ')}`);
+      const crit = [...pairCounts.entries()].filter(([k]) => { const [a, b] = k.split(' -> '); return flipSeverity(a, b, true) === 'CRITICAL'; });
+      const cos = [...pairCounts.entries()].filter(([k]) => { const [a, b] = k.split(' -> '); return flipSeverity(a, b, true) === 'COSMETIC'; });
+      console.log(`    role-flips (${p.roleFlips.length}): CRITICAL=${crit.map(([k, c]) => `${k}(${c})`).join(', ') || 'none'} | COSMETIC=${cos.map(([k, c]) => `${k}(${c})`).join(', ') || 'none'} | maxCritFlip=${p.maxCriticalFlipCount}`);
     }
     // A4: FillParent flip details
     if (p.fpFlips.length) {
@@ -492,13 +581,16 @@ async function measureSite(page: Page, bundle: string, site: { name: string; url
   for (const r of Object.values(base.excludedMap)) exclByCategory[r] = (exclByCategory[r] ?? 0) + 1;
   console.log(`  [1.5C] excluded: ${excludedCount}/${base.clusterCount} (${excludedPct}%) — ${Object.entries(exclByCategory).map(([k, v]) => `${k}=${v}`).join(', ')}`);
 
-  // 1.5D — slot-assignment stability gate (Documentation sites: MDN, Wikipedia, GitHub)
+  // 1.6A — decontaminated slot-assignment stability gate (GATE reads excl-overflow)
   const docSites = ['MDN', 'Wikipedia', 'GitHub'];
   const isDocSite = docSites.includes(site.name);
-  const slotStabs = perturbs.map((p) => p.slotStabEligible);
-  const minSlotStab = Math.min(...slotStabs);
-  const slotGate = isDocSite ? (minSlotStab >= 0.95 ? 'PASS' : 'FAIL') : 'ADVISORY';
-  console.log(`  [1.5D] slot-assignment stability: min=${minSlotStab.toFixed(3)} ${slotGate}${isDocSite ? ` (gate: ≥0.95)` : ' (advisory)'}`);
+  const slotStabsNoOverflow = perturbs.map((p) => p.slotStabNoOverflow);
+  const minSlotNoOverflow = Math.min(...slotStabsNoOverflow);
+  const slotStabsUnmergedNoOverflow = perturbs.map((p) => p.slotStabUnmergedNoOverflow);
+  const minSlotUnmergedNoOverflow = Math.min(...slotStabsUnmergedNoOverflow);
+  const slotGate = isDocSite ? (minSlotNoOverflow >= 0.95 ? 'PASS' : 'FAIL') : 'ADVISORY';
+  console.log(`  [1.6A] slot-stab (GATE): merged excl-overflow min=${minSlotNoOverflow.toFixed(3)} ${slotGate}${isDocSite ? ` (gate: ≥0.95)` : ' (advisory)'}`);
+  console.log(`  [1.6A] slot-stab (unmerged): sidebar-as-own-slot excl-overflow min=${minSlotUnmergedNoOverflow.toFixed(3)}`);
   return { name: site.name, perturbs, gate: gate === 'PASS' ? 'PASS' : 'FAIL', failReasons: reasons };
 }
 
@@ -531,9 +623,9 @@ function printReport(results: SiteResult[]): void {
     }
   }
   console.log(`\n--- A1/A3: role flip pairs (viewport-change perturbations) ---`);
-  for (const [k, e] of vpPairs) console.log(`  ${k}: ${e.count}x on ${[...e.sites].join(', ')}`);
+  for (const [k, e] of vpPairs) { const [a, b] = k.split(' -> '); console.log(`  [${flipSeverity(a, b, true)}] ${k}: ${e.count}x on ${[...e.sites].join(', ')}`); }
   console.log(`\n--- A1/A3: role flip pairs (fixed-viewport perturbations) ---`);
-  for (const [k, e] of fxPairs) console.log(`  ${k}: ${e.count}x on ${[...e.sites].join(', ')}`);
+  for (const [k, e] of fxPairs) { const [a, b] = k.split(' -> '); console.log(`  [${flipSeverity(a, b, true)}] ${k}: ${e.count}x on ${[...e.sites].join(', ')}`); }
   if (!vpPairs.size && !fxPairs.size) console.log('  (no role flips observed)');
 
   // A4 cross-site summary: FillParent flip widthRatio ranges
@@ -546,26 +638,61 @@ function printReport(results: SiteResult[]): void {
     console.log(`\n--- A4: FillParent flips: (none) ---`);
   }
 
-  // 1.5D — slot-assignment stability gate summary
-  console.log(`\n--- 1.5D: SLOT-ASSIGNMENT STABILITY (eligible nodes) ---`);
+  // 1.6A/1.6F — decontaminated slot-assignment stability + exit rule
+  console.log(`\n--- 1.6A: SLOT-ASSIGNMENT STABILITY (decontaminated) ---`);
+  console.log(`  (i)=all-eligible  (ii)=excl-overflow→overflow [GATE NUMBER]  (iii)=overflow count/%`);
+  const docSites = ['MDN', 'Wikipedia', 'GitHub'];
+  const docResults: { name: string; minNoOverflow: number; maxCriticalFlip: number; overflowPct: number; conNoOrderElig: number }[] = [];
   for (const r of results) {
-    const docSites = ['MDN', 'Wikipedia', 'GitHub'];
     const isDoc = docSites.includes(r.name);
-    const slotStabs = r.perturbs.map((p) => p.slotStabEligible);
-    const minSlot = Math.min(...slotStabs);
-    const avgSlot = slotStabs.reduce((s, v) => s + v, 0) / slotStabs.length;
-    const gate = isDoc ? (minSlot >= 0.95 ? '✓ PASS' : '✗ FAIL') : 'advisory';
-    console.log(`  ${r.name.padEnd(12)} min=${minSlot.toFixed(3)} avg=${avgSlot.toFixed(3)} ${gate}`);
-    // Per-perturbation slot flips
+    const noOverflowStabs = r.perturbs.map((p) => p.slotStabNoOverflow);
+    const minNoOverflow = Math.min(...(noOverflowStabs.length ? noOverflowStabs : [1]));
+    const unmergedStabs = r.perturbs.map((p) => p.slotStabUnmergedNoOverflow);
+    const minUnmerged = Math.min(...(unmergedStabs.length ? unmergedStabs : [1]));
+    const maxCritFlip = Math.max(...(r.perturbs.length ? r.perturbs.map((p) => p.maxCriticalFlipCount) : [0]));
+    const overflowPct = Math.max(...(r.perturbs.length ? r.perturbs.map((p) => p.overflowPct) : [0]));
+    const conNoOrderElig = Math.min(...(r.perturbs.length ? r.perturbs.map((p) => p.conNoOrderElig) : [1]));
+    const gate = isDoc ? (minNoOverflow >= 0.95 ? '✓ PASS' : '✗ FAIL') : 'advisory';
+    console.log(`  ${r.name.padEnd(12)} (i)=${Math.min(...(r.perturbs.length ? r.perturbs.map((p) => p.slotStabEligible) : [1])).toFixed(3)} (ii)=${minNoOverflow.toFixed(3)} (iii)=${Math.round(overflowPct)}% maxCritFlip=${maxCritFlip} unmerged(ii)=${minUnmerged.toFixed(3)} ${gate}`);
+    // Per-perturbation breakdown
     for (const p of r.perturbs) {
-      if (p.slotStabEligible < 0.95) console.log(`    ${p.name}: ${p.slotStabEligible.toFixed(3)}`);
+      if (p.slotStabNoOverflow < 0.95) console.log(`    ${p.name}: (ii)=${p.slotStabNoOverflow.toFixed(3)} (iii)=${Math.round(p.overflowPct)}% critFlip=${p.maxCriticalFlipCount}`);
     }
+    if (isDoc) docResults.push({ name: r.name, minNoOverflow, maxCriticalFlip: maxCritFlip, overflowPct, conNoOrderElig });
     // YouTube hypothesis
     if (r.name === 'YouTube') {
       const idAll = Math.min(...r.perturbs.map((p) => p.nodeIdentity));
       const idElig = Math.min(...r.perturbs.map((p) => p.idElig));
       console.log(`    YouTube identity hypothesis: all-nodes min=${idAll.toFixed(3)} eligible min=${idElig.toFixed(3)} → ${idElig > 0.95 ? 'CONFINED to excluded subtrees — Phase 5 stays' : 'NOT confined — Phase 5 may need to move'}`);
     }
+  }
+
+  // C3 — normWidthFromParent per site
+  console.log(`\n--- C3: NORMWIDTH PATH (parent-relative vs viewport-fallback) ---`);
+  // Reported at baseline per site in measureSite; summarized here from first perturbation's baseline
+  // (the baseline IRShape is not preserved across measureSite; the perturbation results are)
+  // ponytail: the baseline count is printed per-site in measureSite; this section is a pointer
+  console.log(`  (see per-site baseline line for parent-relative / viewport-fallback counts)`);
+
+  // 1.6F — PRE-COMMITTED EXIT RULE
+  console.log(`\n--- 1.6F: EXIT RULE ---`);
+  if (docResults.length >= 3) {
+    const sorted = [...docResults].sort((a, b) => b.minNoOverflow - a.minNoOverflow);
+    const top2 = sorted.slice(0, 2);
+    const third = sorted[2];
+    const condA = top2.every((d) => d.minNoOverflow >= 0.95) && third.minNoOverflow >= 0.90;
+    const condB = docResults.every((d) => d.maxCriticalFlip <= 3);
+    const condC = docResults.every((d) => d.conNoOrderElig >= 0.95);
+    const mdnOverflow = docResults.find((d) => d.name === 'MDN');
+    const condD = mdnOverflow ? mdnOverflow.overflowPct < 15 : true;
+    console.log(`  (a) overflow-excluded slot stab ≥0.95 on 2 doc sites, ≥0.90 on 3rd: ${condA ? 'YES' : 'NO'} (values: ${docResults.map((d) => `${d.name}=${d.minNoOverflow.toFixed(3)}`).join(', ')})`);
+    console.log(`  (b) no CRITICAL flip pair >3x per site per perturbation: ${condB ? 'YES' : 'NO'} (max: ${docResults.map((d) => `${d.name}=${d.maxCriticalFlip}`).join(', ')})`);
+    console.log(`  (c) constraint stab (no-Ordering, eligible) ≥0.95: ${condC ? 'YES' : 'NO'} (values: ${docResults.map((d) => `${d.name}=${d.conNoOrderElig.toFixed(3)}`).join(', ')})`);
+    console.log(`  (d) MDN overflow membership <15%: ${condD ? 'YES' : 'NO'} (${mdnOverflow ? Math.round(mdnOverflow.overflowPct) + '%' : 'N/A'})`);
+    const allFour = condA && condB && condC && condD;
+    console.log(`  → ${allFour ? 'PROCEED TO SOLVER (Step 2)' : 'BLOCKED — Phase 5 (role-anchored stable handles) built next'}`);
+  } else {
+    console.log(`  (insufficient doc-site results to evaluate)`);
   }
 }
 

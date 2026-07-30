@@ -44,6 +44,7 @@ export interface ClusterSignals {
   rectX: number; rectY: number; rectW: number; rectH: number;
   widthRatio: number;             // rectW / viewport.w
   widthFractionOfParent: number;  // rectW / parentClusterRect.w (1.0 when no parent cluster)
+  normWidthFromParent: boolean;   // 1.6C — true when widthFractionOfParent < 1 (parent-relative path); false = viewport fallback (counted, never silent)
   count: number;                  // repeated members (a listing signal)
   classTokens: string;            // lowercased id + className (for convention tokens)
   emptinessScore: number;         // 0..1 (computed in perceive)
@@ -83,12 +84,13 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
   const linkDensity = textLen > 0 ? s.linkCount / textLen : 0;
   const tok = s.classTokens;
   const has = (re: RegExp) => re.test(tok);
-  // 1.5B — normalized width: parent-relative when a parent cluster exists, viewport-relative
+  // 1.5B/1.6C — normalized width: parent-relative when a parent cluster exists, viewport-relative
   // fallback for top-level elements. Stable under viewport resize (element + parent shrink
   // proportionally → ratio is constant). The raw viewport-relative widthRatio flips at the
   // 0.4/0.45/0.5 knife-edges under resize, causing nav-local <-> sidebar <-> nav-primary
-  // role churn.
-  const normWidth = s.widthFractionOfParent < 1 ? s.widthFractionOfParent : s.widthRatio;
+  // role churn. 1.6C: the fallback is EXPLICIT and COUNTED via normWidthFromParent — no
+  // silent reversion to the old viewport-coupled metric.
+  const normWidth = s.normWidthFromParent ? s.widthFractionOfParent : s.widthRatio;
   const isTop = s.rectY < vp.h * 0.25;
   const isBottom = s.rectY > vp.h * 0.6;
   const isLeft = s.rectX < vp.w * 0.2;
@@ -125,16 +127,18 @@ export function classifyRole(s: ClusterSignals, ctx: PageContext): RoleClassific
     (s.linkCount >= 3 || linkDensity > 0.1 ? 0.2 : 0);
 
   // nav-local: vertical/side nav — nav role, narrow, on a side.
+  // 1.6D: reverted 1.5B's widening (0.45 -> 0.40). Pure normalization, no band change.
   scores['nav-local'] =
     (s.ariaRole === 'navigation' ? 0.4 : 0) +
-    (normWidth <= 0.45 && normWidth >= 0.1 ? 0.3 : 0) +
+    (normWidth <= 0.40 && normWidth >= 0.1 ? 0.3 : 0) +
     ((isLeft || isRight) ? 0.2 : 0) +
     (s.linkCount >= 3 ? 0.1 : 0);
 
   // sidebar: aside/complementary content (not nav) — aside role, side-rail width.
+  // 1.6D: reverted 1.5B's widening (0.50 -> 0.45). Pure normalization, no band change.
   scores['sidebar'] =
     (s.ariaRole === 'complementary' || s.tag === 'aside' ? 0.5 : 0) +
-    (normWidth <= 0.50 && normWidth >= 0.1 ? 0.3 : 0) +
+    (normWidth <= 0.45 && normWidth >= 0.1 ? 0.3 : 0) +
     (linkDensity < 0.1 ? 0.1 : 0) +
     (s.hasHeading ? 0.1 : 0);
 

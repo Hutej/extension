@@ -156,29 +156,13 @@ global layout optimization.
 
 ## Current position
 
-**P2.5 — Layout IR + Responsive Solver v1 (in progress).** Phase 2's machinery passed every gate
-(0% escape-hatch usage, conformance clean, 2 paid calls, MDN code examples intact) but the user judged
-the output by eye and said "nothing is good." The verdict is architectural, not a bug list: the engine
-RESTYLES the original DOM cluster-by-cluster; it never RE-LAYS-OUT the page. A senior engineer's
-architecture is now LOCKED (the one architectural rule + the 10-stage pipeline above). This phase
-builds the two missing stages: a Layout IR and a Responsive Solver.
-
-**Step 1 (IR stability probe) is the hard gate before any solver work.** If the IR is unstable across
-near-identical renders, everything built on top is unstable. Node identity may legitimately drop on
-resize (geometry-derived handles re-cluster) — that is NOT a defect; it is evidence Phase 5
-(role-anchored stable handles) must be pulled forward ahead of the solver. An honest blocked report
-on Step 1 is the correct outcome.
-
-**Step 1 RESULT (BLOCKED, 2/5 sites pass):** the IR *construction* is stable (constraint no-Ordering
-0.965–1.000; the 5 new perception fields at 1.00 everywhere). The gate fails on perception-layer
-outputs the IR projects verbatim: `role` (Wikipedia 0.875, GitHub 0.812 — `classifyRole`'s
-viewport-coupled geometry thresholds reclassify clusters under resize/zoom/reorder) and `handle
-identity` (YouTube 0.808 across ALL perturbations, not resize-only — visual-signature re-clustering of
-the dense feed). Per the rules the classifier/clustering were NOT tuned to pass. **The solver (Step
-2+) is NOT started.** Open decision: accept role-label instability (treat role as advisory), revisit
-the classifier's viewport-coupled thresholds, or pull Phase 5 (role-anchored stable handles) ahead of
-the solver — which would stabilize both role and YouTube identity. This blocked report is the honest
-outcome the phase sanctioned.
+**P2.5 — Step 1.6 BLOCKED → Phase 5 next.** The decontaminated slot-assignment gate (1.6F) measured
+all four exit-rule conditions. Two fail: (a) all three Documentation sites below 0.95 overflow-excluded
+slot stability (GitHub 0.889, Wikipedia 0.936, MDN 0.933); (d) MDN overflow at 36%. Two pass: (b) no
+critical flip pair >3x; (c) constraint stability ≥0.95 everywhere. The codeHint fix (1.6B) cut MDN
+overflow from 39% to 21% (baseline) but mut-reorder pushes it to 36%. The pre-committed exit rule
+fires BLOCKED: **Phase 5 (role-anchored stable handles) is built next, ahead of the solver.** No third
+stability step. 0 paid model calls. Full-grid runs: 1/2 used. See Step 1.6 results below for details.
 
 **Step 1.5 RESULT — DIAGNOSE, NORMALIZE, RE-GATE ON SLOT-ASSIGNMENT STABILITY:**
 
@@ -214,12 +198,53 @@ assignment (1.5D) were pulled forward ahead of the solver.
   - YouTube: min=0.830 (advisory)
   - Overflow counts: Wikipedia 0, MDN 37 (high — many `ad-or-void`), BBC 1, GitHub 0, YouTube 4.
 
-**BLOCKED: 1/3 Documentation sites pass the slot-assignment gate.** MDN passes. Wikipedia is 0.001
-below (one design decision away). GitHub's `listing↔nav-local` and `nav-local→nav-primary` flips are
-genuine classifier threshold issues — GitHub's elements have `widthFractionOfParent=1.0` (no parent
-cluster or full-width parent), so the 1.5B normalization had no effect. The solver (Step 5) is NOT
-authorized. Next decision: the user reviews whether the remaining instability is acceptable for solver
-construction, or whether further classifier work is needed first.
+- [x] **1.6 — DECONTAMINATE THE GATE, FIX THREE REAL BUGS, MEASURE ONCE.**
+  - **1.6E** — `c338a75`/`c87e7ff` identified as user Hutej's own manual cleanup commits.
+    `.kiro/steering/ponytail.md` created with the ponytail ladder verbatim. semantic.test.ts
+    + stability.test.ts confirmed tracked (present on disk, no deletions).
+  - **1.6B** — MDN ad-or-void bug. Root cause: the `!el` branch (L687) defaulted ALL vanished
+    representatives to `ad-or-void`/confidence 0 — the codeHint guard was BYPASSED, never incorrect.
+    Fix: (1) `!el` branch now checks `cluster.tag` from stamping time — pre/code → `media`/0.5,
+    not ad-or-void/0. (2) codeHint enhanced: added monospace computed font-family + syntax-highlight
+    token density (≥3 child spans with token-/hljs-/syntax- classes). Principled, no site names.
+    **MDN overflow: 37/96 (39%) → 16/77 (21%)** — 57% reduction but still >15% gate.
+    No non-MDN site had significant overflow (Wikipedia 0%, BBC 2%, GitHub 0%, YouTube 0%).
+  - **1.6C** — GitHub flat tree. C3 normWidth counting: GitHub 71/85 parent-relative (84%) —
+    NOT a flat tree. The previous `widthFractionOfParent=1.0` for every element was not reproduced.
+    Silent fallback deleted: `normWidthFromParent: boolean` added to ClusterSignals, computed
+    explicitly in gatherSignals, counted per-site in the probe. Wikipedia 62/19, MDN 41/36,
+    BBC 30/19, GitHub 71/14, YouTube 3/2.
+  - **1.6D** — Unconfound 1.5B. Reverted both band widenings: nav-local 0.45→0.40, sidebar
+    0.50→0.45. Pure normalization at original values. No other thresholds touched.
+  - **1.6A** — Decontaminated gate. Slot stability reported three ways: (i) all eligible,
+    (ii) excl-overflow→overflow [GATE NUMBER], (iii) overflow count/%. Severity table rebuilt
+    from the slot map (CRITICAL = different slots, COSMETIC = same slot). Gate reported both
+    merged (sidebar→nav-local) and unmerged (sidebar own slot).
+  - **1.6F — MEASURE ONCE (full grid run 1/2):**
+    - **(a)** overflow-excluded slot stab ≥0.95 on 2 doc sites, ≥0.90 on 3rd: **NO**
+      (Wikipedia=0.936, MDN=0.933, GitHub=0.889)
+    - **(b)** no CRITICAL flip pair >3x per site per perturbation: **YES**
+      (Wikipedia max=2, MDN max=1, GitHub max=3)
+    - **(c)** constraint stab (no-Ordering, eligible) ≥0.95: **YES**
+      (Wikipedia=0.987, MDN=1.000, GitHub=0.963)
+    - **(d)** MDN overflow membership <15%: **NO** (36%)
+    - **→ BLOCKED — Phase 5 (role-anchored stable handles) built next, ahead of the solver.**
+
+**BLOCKED: 2 of 4 exit-rule conditions fail.** (a) all three doc sites below 0.95 slot stability
+(GitHub 0.889, Wikipedia 0.936, MDN 0.933); (d) MDN overflow at 36% (was 39%, codeHint fix cut it
+to 21% at baseline but mut-reorder pushes overflow to 36%). Conditions (b) and (c) pass cleanly.
+The solver (Step 2) is NOT started. **Phase 5 (role-anchored stable handles) is built next.**
+0 paid model calls. Full-grid runs: 1/2 used.
+
+## Current position (updated)
+
+**P2.5 — Step 1.6 BLOCKED → Phase 5 next.** The decontaminated gate shows the slot-assignment
+stability bar is not met: all three Documentation sites are below 0.95 (GitHub worst at 0.889),
+and MDN's overflow is still 21% at baseline (36% under mut-reorder). The codeHint fix cut MDN
+overflow from 39% to 21% but did not get it below 15%. Constraint stability is strong (≥0.963
+everywhere). Critical flip counts are within limits (max 3). The pre-committed exit rule fires
+the BLOCKED branch: **Phase 5 (role-anchored stable handles) is built next, ahead of the solver.**
+No third stability step. No threshold adjustments after seeing numbers.
 
 ## Status update protocol (for ALL agents)
 

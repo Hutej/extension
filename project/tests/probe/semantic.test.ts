@@ -14,6 +14,7 @@ function sig(partial: Partial<ClusterSignals>): ClusterSignals {
     hasHeading: false, rectX: 0, rectY: 0, rectW: 100, rectH: 100, widthRatio: 0.1,
     count: 1, classTokens: '', emptinessScore: 0, hasBgImage: false, fontSize: 16,
     isNativeControl: false, hasSolidBg: false, codeHint: false, inArticleFlow: false,
+    widthFractionOfParent: 1, normWidthFromParent: false,
     ...partial,
   };
 }
