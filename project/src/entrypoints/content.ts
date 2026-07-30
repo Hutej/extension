@@ -10,7 +10,7 @@
  * persistence (origin + normalized pathname).
  */
 
-import { perceive, serializePerception, serializePainterPerception, clearHandles, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
+import { perceive, serializePerception, serializePainterPerception, serializeV2Painter, clearHandles, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
 import { compileSpec, deriveBaseTone, type CompileOptions } from '@/core/compile';
 import { expandIntents } from '@/core/compile/expand.ts';
 import { sanitizeCss } from '@/core/sanitize';
@@ -473,16 +473,57 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   // minimum; the budget is time, not a call count.
   const canReReason = (): boolean => (AI_CONFIG.designMaxMs - (Date.now() - t0)) > AI_CONFIG.criticMinMs;
 
-  // S3.6 — v2 path: solver structural CSS + Painter aesthetic CSS. One paid call
+  /** Inline-style forceContrast backstop: forces the readable bg+text pair onto
+   *  each invisible cluster's own element, beating id-level site !important that
+   *  defeats the CSS rule (the cascade-loss class). Reused by both v1 and v2. */
+  const applyInlineBackstop = (curSpec: DesignSpec, targets: string[] | undefined, contrastTargetBgs: Record<string, string> | undefined): void => {
+    if (!targets?.length) return;
+    const canvasTone = deriveBaseTone(curSpec.canvas?.background ?? '');
+    const canvasParsed = parseColor(canvasTone);
+    const opaque = (bg: string | undefined | null): string | null => {
+      if (!bg) return null;
+      const p = parseColor(bg);
+      return p && p[3] === 1 ? bg : null;
+    };
+    for (const h of new Set(targets)) {
+      const el = document.querySelector<HTMLElement>(`[data-wm-c="${h}"]`);
+      if (!el) continue;
+      if (getComputedStyle(el).backgroundImage !== 'none') continue;
+      const ownBg = getComputedStyle(el).backgroundColor;
+      const effBg = opaque(contrastTargetBgs?.[h]) ?? opaque(ownBg) ?? canvasTone;
+      const baseTone = deriveBaseTone(effBg);
+      const baseParsed = parseColor(baseTone) ?? canvasParsed;
+      const readableBg = baseParsed ? baseTone : '#ffffff';
+      const readableText = baseParsed ? pickReadableText(baseParsed) : '#111111';
+      el.style.setProperty('background', readableBg, 'important');
+      el.style.setProperty('background-image', 'none', 'important');
+      el.style.setProperty('color', readableText, 'important');
+    }
+  };
+
+  // S4 — v2 path: solver structural CSS + Painter aesthetic CSS. One paid call
   // (Painter only). The solver handles the page shell (grid + slot wrappers); the
   // Painter handles the surface (colors, fonts, surfaces). Behind layoutCompiler=v2.
+  // S4.1: Painter gets a v2 payload (role/slot only, no geometry).
+  // S4.3: verify + deterministic repair + hard gates, same as v1.
   if (AI_CONFIG.layoutCompiler === 'v2' && !restyleOnly) {
-    // Undo any previous DOM ops (wrappers from a prior transform).
     txnLog.undoAll(liveDom);
     txnLog.clear();
 
-    // Painter only (one paid call). The solver handles structure.
-    const v2PaintRes = await askForSpec('painter', intent, painterSerialized);
+    // S4.1: compute IR + slots BEFORE the Painter so the payload has slot info.
+    // The solver + assignment are free (synchronous, no model calls).
+    const v2IR = extractLayoutIR(perception);
+    const v2ExcludedRaw = detectExclusions(perception.clusters);
+    const v2ExcludedSet = new Set<string>();
+    for (const [h] of v2ExcludedRaw) v2ExcludedSet.add(h);
+    const v2Assignment = assignSlots(v2IR.nodes, v2ExcludedSet);
+
+    // S4.1: v2 Painter payload — role/slot only, no geometry/rects/widths/positions.
+    const v2Serialized = serializeV2Painter(perception, v2Assignment);
+    logDebug(`v2 painter payload: ${v2Serialized.length}chars (v1 painter=${painterSerialized.length}chars, full=${serializeChars}chars)`);
+
+    // Painter (one paid call). The solver handles structure.
+    const v2PaintRes = await askForSpec('painter', intent, v2Serialized);
     recordCall('painter', v2PaintRes);
     if (!v2PaintRes.ok || !v2PaintRes.spec) {
       removeStyleEverywhere(activeShadowRoots);
@@ -491,32 +532,106 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     }
     const v2Spec = v2PaintRes.spec;
 
-    // Structural layer: perceive → IR → slots → solve → wrappers + CSS.
-    const v2IR = extractLayoutIR(perception);
-    const v2ExcludedRaw = detectExclusions(perception.clusters);
-    const v2ExcludedSet = new Set<string>();
-    for (const [h] of v2ExcludedRaw) v2ExcludedSet.add(h);
-    const v2Assignment = assignSlots(v2IR.nodes, v2ExcludedSet);
+    // Solver (free): shell grid + slot wrappers + structural CSS.
     const v2SolveResult = solve({ ir: v2IR, assignment: v2Assignment, excluded: v2ExcludedSet });
-
-    // Execute wrapper plan (DOM mutation, recorded for undo).
     const v2WrapResult = applySlotWrappers(v2SolveResult.wrappers, liveDom, txnLog);
+    const v2MovedHandles = txnLog.movedHandles();
     logDebug(`v2 solver: ${v2SolveResult.wrappers.length} slot wrappers, ${v2WrapResult.nodesMoved} nodes moved, ${v2SolveResult.rulesEmitted} CSS rules, ${v2SolveResult.matchedTargets} matched targets`);
 
-    // Aesthetic layer: compile the Painter's spec → surface CSS.
-    const v2Options: CompileOptions = { paletteMode: v2Spec.paletteMode };
+    // Compile aesthetic CSS from the Painter's spec.
+    let v2Options: CompileOptions = { paletteMode: v2Spec.paletteMode };
     const v2Compiled = compileSpec(v2Spec, perception, v2Options);
     const v2StructuralCss = v2SolveResult.css;
-    const v2AestheticCss = sanitizeCss(v2Compiled.css).css;
-    const v2CombinedCss = sanitizeCss(v2StructuralCss + '\n' + v2AestheticCss).css;
+    let v2CombinedCss = sanitizeCss(v2StructuralCss + '\n' + sanitizeCss(v2Compiled.css).css).css;
     if (!v2CombinedCss.trim()) {
       removeStyleEverywhere(activeShadowRoots); markFailed('no styles');
       return { ok: false, message: 'v2 produced no styles', paidCalls: paidCalls(), wallMs: Date.now() - t0 };
     }
 
-    // Apply combined CSS (structural grid + aesthetic surface).
+    // Build modelAddressed set for the coverage gate (same as v1).
+    const v2ModelAddressed = new Set<string>();
+    for (const rule of v2Spec.rules) if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide) v2ModelAddressed.add(rule.target);
+    if (v2Spec.composition) for (const rule of v2Spec.composition) if (rule.styles || rule.layout || rule.hide) v2ModelAddressed.add(rule.target);
+    if (v2Spec.intents?.length) for (const h of expandIntents(v2Spec, perception).expandedTargets) v2ModelAddressed.add(h);
+
+    // Paint 1: apply combined CSS (structural grid + aesthetic surface).
+    const v2ApplyMs = performance.now();
     applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
+    let v2PaintCount = 1;
     document.documentElement.dataset['webmorphPaintCount'] = '1';
+    await new Promise<void>((r) => requestAnimationFrame(() => r()));
+
+    // S4.3: verify (DOM + pixel) — the safety net v2 was missing.
+    const v2VerifyMs = performance.now();
+    let v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), v2MovedHandles, reflowOpportunity);
+    let v2Px = await captureAndPixelVerify(beforeTop);
+    let v2Pixel = v2Px.result;
+    let v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
+    logDebug(`v2 paint1: checks=${JSON.stringify(v2Verify.checks)} pixel(passed=${v2Pixel.passed} voids=${v2Pixel.voids.length} invisible=${v2Pixel.invisibleText.length} squeeze=${v2Pixel.squeeze.length}) change=${v2Verify.changeScore.toFixed(3)}`);
+
+    // S4.3: deterministic repair (free — no paid reReason). forceContrast + squeeze
+    // repairs from planRepair, recompiled + re-applied as paint 2. Runs BEFORE the
+    // hard gate so repair can fix what's fixable; the hard gate is the FINAL check.
+    if (!v2Verify.checks.notBlank) {
+      // Content blanked — rollback immediately (no repair can fix this).
+      txnLog.undoAll(liveDom);
+      removeStyleEverywhere(activeShadowRoots);
+      markFailed('v2 content blanked');
+      logDebug(`v2 ROLLBACK — content blanked`);
+      return { ok: false, message: 'v2 content blanked', spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
+    }
+    const v2NeedsRepair = !v2Verify.checks.contrastOk || v2Pixel.invisibleText.length > 0 ||
+      v2Pixel.squeeze.length > 0 || !v2Verify.checks.noOverflow || !v2Verify.checks.noOverlap ||
+      !v2Verify.checks.contentCollapsed || !v2Verify.checks.contentVisible;
+    if (v2NeedsRepair) {
+      const v2Repair = planRepair(v2Verify, v2Options, 0, v2Spec.paletteMode, v2Pixel, false, new Set());
+      logDebug(`v2 repair -> ${v2Repair.action}: ${v2Repair.reason}`);
+      if (v2Repair.action === 'rollback') {
+        txnLog.undoAll(liveDom);
+        removeStyleEverywhere(activeShadowRoots);
+        markFailed('v2 content blanked (repair)');
+        return { ok: false, message: 'v2 content blanked', spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
+      }
+      if (v2Repair.action === 'recompile' && v2Repair.options) {
+        v2Options = { ...v2Repair.options, paletteMode: v2Spec.paletteMode };
+        const v2Compiled2 = compileSpec(v2Spec, perception, v2Options);
+        v2CombinedCss = sanitizeCss(v2StructuralCss + '\n' + sanitizeCss(v2Compiled2.css).css).css;
+        applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
+        applyInlineBackstop(v2Spec, v2Options.pixelInvisibleTargets, v2Options.contrastTargetBgs as Record<string, string> | undefined);
+        v2PaintCount = 2;
+        document.documentElement.dataset['webmorphPaintCount'] = '2';
+        await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        // Re-verify after repair.
+        v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), v2MovedHandles, reflowOpportunity);
+        v2Px = await captureAndPixelVerify(beforeTop);
+        v2Pixel = v2Px.result;
+        v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
+        logDebug(`v2 paint2(repair): checks=${JSON.stringify(v2Verify.checks)} pixel(passed=${v2Pixel.passed} voids=${v2Pixel.voids.length} invisible=${v2Pixel.invisibleText.length} squeeze=${v2Pixel.squeeze.length})`);
+      }
+    }
+    const v2VerifyMsTotal = Math.round(performance.now() - v2VerifyMs);
+
+    // S4.3: HARD GATES (the final check, AFTER repair). These FAIL the run and
+    // roll back: overflow, hidden content, horizontal scrolling, element overlap.
+    // Squeeze is ADVISORY (logged, never blocks — it's a spacing/readability issue
+    // the repair already attempted, not a content-destroying defect).
+    const v2HardGates = v2Verify.checks.notBlank && v2Verify.checks.contentCollapsed &&
+      v2Verify.checks.contentVisible && v2Verify.checks.noOverflow && v2Verify.checks.noOverlap &&
+      v2Pixel.voids.length === 0 && v2Pixel.invisibleText.length === 0;
+    if (!v2HardGates) {
+      const failures = [
+        ...Object.entries(v2Verify.checks).filter(([, v]) => !v).map(([k]) => k),
+        ...(v2Pixel.voids.length ? v2Pixel.voids.map((h) => 'void:' + h) : []),
+        ...(v2Pixel.invisibleText.length ? v2Pixel.invisibleText.map((h) => 'invis:' + h) : []),
+      ].join(', ');
+      txnLog.undoAll(liveDom);
+      removeStyleEverywhere(activeShadowRoots);
+      markFailed('v2 hard gate: ' + failures);
+      logDebug(`v2 ROLLBACK — hard gate: ${failures}`);
+      return { ok: false, message: 'v2 hard gate: ' + failures, spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
+    }
+    // Advisory: squeeze survivors (logged, never blocks).
+    if (v2Pixel.squeeze.length) logDebug(`v2 ADVISORY: ${v2Pixel.squeeze.length} squeezed cluster(s): ${v2Pixel.squeeze.join(', ')}`);
 
     // Persist + defend + mark applied.
     const v2Key = storageKey();
@@ -528,16 +643,30 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     startDefenseEverywhere(v2CombinedCss, activeShadowRoots);
     activeSpec = v2Spec;
     activeOpts = v2Options;
+    startDynamicDefense();
     ensureEscapeUI(toggleSiteState);
     markApplied(v2Id);
 
     const v2TotalMs = Date.now() - t0;
-    logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms`).join(', ')}] total=${v2TotalMs}ms paidCalls=${paidCalls()} wrappers=${v2SolveResult.wrappers.length} nodesMoved=${v2WrapResult.nodesMoved}`);
+    const v2ModelMs = roleCalls.reduce((s, c) => s + c.ms, 0);
+    logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] verify=${v2VerifyMsTotal}ms total=${v2TotalMs}ms paidCalls=${paidCalls()} wrappers=${v2SolveResult.wrappers.length} nodesMoved=${v2WrapResult.nodesMoved} paints=${v2PaintCount}`);
 
     return {
-      ok: true, spec: v2Spec,
-      paidCalls: paidCalls(), wallMs: v2TotalMs, paintCount: 1,
+      ok: true, spec: v2Spec, verify: v2Verify,
+      pixel: { passed: v2Pixel.passed, voids: v2Pixel.voids.length, invisibleText: v2Pixel.invisibleText.length, squeeze: v2Pixel.squeeze.length },
+      invisibleBreakdown: v2Breakdown,
+      changeScore: v2Verify.changeScore,
+      modelCoverageFraction: v2Verify.modelCoverageFraction,
+      paidCalls: paidCalls(), wallMs: v2TotalMs, paintCount: v2PaintCount,
       clusters: perception.clusters.length,
+      usage: roleCalls.length ? { total: roleCalls.reduce((s, c) => s + (c.promptTokens ?? 0) + (c.completionTokens ?? 0), 0) } : undefined,
+      ledger: {
+        perceiveMs: perception.builtInMs, serializeChars: v2Serialized.length, roleCalls,
+        compileMs: 0, applyMs: Math.round(performance.now() - v2ApplyMs), verifyMs: v2VerifyMsTotal,
+        pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: v2TotalMs,
+        paidCalls: paidCalls(), repairRounds: v2PaintCount - 1, paintCount: v2PaintCount,
+        opsExecuted: 0, opsRefused: 0, opsRefusedReasons: [],
+      },
     };
   }
 
@@ -665,39 +794,6 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   // is a failing check (the harness asserts paintCount <= 2). No keepBest re-apply
   // beyond paint 2: if paint 2 is broken we rollback+fail rather than repaint again.
   let paintCount = 0;
-  /** Inline-style forceContrast backstop: the CSS backstop rule (`[data-wm-c="h"]²`,
-   *  0,2,0 + !important) loses to id-level site !important (1,0,0+) — the cascade-loss
-   *  class proven by the Phase-1 diagnostic (clusters whose computed bg stayed
-   *  rgba(0,0,0,0) after the CSS pair was emitted). Inline + !important beats ANY
-   *  stylesheet rule (inline is the highest specificity tier), so this forces the
-   *  readable bg+text pair onto each pixel-invisible cluster element regardless of
-   *  the site's specificity. Image-bg clusters are skipped (never paint over content
-   *  images). Runs inside paint 2's applyOnce, after the CSS is injected — the CSS
-   *  handles the common case + descendant color (`*`); this catches the survivors. */
-  const applyInlineBackstop = (curSpec: DesignSpec, targets: string[] | undefined, contrastTargetBgs: Record<string, string> | undefined): void => {
-    if (!targets?.length) return;
-    const canvasTone = deriveBaseTone(curSpec.canvas?.background ?? '');
-    const canvasParsed = parseColor(canvasTone);
-    const opaque = (bg: string | undefined | null): string | null => {
-      if (!bg) return null;
-      const p = parseColor(bg);
-      return p && p[3] === 1 ? bg : null;
-    };
-    for (const h of new Set(targets)) {
-      const el = document.querySelector<HTMLElement>(`[data-wm-c="${h}"]`);
-      if (!el) continue;
-      if (getComputedStyle(el).backgroundImage !== 'none') continue; // protect content images
-      const ownBg = getComputedStyle(el).backgroundColor;
-      const effBg = opaque(contrastTargetBgs?.[h]) ?? opaque(ownBg) ?? canvasTone;
-      const baseTone = deriveBaseTone(effBg);
-      const baseParsed = parseColor(baseTone) ?? canvasParsed;
-      const readableBg = baseParsed ? baseTone : '#ffffff';
-      const readableText = baseParsed ? pickReadableText(baseParsed) : '#111111';
-      el.style.setProperty('background', readableBg, 'important');
-      el.style.setProperty('background-image', 'none', 'important');
-      el.style.setProperty('color', readableText, 'important');
-    }
-  };
 
   const applyOnce = async (curSpec: DesignSpec, opts: CompileOptions): Promise<{ compiled: ReturnType<typeof compileSpec>; sanitized: string; verify: VerifyResult; pixel: PixelVerifyResult; breakdown: InvisibleBreakdown | null }> => {
     const tcCompile = performance.now();

@@ -1360,6 +1360,41 @@ export function serializePainterPerception(p: Perception): string {
   return [...header, 'ROLE INVENTORY:', ...lines.map((l) => '  ' + l)].join('\n');
 }
 
+/**
+ * S4.1 — v2-path Painter payload. The solver owns layout, so the Painter gets
+ * role/slot-level information only — no geometry, rects, widths, positions, or
+ * parent/child relationships. The slot assignment (already computed by the
+ * solver) is threaded in so the Painter sees WHERE each cluster sits in the page
+ * shell. Keeps site identity (host + title), design tokens, and design packs.
+ * v2-path-only — the v1 `serializePainterPerception` is untouched.
+ * Pure: takes Perception + SlotAssignment as data. */
+export function serializeV2Painter(p: Perception, assignment: { handleToSlot: Map<string, string> }): string {
+  const header: string[] = [];
+  // Site identity — NO viewport dimensions (layout info the solver owns).
+  header.push(`SITE ${p.site.host} "${p.site.title}"`);
+  header.push(formatDesignTokens(extractDesignTokens(p)));
+  header.push(formatPacks());
+
+  // Compact role+slot inventory — every cluster, identity only. Sorted by
+  // prominence so the Painter reads major regions first; grouped by role so
+  // a role intent's fan-out is visible. Slot from the solver's assignment.
+  const ordered = [...p.clusters].sort((a, b) => b.prominence - a.prominence);
+  const lines = ordered.map((c) => {
+    const slot = assignment.handleToSlot.get(c.handle) ?? 'overflow';
+    const parts = [`${c.designRole}${c.group ? '@' + c.group : ''} slot:${slot} dom${Math.round(c.dominanceRank * 10)} ${c.handle} x${c.count} <${c.tag}>`];
+    if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) {
+      parts.push('[image]');
+      if (c.style.naturalAspect) parts.push(`aspect:${c.style.naturalAspect}`);
+    }
+    if (c.isNativeControl) parts.push('[native]');
+    if (c.emptinessScore >= 0.6) parts.push(`empty${Math.round(c.emptinessScore * 10)}`);
+    let line = parts.join(' ');
+    if (c.samples.length) line += ` e.g.${c.samples.slice(0, 2).map((s) => JSON.stringify(s.slice(0, 20))).join(',')}`;
+    return line;
+  });
+  return [...header, 'ROLE+SLOT INVENTORY:', ...lines.map((l) => '  ' + l)].join('\n');
+}
+
 function formatFull(c: Cluster): string {
   const L = c.layout;
   // Phase 1 — the DESIGN ROLE leads the line (the PRIMARY representation). The

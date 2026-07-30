@@ -117,12 +117,18 @@ export function solve(input: SolveInput): SolveResult {
   const allSlotHandles = new Set<string>();
   for (const node of ir.nodes) {
     const slotId = assignment.handleToSlot.get(node.handle) ?? 'overflow';
-    if (slotId !== 'overflow' && !excluded.has(node.handle)) allSlotHandles.add(node.handle);
+    // S4.2: skip position:absolute/fixed — they float out of the grid flow and
+    // would leave wrappers empty/collapsed. Styled only, not moved.
+    if (slotId !== 'overflow' && !excluded.has(node.handle) &&
+        node.authoredLayout.position !== 'absolute' && node.authoredLayout.position !== 'fixed')
+      allSlotHandles.add(node.handle);
   }
   const slotHandles = new Map<string, string[]>();
   for (const node of ir.nodes) {
     const slotId = assignment.handleToSlot.get(node.handle) ?? 'overflow';
     if (slotId === 'overflow' || excluded.has(node.handle)) continue;
+    // S4.2: skip position:absolute/fixed from the wrapper plan (styled only).
+    if (node.authoredLayout.position === 'absolute' || node.authoredLayout.position === 'fixed') continue;
     // Skip if parent is in the SAME slot — the parent carries this node.
     if (node.computedRelationships.parent && allSlotHandles.has(node.computedRelationships.parent)) {
       const parentSlot = assignment.handleToSlot.get(node.computedRelationships.parent) ?? 'overflow';
@@ -159,12 +165,19 @@ export function solve(input: SolveInput): SolveResult {
   rulesEmitted++;
 
   // b. Shell grid — ONE grid on the container of the slot wrappers.
-  // Side rails get their width from the grid track (minmax with the slot's
-  // minWidth floor + a fluid vw track), NEVER a frozen pixel literal.
+  // S4.2: floors use min(slotMin, Nvw - half-gap) so the total floor + gap ≤ 100vw —
+  // the grid can never force horizontal overflow, even at zoom-narrowed widths.
+  // At wide viewports the floor is the slot minWidth (unchanged); at narrow viewports
+  // the floor shrinks with the viewport. Intrinsic CSS collapses natively.
   const gridCols = hasSide
-    ? `minmax(${sideMin}px, 20vw) minmax(${contentMin}px, 1fr)`
-    : `minmax(${contentMin}px, 1fr)`;
-  blocks.push(`[data-wm-shell] {\n  display: grid;\n  grid-template-columns: ${gridCols};\n  gap: var(--wm-space-m);\n  min-height: 100vh;\n}`);
+    ? `minmax(min(${sideMin}px, calc(20vw - var(--wm-space-m) / 2)), 20vw) minmax(min(${contentMin}px, calc(80vw - var(--wm-space-m) / 2)), 1fr)`
+    : `minmax(min(${contentMin}px, 100%), 1fr)`;
+  blocks.push(`[data-wm-shell] {\n  display: grid;\n  grid-template-columns: ${gridCols};\n  gap: var(--wm-space-m);\n  min-height: 100vh;\n  overflow-x: clip;\n}`);
+  rulesEmitted++;
+
+  // S4.2: blanket max-width: 100% for all clusters inside the shell — caps any
+  // fixed-width element at its wrapper, preventing grid track overflow.
+  blocks.push(`[data-wm-shell] [data-wm-c] {\n  max-width: 100%;\n}`);
   rulesEmitted++;
 
   // c. Per-slot wrappers — grid placement + flex flow + gap + measure ceiling.
@@ -183,6 +196,11 @@ export function solve(input: SolveInput): SolveResult {
     // Flex flow from the slot definition.
     decls.push('display: flex');
     decls.push(slot.flow === 'row' ? 'flex-direction: row' : 'flex-direction: column');
+    // S4.2: min-width: 0 — standard grid pattern. Without it, a grid item's
+    // min-width defaults to auto (content's intrinsic min), forcing the track
+    // to grow and causing horizontal overflow. min-width: 0 lets the track
+    // shrink, and flex/overflow inside handles the content.
+    decls.push('min-width: 0');
     // Gap: side/full-width = tight, content = breathing room.
     decls.push(slot.preferredWidth === 'content' ? 'gap: var(--wm-space-m)' : 'gap: var(--wm-space-s)');
     // Content slot: prose measure ceiling (ch, not px) + centered within track.

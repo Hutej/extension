@@ -62,7 +62,7 @@ Each phase gets an explicit `GATE:` line. A phase is not done until its gate pas
   5/5 sites apply + the user's by-eye judgment — machinery green but the user said "nothing is good".
   The verdict is architectural (see Current position): the engine restyles the original DOM; it never
   re-lays-out the page.
-- **P2.5 Layout IR + Responsive Solver v1 — CURRENT (Step 3 done, by-eye gate pending user review).** GATE (this phase): IR stability
+- **P2.5 Layout IR + Responsive Solver v1 — CURRENT (Step 4: S4.1-S4.3 done, S4.4 gate 1/3 applied).** GATE (this phase): IR stability
   gate (Step 1) + all 6 hard gates clean on the 3 validation sites + parity vs the original on those 3
   + resize 1920/1440/1280 no breakage + slot invariant + BBC/YouTube apply-without-rollback. The user's
   eye is the only PASS authority. Step 3 shipped the page shell (S3.1–S3.6 done); hard gates still need
@@ -274,6 +274,47 @@ points at the page, not individual elements.
   - Screenshots are for the USER to judge. DO NOT OPEN the PNGs (models are text-only).
   - 3/3 paid calls used. 0 reReason calls (v2 path has no Critic). Full-grid budget: 1/2 used.
 
+**Step 4 RESULT — MAKE v2 ACTUALLY WORK ON ALL THREE DOC SITES:**
+
+- [x] **S4.1** — Trim the v2 Painter payload. `serializeV2Painter()` in perceive/index.ts:
+  role + slot + dominance + handle + tag + signals only. No geometry, rects, widths, positions,
+  parent/child, or layout detail. Slot assignment computed BEFORE the Painter call (free, sync)
+  so the payload has slot info. v1 Painter payload untouched.
+  Measured: MDN v1 painter=full serialization (~30K+ chars) → v2=8,871 chars (~70% reduction).
+  MDN Painter wall-clock: 90s timeout (Step 3) → 35–68s (Step 4). GitHub: 90s timeout → 17–60s
+  (highly variable model latency).
+- [x] **S4.2** — Shell must not break on resize. Grid floors use `min(slotMin, Nvw - half-gap)`
+  so total floor + gap ≤ 100vw — no horizontal overflow at any viewport. `min-width: 0` on slot
+  wrappers (standard grid pattern). `overflow-x: clip` on shell. `max-width: 100%` blanket for
+  clusters in shell. `position: absolute/fixed` nodes skipped from wrapper plan (they float out
+  of grid flow). MDN: multiViewport=ok, zoom=ok, devtools=ok, proportionStable=ok (drift=0.000).
+  Wikipedia + GitHub: still overflow + content collapse (hard gate caught it, rolled back).
+- [x] **S4.3** — Give v2 a safety net. Existing v1 `verifyStyle` + `captureAndPixelVerify` +
+  `planRepair` wired to v2. Repair runs BEFORE hard gates (fix what's fixable first).
+  Hard gates (rollback): notBlank, contentCollapsed, contentVisible, noOverflow, noOverlap,
+  pixel voids=0, pixel invisibleText=0. Squeeze = advisory (logged, never blocks).
+  Deterministic free repair: forceContrast + squeeze repair, no paid reReason.
+  Return value: changeScore, coverage, verify, pixel, invisibleBreakdown, ledger.
+  MDN: hard gates all pass, repair caught 1 squeeze (advisory). Wikipedia: hard gate caught
+  overflow + collapse → rolled back (correct). GitHub: hard gate caught overflow + collapse →
+  rolled back (correct).
+- [ ] **S4.4** — By-eye gate. Real popup→Transform with `layoutCompiler=v2`, novel prompt
+  "vintage travel poster", 1 paid call per site. 3 full-grid runs:
+  - Run 1: MDN APPLIED (37.3s, 1 call, 4 wrappers, 27 nodes moved, changeScore=0.632). Hard
+    gates all pass. zoom=ok, multiViewport=ok, devtools=ok, multiCondPixel=ok. Squeeze=1 (advisory).
+    Wikipedia FAILED (hard gate: overflow + content collapse + moved dead). GitHub TIMEOUT (90s).
+  - Run 2: MDN APPLIED (69.7s, 1 call, 4 wrappers, 27 nodes moved, changeScore=0.699). All hard
+    gates pass. zoom=ok, multiViewport=ok, devtools=ok, multiCondPixel=ok. Wikipedia FAILED
+    (hard gate: overflow + collapse). GitHub FAILED (hard gate: overflow + collapse).
+  - Run 3: All 3 FAILED (model latency: MDN internal error, Wikipedia+GitHub timeout).
+  - Screenshots: `after_MDN.png` (from run 2, APPLIED). Wikipedia/GitHub rolled back → no
+    after screenshot (original page shown). DO NOT OPEN PNGs.
+  - 1/3 applied (MDN only). Wikipedia + GitHub consistently fail hard gate: overflow +
+    content collapse. Root cause: shell grid interacts badly with complex positioned layouts
+    (absolute/sticky/fixed-width containers). Position skip + overflow containment did NOT fully
+    resolve it. STOP at 3 fix cycles per the guardrails. Model latency is highly variable
+    (MDN: 35–90s for the same payload).
+
 **Step 1.5 RESULT — DIAGNOSE, NORMALIZE, RE-GATE ON SLOT-ASSIGNMENT STABILITY:**
 
 The reframe: role LABEL stability is not what the architecture needs — what must be stable is THE SLOT
@@ -348,12 +389,16 @@ The solver (Step 2) is NOT started. **Phase 5 (role-anchored stable handles) is 
 
 ## Current position (updated)
 
-**P2.5 — Step 3 DONE (by-eye gate run).** The solver now emits a page shell (grid + slot wrappers),
-not per-node restyles. Cross-run role agreement = 1.000 on all 3 doc sites. Perception settles before
-classifying. By-eye gate: 2/3 sites applied (MDN timed out at 90s Painter). Screenshots saved for
-user judgment — the user's eye is the only PASS authority. Hard gates need work: Wikipedia has 2 voids,
-GitHub has overflow on resize + 2 invisible-text. Next: user reviews screenshots → fix hard gates →
-re-run by-eye gate. Full-grid runs: 1/2 used this session.
+**P2.5 — Step 4 PARTIAL (S4.1-S4.3 done, S4.4 gate: 1/3 applied).** The v2 Painter payload is
+trimmed (S4.1: ~70% reduction, MDN timeout fixed). The shell grid resizes without overflow on MDN
+(S4.2: min() floors, min-width:0, overflow-x:clip, position skip). Verify+repair+hard gates wired to
+v2 (S4.3: safety net catches real failures, deterministic repair runs, squeeze is advisory). By-eye
+gate (S4.4): MDN applied with all hard gates passing (37-70s, 1 paid call). Wikipedia + GitHub
+consistently fail hard gate (overflow + content collapse — shell grid vs complex positioned layouts).
+Root cause flagged: the grid layout interacts badly with position:absolute/sticky/fixed-width
+containers on Wikipedia/GitHub. 3 fix cycles used (position skip, overflow containment, min-width:0).
+STOP per guardrails. Next: investigate position:sticky handling + content collapse root cause, OR
+user reviews the MDN screenshot and decides whether the architecture is sound.
 
 ## Status update protocol (for ALL agents)
 
