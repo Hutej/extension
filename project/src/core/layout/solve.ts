@@ -117,18 +117,20 @@ export function solve(input: SolveInput): SolveResult {
   const allSlotHandles = new Set<string>();
   for (const node of ir.nodes) {
     const slotId = assignment.handleToSlot.get(node.handle) ?? 'overflow';
-    // S4.2: skip position:absolute/fixed — they float out of the grid flow and
-    // would leave wrappers empty/collapsed. Styled only, not moved.
+    // S5.1: skip position:fixed ONLY — fixed is relative to the viewport, no
+    // wrapper can contain it. absolute/sticky are CONTAINED: moved into the
+    // wrapper alongside in-flow siblings so nothing escapes the grid.
     if (slotId !== 'overflow' && !excluded.has(node.handle) &&
-        node.authoredLayout.position !== 'absolute' && node.authoredLayout.position !== 'fixed')
+        node.authoredLayout.position !== 'fixed')
       allSlotHandles.add(node.handle);
   }
   const slotHandles = new Map<string, string[]>();
   for (const node of ir.nodes) {
     const slotId = assignment.handleToSlot.get(node.handle) ?? 'overflow';
     if (slotId === 'overflow' || excluded.has(node.handle)) continue;
-    // S4.2: skip position:absolute/fixed from the wrapper plan (styled only).
-    if (node.authoredLayout.position === 'absolute' || node.authoredLayout.position === 'fixed') continue;
+    // S5.1: skip position:fixed only (viewport-relative, no wrapper contains it).
+    // absolute/sticky are moved in — the wrapper is their new containing block.
+    if (node.authoredLayout.position === 'fixed') continue;
     // Skip if parent is in the SAME slot — the parent carries this node.
     if (node.computedRelationships.parent && allSlotHandles.has(node.computedRelationships.parent)) {
       const parentSlot = assignment.handleToSlot.get(node.computedRelationships.parent) ?? 'overflow';
@@ -226,6 +228,18 @@ export function solve(input: SolveInput): SolveResult {
     // Overflow safety: cap fixed-width nodes at 100% (prevent horizontal scroll).
     if (node.authoredLayout.intrinsicSizing === 'fixed') {
       decls.push('max-width: 100%');
+    }
+    // S5.1: absolute nodes moved into wrappers get position:static !important.
+    // Their original top/left/right/bottom/height:100% referenced a large ancestor
+    // (the old containing block). Moving the node into a grid wrapper changes the
+    // DOM tree — even without position:relative on the wrapper, the old containing
+    // block is now an ancestor at a different DOM depth, and height:100% can resolve
+    // to the wrapper's content height (which excludes the out-of-flow child) →
+    // collapse feedback loop → contentCollapsed=false hard gate. static puts them
+    // in flex flow → natural content height, no collapse. !important needed because
+    // site CSS uses ID selectors (higher specificity than [data-wm-c]).
+    if (node.authoredLayout.position === 'absolute') {
+      decls.push('position: static !important');
     }
     if (decls.length > 0) {
       blocks.push(`[data-wm-c="${node.handle}"] {\n${decls.map((d) => `  ${d};`).join('\n')}\n}`);
