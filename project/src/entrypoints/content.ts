@@ -31,7 +31,7 @@ import { validateOps, type ValidatedOp } from '@/core/ops';
 import { extractLayoutIR } from '@/core/layout/ir';
 import { detectExclusions } from '@/core/layout/exclusions';
 import { assignSlots } from '@/core/layout/assign';
-import { solve, applySlotWrappers } from '@/core/layout/solve';
+import { solve, computeGridPlacementCss } from '@/core/layout/solve';
 
 interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?: string; usage?: unknown; model?: string; callMs?: number; }
 
@@ -112,6 +112,9 @@ const FAILED = 'webmorphFailed';
 let inFlight: Promise<TransformOutcome> | null = null;
 let activeShadowRoots: ShadowRoot[] = [];
 let lastAppliedCss = '';   // last applied CSS — for immediate shadow-root injection on dynamic content
+// S7.1: the v2 structural CSS (grid + display:contents). Stored separately so
+// restyleDynamic can re-apply it alongside re-compiled Painter CSS.
+let activeStructuralCss = '';
 
 // Dynamic-content defense: the stored spec + opts, used to re-stamp +
 // re-apply the design on inserted content (free, no model call).
@@ -199,7 +202,12 @@ async function captureShotAt(y: number): Promise<PixelInput> {
  *  detector compares it to captures[0] (the scrollY=0 after-shot). */
 async function captureAndPixelVerify(before?: PixelInput): Promise<{ result: PixelVerifyResult; ms: number }> {
   const tc = performance.now();
-  const h = document.documentElement.scrollHeight || 1;
+  // S7.3g: use document.body.scrollHeight (matching the test harness) so the
+  // verify pass captures at the SAME scroll positions. document.documentElement
+  // and document.body can differ (margins/overflow), causing the verify to miss
+  // invisible text that the test harness catches — sticky headers are always at
+  // the viewport top, but the content behind them changes per scroll position.
+  const h = (document.body?.scrollHeight || document.documentElement.scrollHeight) || 1;
   const scrolls = [0, Math.floor(h / 2), Math.floor(h * 0.8)];
   // Build rects at EACH scroll position — getBoundingClientRect() returns viewport-
   // relative coords, so a rect from scrollY=0 misaligned against a capture at
@@ -488,7 +496,10 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     for (const h of new Set(targets)) {
       const el = document.querySelector<HTMLElement>(`[data-wm-c="${h}"]`);
       if (!el) continue;
-      if (getComputedStyle(el).backgroundImage !== 'none') continue;
+      // S7.3g: skip content images (url()) but NOT gradients. A gradient bg can
+      // make text invisible; the inline backstop (inline+!important) overrides it
+      // with a readable solid pair. Content images are preserved.
+      if (/url\(/i.test(getComputedStyle(el).backgroundImage)) continue;
       const ownBg = getComputedStyle(el).backgroundColor;
       const effBg = opaque(contrastTargetBgs?.[h]) ?? opaque(ownBg) ?? canvasTone;
       const baseTone = deriveBaseTone(effBg);
@@ -507,8 +518,11 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   // S4.1: Painter gets a v2 payload (role/slot only, no geometry).
   // S4.3: verify + deterministic repair + hard gates, same as v1.
   if (AI_CONFIG.layoutCompiler === 'v2' && !restyleOnly) {
-    txnLog.undoAll(liveDom);
-    txnLog.clear();
+    // S7.1: CSS-only relayout. No DOM mutation, nothing for txnLog to undo.
+    // Undo = removeStyleEverywhere (the stylesheet carries the grid + display:contents).
+    // Clean up any stale data-wm-grid debug attributes from a prior transform.
+    document.querySelectorAll('[data-wm-grid]').forEach((el) => el.removeAttribute('data-wm-grid'));
+    removeStyleEverywhere(activeShadowRoots);
 
     // S4.1: compute IR + slots BEFORE the Painter so the payload has slot info.
     // The solver + assignment are free (synchronous, no model calls).
@@ -532,25 +546,16 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     }
     const v2Spec = v2PaintRes.spec;
 
-    // Solver (free): shell grid + slot wrappers + structural CSS.
+    // Solver (free): placement data + grid template. S7.1: CSS-only, no DOM mutation.
     const v2SolveResult = solve({ ir: v2IR, assignment: v2Assignment, excluded: v2ExcludedSet });
-    const v2WrapResult = applySlotWrappers(v2SolveResult.wrappers, liveDom, txnLog);
-    const v2MovedHandles = txnLog.movedHandles();
-    logDebug(`v2 solver: ${v2SolveResult.wrappers.length} slot wrappers, ${v2WrapResult.nodesMoved} nodes moved, ${v2SolveResult.rulesEmitted} CSS rules, ${v2SolveResult.matchedTargets} matched targets`);
-    // S6.3: diagnostic — check moved handles are alive right after the move (before CSS/RAF).
-    {
-      let alive = 0, dead = 0;
-      for (const h of v2MovedHandles) {
-        if (document.querySelector(`[data-wm-c="${h}"]`)) alive++; else dead++;
-      }
-      const totalStamped = document.querySelectorAll('[data-wm-c]').length;
-      logDebug(`v2 POST-MOVE: movedHandles alive=${alive} dead=${dead} totalStamped=${totalStamped}`);
-    }
+    const v2Placement = computeGridPlacementCss(v2SolveResult);
+    logDebug(`v2 solver: ${v2SolveResult.matchedTargets} matched, ${v2Placement.nodesPlaced} placed, ${v2Placement.nodesNotPlaceable.length} not placeable, ${v2Placement.intermediatesCollapsed} collapsed, ${v2Placement.intermediatesSkipped} skipped, ${v2Placement.selectorFallback} selector fallbacks, ${v2SolveResult.rulesEmitted} CSS rules`);
+    if (v2Placement.skippedReasons.length) logDebug(`v2 display:contents skips: ${v2Placement.skippedReasons.slice(0, 10).join('; ')}`);
 
     // Compile aesthetic CSS from the Painter's spec.
     let v2Options: CompileOptions = { paletteMode: v2Spec.paletteMode };
     const v2Compiled = compileSpec(v2Spec, perception, v2Options);
-    const v2StructuralCss = v2SolveResult.css;
+    const v2StructuralCss = v2Placement.css;
     let v2CombinedCss = sanitizeCss(v2StructuralCss + '\n' + sanitizeCss(v2Compiled.css).css).css;
     if (!v2CombinedCss.trim()) {
       removeStyleEverywhere(activeShadowRoots); markFailed('no styles');
@@ -569,84 +574,22 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     let v2PaintCount = 1;
     document.documentElement.dataset['webmorphPaintCount'] = '1';
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
-    // S6.3: diagnostic — after RAF, check if framework clobbered moved nodes.
-    {
-      let alive = 0, dead = 0;
-      for (const h of v2MovedHandles) {
-        if (document.querySelector(`[data-wm-c="${h}"]`)) alive++; else dead++;
-      }
-      const totalStamped = document.querySelectorAll('[data-wm-c]').length;
-      logDebug(`v2 POST-RAF: movedHandles alive=${alive} dead=${dead} totalStamped=${totalStamped}`);
-    }
 
     // S4.3: verify (DOM + pixel) — the safety net v2 was missing.
     const v2VerifyMs = performance.now();
-    let v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), v2MovedHandles, reflowOpportunity);
+    // S7.1: no moved handles — CSS-only placement, zero DOM mutation.
+    let v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), new Set(), reflowOpportunity);
     let v2Px = await captureAndPixelVerify(beforeTop);
     let v2Pixel = v2Px.result;
     let v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
     logDebug(`v2 paint1: checks=${JSON.stringify(v2Verify.checks)} pixel(passed=${v2Pixel.passed} voids=${v2Pixel.voids.length} invisible=${v2Pixel.invisibleText.length} squeeze=${v2Pixel.squeeze.length}) change=${v2Verify.changeScore.toFixed(3)}`);
-
-    // S6.3: diagnostic — which elements cause overflow? (find what scrollWidth > innerWidth)
-    if (!v2Verify.checks.noOverflow) {
-      const sw = document.documentElement.scrollWidth, iw = window.innerWidth || 1;
-      const beforeSw = before.scrollWidth, beforeRatio = beforeSw / iw, afterRatio = sw / iw;
-      const threshold = Math.max(beforeRatio * 1.02, 1.02) + 0.01;
-      logDebug(`v2 OVERFLOW: beforeSW=${beforeSw} afterSW=${sw} innerWidth=${iw} beforeRatio=${beforeRatio.toFixed(3)} afterRatio=${afterRatio.toFixed(3)} threshold=${threshold.toFixed(3)}`);
-      // Scan all elements (capped) for any whose rect.right exceeds viewport.
-      const wide: string[] = [];
-      let scanned = 0;
-      for (const el of document.querySelectorAll('*') as unknown as HTMLElement[]) {
-        if (scanned++ > 3000) break;
-        if (el.hasAttribute?.('data-webmorph-ui')) continue;
-        const r = el.getBoundingClientRect();
-        if (r.right > iw + 2) {
-          const inShell = el.closest?.('[data-wm-shell]') != null;
-          wide.push(`<${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''} right=${Math.round(r.right)} w=${Math.round(r.width)} inShell=${inShell}>`);
-          if (wide.length >= 12) break;
-        }
-      }
-      if (wide.length) logDebug(`v2 OVERFLOW wide elems: ${wide.join(', ')}`);
-      else logDebug(`v2 OVERFLOW: no element rect.right > iw — overflow may be from scrollWidth of a clipped container`);
-    }
-    // S6.3: diagnostic — which regions collapsed?
-    if (!v2Verify.checks.contentCollapsed && v2Verify.details) {
-      const collapseDetail = v2Verify.details.find((d) => d.startsWith('content collapsed'));
-      if (collapseDetail) {
-        logDebug(`v2 COLLAPSE: ${collapseDetail}`);
-        // Deep-dive: for each collapsed handle, query the live DOM.
-        const handles = collapseDetail.match(/c[a-z0-9]+/g) || [];
-        for (const h of handles.slice(0, 6)) {
-          const el = document.querySelector(`[data-wm-c="${h}"]`) as HTMLElement | null;
-          if (!el) { logDebug(`v2 COLLAPSE ${h}: NOT IN DOM (removed or attr stripped)`); continue; }
-          const cs = getComputedStyle(el);
-          const r = el.getBoundingClientRect();
-          // Check for absolute children (the S5.1 fix only handles top-level slot nodes).
-          let absChildren = 0, totalChildren = 0;
-          for (const child of el.querySelectorAll('*')) {
-            totalChildren++;
-            if (getComputedStyle(child).position === 'absolute') absChildren++;
-          }
-          logDebug(`v2 COLLAPSE ${h}: display=${cs.display} pos=${cs.position} w=${Math.round(r.width)} h=${Math.round(r.height)} overflow=${cs.overflowX}/${cs.overflowY} minH=${cs.minHeight} parent=${el.parentElement?.tagName}#${el.parentElement?.id||''} .[data-wm-slot]=${el.closest('[data-wm-slot]')?.getAttribute('data-wm-slot')||'none'} children=${totalChildren} absChildren=${absChildren} html="${el.innerHTML.slice(0, 120).replace(/\n/g, ' ')}"`);
-        }
-      }
-    }
-    // S6.3: diagnostic — shell overflow state
-    {
-      const shell = document.querySelector('[data-wm-shell]') as HTMLElement | null;
-      if (shell) {
-        const cs = getComputedStyle(shell);
-        const r = shell.getBoundingClientRect();
-        logDebug(`v2 SHELL: overflow-x=${cs.overflowX} overflow-y=${cs.overflowY} w=${Math.round(r.width)} h=${Math.round(r.height)} scrollW=${shell.scrollWidth} scrollH=${shell.scrollHeight}`);
-      }
-    }
 
     // S4.3: deterministic repair (free — no paid reReason). forceContrast + squeeze
     // repairs from planRepair, recompiled + re-applied as paint 2. Runs BEFORE the
     // hard gate so repair can fix what's fixable; the hard gate is the FINAL check.
     if (!v2Verify.checks.notBlank) {
       // Content blanked — rollback immediately (no repair can fix this).
-      txnLog.undoAll(liveDom);
+      // S7.1: undo = remove stylesheet (no DOM mutations to undo).
       removeStyleEverywhere(activeShadowRoots);
       markFailed('v2 content blanked');
       logDebug(`v2 ROLLBACK — content blanked`);
@@ -659,7 +602,6 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       const v2Repair = planRepair(v2Verify, v2Options, 0, v2Spec.paletteMode, v2Pixel, false, new Set());
       logDebug(`v2 repair -> ${v2Repair.action}: ${v2Repair.reason}`);
       if (v2Repair.action === 'rollback') {
-        txnLog.undoAll(liveDom);
         removeStyleEverywhere(activeShadowRoots);
         markFailed('v2 content blanked (repair)');
         return { ok: false, message: 'v2 content blanked', spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
@@ -669,12 +611,17 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
         const v2Compiled2 = compileSpec(v2Spec, perception, v2Options);
         v2CombinedCss = sanitizeCss(v2StructuralCss + '\n' + sanitizeCss(v2Compiled2.css).css).css;
         applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
-        applyInlineBackstop(v2Spec, v2Options.pixelInvisibleTargets, v2Options.contrastTargetBgs as Record<string, string> | undefined);
+        // S7.3g: apply inline backstop to ALL contrast targets (DOM + pixel), not
+        // just pixel-invisible. The CSS forceContrast rules (specificity 0,2,0) don't
+        // beat id-level site !important; inline styles do. Without this, clusters with
+        // id-level !important survive forceContrast and become invisible after re-apply.
+        const allContrastTargets = [...new Set([...(v2Options.pixelInvisibleTargets ?? []), ...(v2Options.contrastTargets ?? [])])];
+        applyInlineBackstop(v2Spec, allContrastTargets, v2Options.contrastTargetBgs as Record<string, string> | undefined);
         v2PaintCount = 2;
         document.documentElement.dataset['webmorphPaintCount'] = '2';
         await new Promise<void>((r) => requestAnimationFrame(() => r()));
         // Re-verify after repair.
-        v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), v2MovedHandles, reflowOpportunity);
+        v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), new Set(), reflowOpportunity);
         v2Px = await captureAndPixelVerify(beforeTop);
         v2Pixel = v2Px.result;
         v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
@@ -696,7 +643,6 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
         ...(v2Pixel.voids.length ? v2Pixel.voids.map((h) => 'void:' + h) : []),
         ...(v2Pixel.invisibleText.length ? v2Pixel.invisibleText.map((h) => 'invis:' + h) : []),
       ].join(', ');
-      txnLog.undoAll(liveDom);
       removeStyleEverywhere(activeShadowRoots);
       markFailed('v2 hard gate: ' + failures);
       logDebug(`v2 ROLLBACK — hard gate: ${failures}`);
@@ -710,18 +656,19 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const v2State = await loadSiteState(v2Key);
     const v2Id = `style_${Date.now()}`;
     v2State.enabled = true;
-    v2State.style = { id: v2Id, intent, spec: v2Spec, css: v2CombinedCss, reasoning: v2Spec.reasoning, compileOptions: v2Options, createdAt: Date.now() };
+    v2State.style = { id: v2Id, intent, spec: v2Spec, css: v2CombinedCss, structuralCss: v2StructuralCss, reasoning: v2Spec.reasoning, compileOptions: v2Options, createdAt: Date.now() };
     await saveSiteState(v2Key, v2State);
     startDefenseEverywhere(v2CombinedCss, activeShadowRoots);
     activeSpec = v2Spec;
     activeOpts = v2Options;
+    activeStructuralCss = v2StructuralCss;
     startDynamicDefense();
     ensureEscapeUI(toggleSiteState);
     markApplied(v2Id);
 
     const v2TotalMs = Date.now() - t0;
     const v2ModelMs = roleCalls.reduce((s, c) => s + c.ms, 0);
-    logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] verify=${v2VerifyMsTotal}ms total=${v2TotalMs}ms paidCalls=${paidCalls()} wrappers=${v2SolveResult.wrappers.length} nodesMoved=${v2WrapResult.nodesMoved} paints=${v2PaintCount}`);
+    logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] verify=${v2VerifyMsTotal}ms total=${v2TotalMs}ms paidCalls=${paidCalls()} placed=${v2Placement.nodesPlaced} collapsed=${v2Placement.intermediatesCollapsed} notPlaceable=${v2Placement.nodesNotPlaceable.length} selectorFallback=${v2Placement.selectorFallback} paints=${v2PaintCount}`);
 
     return {
       ok: true, spec: v2Spec, verify: v2Verify,
@@ -877,8 +824,10 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     applyStyleEverywhere(sanitized, activeShadowRoots);
     // Inline forceContrast backstop: forces the readable pair onto each invisible
     // cluster's own element, beating id-level site !important that defeats the CSS
-    // rule (the cascade-loss class). Gated on pixelInvisibleTargets (paint 2 only).
-    applyInlineBackstop(curSpec, opts.pixelInvisibleTargets, opts.contrastTargetBgs);
+    // rule (the cascade-loss class). S7.3g: applied to ALL contrast targets (DOM +
+    // pixel), not just pixel-invisible — id-level !important survivors need inline.
+    const allContrastTargetsV1 = [...new Set([...(opts.pixelInvisibleTargets ?? []), ...(opts.contrastTargets ?? [])])];
+    applyInlineBackstop(curSpec, allContrastTargetsV1, opts.contrastTargetBgs);
     applyMsTotal += performance.now() - tcApply;
     paintCount++;
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
@@ -1194,14 +1143,31 @@ async function reapplyStored(): Promise<boolean> {
     activeOps = [];
   }
   txnLog.clear(); // fresh session — the log is session-only
-  // Re-compile the stored spec against the (possibly post-op) perception.
   const opts = state.style.compileOptions ?? { paletteMode: state.style.spec.paletteMode };
-  const compiled = compileSpec(state.style.spec, perception, opts);
-  const css = sanitizeCss(compiled.css).css || state.style.css;
+  // S7.3g: for v2, use the stored combined CSS directly (the exact CSS from paint2).
+  // Re-compilation with a fresh perception can produce slightly different forceContrast
+  // text colors (stale contrastTargetBgs vs fresh cl.style.background), causing text
+  // to become invisible after undo-fidelity toggle. The stored CSS is authoritative.
+  // Dynamic content is handled by the MutationObserver defense (restyleDynamic).
+  const structuralCss = state.style.structuralCss ?? '';
+  let css: string;
+  if (structuralCss) {
+    // v2 path: stored CSS already includes structural + Painter + forceContrast repair.
+    css = state.style.css;
+    // Still re-stamp handles so [data-wm-c] selectors match on the live page.
+    clearHandles();
+    perception = perceive();
+    activeShadowRoots = perception.shadowRoots;
+  } else {
+    // v1 path: re-compile (ops may have changed the DOM).
+    const compiled = compileSpec(state.style.spec, perception, opts);
+    css = sanitizeCss(compiled.css).css || state.style.css;
+  }
   applyStyleEverywhere(css, activeShadowRoots);
   startDefenseEverywhere(css, activeShadowRoots);
   activeSpec = state.style.spec;
   activeOpts = opts;
+  activeStructuralCss = structuralCss;
   startDynamicDefense();
   ensureEscapeUI(toggleSiteState);
   markApplied(state.style.id);
@@ -1224,8 +1190,10 @@ async function toggleSiteState(): Promise<void> {
  *  pre-transform state in one synchronous pass. The log is session-only. */
 function undoOpsAndCss(): void {
   stopDynamicDefense();
-  activeSpec = null; activeOps = [];
+  activeSpec = null; activeOps = []; activeStructuralCss = '';
   txnLog.undoAll(liveDom);
+  // S7.1: clean up data-wm-grid debug attributes from CSS-only placement.
+  document.querySelectorAll('[data-wm-grid]').forEach((el) => el.removeAttribute('data-wm-grid'));
   removeStyleEverywhere(activeShadowRoots); removeEscapeUI();
   delete document.documentElement.dataset[APPLIED];
 }
@@ -1254,7 +1222,10 @@ function restyleDynamic(): void {
   const { ops: revalidated } = validateOps(activeSpec.ops, perception);
   if (revalidated.length) { executeOps(revalidated, false); activeOps = revalidated; }
   const compiled = compileSpec(activeSpec, perception, activeOpts);
-  const css = sanitizeCss(compiled.css).css;
+  // S7.1: prepend the stored structural CSS (grid + display:contents) so the
+  // grid layout survives dynamic re-style (MutationObserver re-apply path).
+  const painterCss = sanitizeCss(compiled.css).css;
+  const css = activeStructuralCss ? sanitizeCss(activeStructuralCss + '\n' + painterCss).css : painterCss;
   if (css) { applyStyleEverywhere(css, activeShadowRoots); lastAppliedCss = css; }
   logDebug(`dynamic restyle: ${perception.clusters.length} clusters re-stamped + re-applied${revalidated.length ? ` ops=${revalidated.length}` : ''}`);
 }

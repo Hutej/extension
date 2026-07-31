@@ -62,26 +62,6 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
     return { action: 'rollback', options: prev, reason: 'content blanked' };
   }
 
-  // Content collapsed (but not fully blanked) — regions shrank to near-zero.
-  // Try dropping hides first (display:none causes collapse), then sizing
-  // (maxHeight/height constraints), then all layout (flex/grid collapse).
-  if (!c.contentCollapsed) {
-    if (!prev.dropHides) return { action: 'recompile', options: { ...prev, dropHides: true }, reason: 'content collapsed — drop hides first' };
-    // Targeted: drop layout on ONLY the collapsed region(s), preserving the rest of
-    // the design. The blanket dropSizing below nukes ALL layout (turns a real reshape
-    // into a recolor) — try the surgical fix first.
-    if (verify.collapseTargets.length && !prev.collapseTargets) {
-      return { action: 'recompile', options: { ...prev, collapseTargets: verify.collapseTargets }, reason: `targeted collapse repair on ${verify.collapseTargets.length} region(s): ${verify.collapseTargets.slice(0, 6).join(',')}` };
-    }
-    if (!prev.dropSizing) return { action: 'recompile', options: { ...prev, dropSizing: true }, reason: 'content collapsed — drop sizing (height constraints)' };
-    if (!prev.dropLayout) return { action: 'recompile', options: { ...prev, dropLayout: true }, reason: 'content collapsed — drop all layout (flex/grid collapse)' };
-    // Collapse unfixable (often a parent's layout squeezed the region). DON'T return
-    // keepBest here — fall through so contrast/accent/overflow repairs can still fix
-    // what's fixable. The keepBest at the end of planRepair catches the rest. This
-    // prevents a single unfixable collapse from blocking every other repair (the
-    // collapse-monopoly case: accent=1.000 + low contrast went unfixed because collapse monopolized).
-  }
-
   // ── Deterministic fixes: each targets ONLY the check it can actually fix, and
   // each is applied at most once (gated on the option not yet being set). We take
   // the highest-priority available fix, recompile, and re-verify — so multiple
@@ -89,6 +69,12 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // repairs (padding/sizing/layout) run ONLY for overflow/overlap failures — they
   // can never reduce accent, so they must not be spent on a coherence failure.
 
+  // S7.3h: forceContrast runs BEFORE contentCollapsed. With CSS-only placement
+  // (S7.1), collapse is no longer caused by reparenting, so drop-hides should
+  // rarely fire. Contrast (invisible text) is more fundamental than layout — you
+  // can't fix layout on text the user can't see. The old ordering let drop-hides
+  // pre-empt forceContrast, burning repair cycles on layout before visibility.
+  //
   // Pixel-invisible text (any count) is fixed DETERMINISTICALLY by the generic
   // forceContrast recompile below: it paints an opaque readable bg + readable text
   // pair (forceContrastSelector, specificity 0,2,0 + !important — beats site class
@@ -111,6 +97,28 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   const contrastHandles = Array.from(new Set([...verify.contrastTargets, ...pixelInvisible]));
   if ((!c.contrastOk || pixelInvisible.length > 0) && !prev.forceContrast) {
     return { action: 'recompile', options: { ...prev, forceContrast: true, contrastTargets: contrastHandles, contrastTargetBgs: verify.contrastTargetBgs, pixelInvisibleTargets: pixelInvisible }, reason: `force contrast (${contrastHandles.length} handle(s): ${verify.contrastTargets.length} DOM + ${pixelInvisible.length} pixel — ${pixelInvisible.length} get a readable bg+text pair)` };
+  }
+
+  // Content collapsed (but not fully blanked) — regions shrank to near-zero.
+  // Try dropping hides first (display:none causes collapse), then sizing
+  // (maxHeight/height constraints), then all layout (flex/grid collapse).
+  // S7.3h: runs AFTER forceContrast — collapse is a layout issue, contrast is
+  // visibility. With CSS-only placement, this rarely fires (no reparenting).
+  if (!c.contentCollapsed) {
+    if (!prev.dropHides) return { action: 'recompile', options: { ...prev, dropHides: true }, reason: 'content collapsed — drop hides first' };
+    // Targeted: drop layout on ONLY the collapsed region(s), preserving the rest of
+    // the design. The blanket dropSizing below nukes ALL layout (turns a real reshape
+    // into a recolor) — try the surgical fix first.
+    if (verify.collapseTargets.length && !prev.collapseTargets) {
+      return { action: 'recompile', options: { ...prev, collapseTargets: verify.collapseTargets }, reason: `targeted collapse repair on ${verify.collapseTargets.length} region(s): ${verify.collapseTargets.slice(0, 6).join(',')}` };
+    }
+    if (!prev.dropSizing) return { action: 'recompile', options: { ...prev, dropSizing: true }, reason: 'content collapsed — drop sizing (height constraints)' };
+    if (!prev.dropLayout) return { action: 'recompile', options: { ...prev, dropLayout: true }, reason: 'content collapsed — drop all layout (flex/grid collapse)' };
+    // Collapse unfixable (often a parent's layout squeezed the region). DON'T return
+    // keepBest here — fall through so accent/overflow repairs can still fix
+    // what's fixable. The keepBest at the end of planRepair catches the rest. This
+    // prevents a single unfixable collapse from blocking every other repair (the
+    // collapse-monopoly case: accent=1.000 + low contrast went unfixed because collapse monopolized).
   }
 
   // Over-accent: strip accent backgrounds from repeated/low-prominence clusters

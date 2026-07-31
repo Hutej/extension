@@ -14,6 +14,10 @@ export interface StyleRecord {
   intent: string;
   spec: DesignSpec;
   css: string;
+  /** S7.1: the v2 grid + display:contents structural CSS. Stored separately so
+   *  reapplyStored + restyleDynamic can re-apply it alongside re-compiled Painter
+   *  CSS. Without this, a re-apply loses the grid layout (only Painter CSS survives). */
+  structuralCss?: string;
   reasoning: string;
   compileOptions?: CompileOptions;
   createdAt: number;

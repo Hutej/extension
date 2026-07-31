@@ -16,7 +16,7 @@ import { perceive, clearHandles, serializePerception, clearRoleCache, waitForSet
 import { extractLayoutIR, currentConstraints } from '../../src/core/layout/ir.ts';
 import { detectExclusions } from '../../src/core/layout/exclusions.ts';
 import { assignSlots } from '../../src/core/layout/assign.ts';
-import { solve, applySlotWrappers } from '../../src/core/layout/solve.ts';
+import { solve, computeGridPlacementCss } from '../../src/core/layout/solve.ts';
 
 // Exposed on window by the bundled module (see probe.ts build).
 (globalThis as unknown as { __wmPerceive: typeof perceive; __wmClearHandles: typeof clearHandles; __wmSerialize: typeof serializePerception }).__wmPerceive = perceive;
@@ -35,5 +35,5 @@ import { solve, applySlotWrappers } from '../../src/core/layout/solve.ts';
 (globalThis as unknown as { __wmWaitForSettle: typeof waitForSettle }).__wmWaitForSettle = waitForSettle;
 // Step 2 — the v2 solver (behind layoutCompiler=v2 flag).
 (globalThis as unknown as { __wmSolve: typeof solve }).__wmSolve = solve;
-// Step 3 — slot wrapper DOM execution (reuses the existing TransactionLog).
-(globalThis as unknown as { __wmApplySlotWrappers: typeof applySlotWrappers }).__wmApplySlotWrappers = applySlotWrappers;
+// S7.1 — CSS-only grid placement (replaces wrapper DOM execution).
+(globalThis as unknown as { __wmComputeGridPlacementCss: typeof computeGridPlacementCss }).__wmComputeGridPlacementCss = computeGridPlacementCss;

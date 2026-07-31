@@ -157,23 +157,40 @@ async function pixelAudit(page: Page): Promise<{ voids: number; invisibleText: n
     });
     const screenshot = await page.screenshot({ type: 'png' });
     const dataUrl = 'data:image/png;base64,' + screenshot.toString('base64');
-    const capture = await page.evaluate((url: string) => new Promise<PixelInput>((resolve) => {
-      const img = new Image();
-      img.onload = () => {
-        const canvas = document.createElement('canvas');
-        canvas.width = img.naturalWidth; canvas.height = img.naturalHeight;
-        const ctx = canvas.getContext('2d')!;
-        ctx.drawImage(img, 0, 0);
-        resolve({ width: canvas.width, height: canvas.height, data: ctx.getImageData(0, 0, canvas.width, canvas.height).data });
-      };
-      img.onerror = () => resolve({ width: 0, height: 0, data: new Uint8ClampedArray(0) });
-      img.src = url;
-    }), dataUrl);
+    const capture = await page.evaluate((url: string) => {
+      const vw = window.innerWidth;
+      return new Promise<PixelInput>((resolve) => {
+        const img = new Image();
+        img.onload = () => {
+          // S7.3g: downscale to CSS-pixel width so the capture coordinate system
+          // matches getBoundingClientRect() rects (CSS pixels). Without this, a
+          // high-DPI display captures at device pixels (e.g. 1.5x or 2x), and the
+          // CSS-pixel rects only cover a fraction of the capture — causing false
+          // invisible-text positives (the variance is computed on the wrong pixels).
+          const w = vw;
+          const h = Math.max(1, Math.round((img.naturalHeight / Math.max(1, img.naturalWidth)) * w));
+          const canvas = document.createElement('canvas');
+          canvas.width = w; canvas.height = h;
+          const ctx = canvas.getContext('2d')!;
+          ctx.drawImage(img, 0, 0, w, h);
+          resolve({ width: w, height: h, data: ctx.getImageData(0, 0, w, h).data });
+        };
+        img.onerror = () => resolve({ width: 0, height: 0, data: new Uint8ClampedArray(0) });
+        img.src = url;
+      });
+    }, dataUrl);
     if (capture.data.length) {
+      const invHandles = detectInvisibleText(capture, rects);
       totalVoids += detectVoids(capture, rects).length;
-      totalInvisible += detectInvisibleText(capture, rects).length;
+      totalInvisible += invHandles.length;
+      if (invHandles.length) {
+        const invDetails = invHandles.map((h) => {
+          const r = rects.find((cr) => cr.handle === h);
+          return r ? `${h}[${r.role}] "${r.text.slice(0, 40)}" fs=${r.fontSize} ${r.hasImage ? 'img' : ''} ${r.hasGradient ? 'grad' : ''}` : h;
+        });
+        allDetails.push(`${pos}: voids=${detectVoids(capture, rects).length} invisible=[${invDetails.join(' | ')}]`);
+      } else allDetails.push(`${pos}: voids=${detectVoids(capture, rects).length} invisible=0`);
     }
-    allDetails.push(`${pos}: voids=${detectVoids(capture, rects).length} invisible=${detectInvisibleText(capture, rects).length}`);
   }
   await page.evaluate(() => window.scrollTo(0, 0));
   return { voids: totalVoids, invisibleText: totalInvisible, details: allDetails };
@@ -308,8 +325,6 @@ async function zoomCheck(page: Page): Promise<boolean> {
       const el = document.querySelector('[data-wm-c]') as HTMLElement | null;
       return el ? el.offsetWidth > 0 && el.offsetHeight > 0 : false;
     });
-    // At 125% zoom, also run the pixel audit — invisible text + voids must be zero.
-    // (80% zoom pixel is covered by multiConditionPixelCheck.)
     let pixelOk = true;
     if (z === '1.25') {
       const px = await pixelAudit(page);

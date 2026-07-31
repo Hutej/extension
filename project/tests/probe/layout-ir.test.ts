@@ -814,7 +814,7 @@ async function main(): Promise<void> {
       const detectExcl = (window as unknown as { __wmDetectExclusions: (c: any[]) => Map<string, string> }).__wmDetectExclusions;
       const assignS = (window as unknown as { __wmAssignSlots: (n: any[], e: Set<string>) => any }).__wmAssignSlots;
       const solve = (window as unknown as { __wmSolve: (i: any) => any }).__wmSolve;
-      const applyWrappers = (window as unknown as { __wmApplySlotWrappers: (p: any, d: any, t: any) => any }).__wmApplySlotWrappers;
+      const computePlacement = (window as unknown as { __wmComputeGridPlacementCss: (r: any) => any }).__wmComputeGridPlacementCss;
       clearHandles();
       const p = perceive() as any;
       const ir = extractIR(p);
@@ -823,33 +823,27 @@ async function main(): Promise<void> {
       for (const [h] of excludedRaw) excludedSet.add(h);
       const assignment = assignS(ir.nodes, excludedSet);
       const result = solve({ ir, assignment, excluded: excludedSet });
-      // S3.1 — execute the wrapper plan against the live DOM.
-      const wrapResult = applyWrappers
-        ? applyWrappers(result.wrappers, {
-            resolve: (h: string) => document.querySelector(`[data-wm-c="${h}"]`),
-            parent: (n: any) => n.parentNode,
-            nextSibling: (n: any) => n.nextSibling,
-            insertBefore: (p: any, n: any, r: any) => p.insertBefore(n, r),
-            appendChild: (p: any, n: any) => p.appendChild(n),
-            removeChild: (p: any, n: any) => p.removeChild(n),
-            createElement: (t: string) => document.createElement(t),
-            resolveDestination: () => null,
-          }, { record: () => {} } as any)
-        : { wrappersCreated: 0, nodesMoved: 0 };
+      // S7.1 — CSS-only grid placement (no DOM mutation).
+      const placementResult = computePlacement
+        ? computePlacement(result)
+        : { css: '', nodesPlaced: 0, nodesNotPlaceable: [], intermediatesCollapsed: 0, intermediatesSkipped: 0, selectorFallback: 0, skippedReasons: [] };
       // Count slot distribution
       const slotDist: Record<string, number> = {};
       for (const [h, s] of assignment.handleToSlot) slotDist[s] = (slotDist[s] ?? 0) + 1;
-      return { css: result.css, rulesEmitted: result.rulesEmitted, matchedTargets: result.matchedTargets,
+      return { css: placementResult.css, rulesEmitted: result.rulesEmitted, matchedTargets: result.matchedTargets,
         impossibleNodes: result.impossibleNodes, droppedOptionals: result.droppedOptionals,
-        nodeCount: ir.nodes.length, wrappersCreated: wrapResult.wrappersCreated, nodesMoved: wrapResult.nodesMoved,
-        wrapperCount: result.wrappers.length, wrapperSlots: result.wrappers.map((w: any) => `${w.slotId}(${w.handles.length})`).join(', '),
+        nodeCount: ir.nodes.length, nodesPlaced: placementResult.nodesPlaced,
+        nodesNotPlaceable: placementResult.nodesNotPlaceable.length,
+        intermediatesCollapsed: placementResult.intermediatesCollapsed,
+        intermediatesSkipped: placementResult.intermediatesSkipped,
+        selectorFallback: placementResult.selectorFallback,
+        placementCount: result.placement.size,
         slotDist };
     }, bundle);
     console.log(`  nodes: ${solverResult.nodeCount}, rules emitted: ${solverResult.rulesEmitted}, matched: ${solverResult.matchedTargets}`);
     console.log(`  impossible nodes: ${solverResult.impossibleNodes.length === 0 ? 'none' : solverResult.impossibleNodes.join(', ')}`);
     console.log(`  dropped optionals: ${solverResult.droppedOptionals.length === 0 ? 'none' : solverResult.droppedOptionals.map((d: any) => `${d.handle}:${d.kind}`).join(', ')}`);
-    console.log(`  slot wrappers: ${solverResult.wrapperCount} (${solverResult.wrapperSlots})`);
-    console.log(`  wrappers created: ${solverResult.wrappersCreated}, nodes moved: ${solverResult.nodesMoved}`);
+    console.log(`  placement: ${solverResult.placementCount} handles, ${solverResult.nodesPlaced} placed, ${solverResult.nodesNotPlaceable} not placeable, ${solverResult.intermediatesCollapsed} collapsed, ${solverResult.intermediatesSkipped} skipped, ${solverResult.selectorFallback} selector fallbacks`);
     console.log(`  slot distribution: ${Object.entries(solverResult.slotDist).map(([k, v]) => `${k}=${v}`).join(', ')}`);
     console.log(`\n--- CSS (first 4000 chars) ---\n${solverResult.css.slice(0, 4000)}${solverResult.css.length > 4000 ? '\n... (truncated)' : ''}`);
   }
