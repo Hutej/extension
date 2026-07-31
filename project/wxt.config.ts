@@ -24,6 +24,10 @@ export default defineConfig({
       'process.env.WM_MODEL_CRITIC': process.env.WM_MODEL_CRITIC ? JSON.stringify(process.env.WM_MODEL_CRITIC) : 'undefined',
       'process.env.WM_EFFORT': process.env.WM_EFFORT ? JSON.stringify(process.env.WM_EFFORT) : 'undefined',
       'process.env.WM_LAYOUT_COMPILER': process.env.WM_LAYOUT_COMPILER ? JSON.stringify(process.env.WM_LAYOUT_COMPILER) : 'undefined',
+      // S6.1: fixture mode (test-only). Inlined at build time. 'off' (default)
+      // → dead branch tree-shaken in production. 'record'/'replay' → fixture code
+      // active. File I/O is node:fs in the test harness, never in the extension.
+      'process.env.WM_FIXTURES': process.env.WM_FIXTURES ? JSON.stringify(process.env.WM_FIXTURES) : 'undefined',
     },
   }),
 });

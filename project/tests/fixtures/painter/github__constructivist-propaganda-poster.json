@@ -1,0 +1,215 @@
+{
+  "painter": {
+    "hash": "fdac7935",
+    "response": {
+      "callMs": 24982,
+      "model": "@cf/zai-org/glm-5.2",
+      "ok": true,
+      "spec": {
+        "canvas": {
+          "background": "#f4ede0",
+          "color": "#141414"
+        },
+        "intents": [
+          {
+            "aesthetic": {
+              "accent": "primary",
+              "borderStep": 3,
+              "radiusStep": 0,
+              "shadowStep": 3,
+              "surface": "overlay",
+              "texture": "grain",
+              "typeRamp": "display"
+            },
+            "target": "page-title"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 2,
+              "radiusStep": 0,
+              "surface": "flat",
+              "typeRamp": "small"
+            },
+            "target": "nav-primary"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 1,
+              "radiusStep": 0,
+              "surface": "flat",
+              "typeRamp": "small"
+            },
+            "target": "toolbar"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 2,
+              "radiusStep": 0,
+              "shadowStep": 1,
+              "surface": "raised",
+              "typeRamp": "small"
+            },
+            "target": "search"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 3,
+              "radiusStep": 0,
+              "shadowStep": 2,
+              "surface": "overlay",
+              "typeRamp": "small"
+            },
+            "target": "actions-primary"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 2,
+              "radiusStep": 0,
+              "shadowStep": 1,
+              "surface": "raised",
+              "typeRamp": "small"
+            },
+            "target": "metadata"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 1,
+              "radiusStep": 0,
+              "surface": "flat",
+              "typeRamp": "body"
+            },
+            "target": "article-body"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 3,
+              "radiusStep": 0,
+              "shadowStep": 3,
+              "surface": "overlay",
+              "texture": "grain",
+              "typeRamp": "small"
+            },
+            "target": "article-body@gqmo4yp"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 1,
+              "radiusStep": 0,
+              "surface": "flat",
+              "typeRamp": "body"
+            },
+            "target": "listing"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 3,
+              "radiusStep": 0,
+              "shadowStep": 1,
+              "surface": "raised",
+              "texture": "grain"
+            },
+            "target": "media"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 2,
+              "radiusStep": 0,
+              "surface": "flat",
+              "typeRamp": "small"
+            },
+            "target": "sidebar"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 1,
+              "radiusStep": 0,
+              "surface": "flat",
+              "typeRamp": "small"
+            },
+            "target": "nav-local"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 3,
+              "radiusStep": 0,
+              "shadowStep": 2,
+              "surface": "overlay",
+              "typeRamp": "small"
+            },
+            "target": "footer-chrome"
+          }
+        ],
+        "pack": "minimal-editorial",
+        "packOverrides": {
+          "borderScale": [
+            "0px",
+            "1px solid #141414",
+            "2px solid #141414",
+            "3px solid #141414",
+            "4px solid #141414"
+          ],
+          "colors": {
+            "accents": {
+              "ink": "#141414",
+              "primary": "#d11f26"
+            },
+            "canvas": "#f4ede0",
+            "subtle": "#6b6358",
+            "text": "#141414"
+          },
+          "radiusScale": [
+            0,
+            0,
+            0,
+            2,
+            4,
+            8,
+            999
+          ],
+          "shadowScale": [
+            "none",
+            "3px 3px 0 #141414",
+            "5px 5px 0 #141414",
+            "6px 6px 0 #d11f26",
+            "8px 8px 0 #141414"
+          ],
+          "surfaces": {
+            "flat": {
+              "bg": "transparent",
+              "border": "transparent",
+              "shadow": "none"
+            },
+            "overlay": {
+              "bg": "#141414",
+              "border": "2px solid #141414",
+              "shadow": "6px 6px 0 #d11f26"
+            },
+            "raised": {
+              "bg": "#f4ede0",
+              "border": "2px solid #141414",
+              "shadow": "4px 4px 0 #141414"
+            }
+          },
+          "typeRamp": {
+            "body": 17,
+            "display": 58,
+            "heading": 34,
+            "small": 13
+          }
+        },
+        "paletteMode": "restrained",
+        "reasoning": "Constructivist poster: warm off-white canvas as the paper, revolutionary red as the single accent on the title block, black ink for text and hard-edged raised blocks. Angular radii (near-zero), hard offset shadows, grain texture on the hero and the README slab for stencil urgency.",
+        "rules": []
+      },
+      "usage": {
+        "completion_tokens": 2532,
+        "neurons": 1632.363525390625,
+        "prompt_tokens": 4868,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 7400
+      }
+    }
+  }
+}

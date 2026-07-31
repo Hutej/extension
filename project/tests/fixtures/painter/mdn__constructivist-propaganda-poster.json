@@ -1,0 +1,212 @@
+{
+  "painter": {
+    "hash": "a43d7c3c",
+    "response": {
+      "callMs": 87797,
+      "model": "@cf/zai-org/glm-5.2",
+      "ok": true,
+      "spec": {
+        "canvas": {
+          "background": "#efe7d6",
+          "color": "#1a1a1a"
+        },
+        "intents": [
+          {
+            "aesthetic": {
+              "accent": "primary",
+              "borderStep": 2,
+              "radiusStep": 0,
+              "shadowStep": 4,
+              "surface": "raised",
+              "texture": "grain",
+              "typeRamp": "display"
+            },
+            "target": "page-title"
+          },
+          {
+            "aesthetic": {
+              "surface": "flat",
+              "texture": "grain",
+              "typeRamp": "body"
+            },
+            "target": "article-body"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 1,
+              "radiusStep": 0,
+              "surface": "flat",
+              "texture": "grain",
+              "typeRamp": "small"
+            },
+            "target": "listing"
+          },
+          {
+            "aesthetic": {
+              "surface": "flat",
+              "texture": "grain",
+              "typeRamp": "small"
+            },
+            "target": "nav-local"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 1,
+              "radiusStep": 0,
+              "shadowStep": 2,
+              "surface": "raised",
+              "texture": "grain",
+              "typeRamp": "small"
+            },
+            "target": "nav-primary"
+          },
+          {
+            "aesthetic": {
+              "surface": "flat",
+              "texture": "grain",
+              "typeRamp": "small"
+            },
+            "target": "toolbar"
+          },
+          {
+            "aesthetic": {
+              "radiusStep": 0,
+              "surface": "overlay",
+              "texture": "grain",
+              "typeRamp": "small"
+            },
+            "target": "footer-chrome"
+          },
+          {
+            "aesthetic": {
+              "surface": "flat",
+              "texture": "grain",
+              "typeRamp": "small"
+            },
+            "target": "sidebar"
+          },
+          {
+            "aesthetic": {
+              "surface": "flat",
+              "texture": "grain",
+              "typeRamp": "small"
+            },
+            "target": "metadata"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 1,
+              "radiusStep": 0,
+              "shadowStep": 2,
+              "surface": "raised",
+              "texture": "grain",
+              "typeRamp": "small"
+            },
+            "target": "actions-primary"
+          },
+          {
+            "aesthetic": {
+              "surface": "flat",
+              "texture": "grain",
+              "typeRamp": "small"
+            },
+            "target": "ad-or-void"
+          },
+          {
+            "aesthetic": {
+              "borderStep": 2,
+              "radiusStep": 0,
+              "shadowStep": 3,
+              "surface": "raised",
+              "texture": "grain"
+            },
+            "target": "cgw5b6p"
+          }
+        ],
+        "pack": "minimal-editorial",
+        "packOverrides": {
+          "colors": {
+            "accents": {
+              "ink": "#1a1a1a",
+              "primary": "#c8161d"
+            },
+            "canvas": "#efe7d6",
+            "subtle": "#5a544a",
+            "text": "#1a1a1a"
+          },
+          "radiusScale": [
+            0,
+            0,
+            0,
+            0,
+            2,
+            4,
+            999
+          ],
+          "spacingScale": [
+            0,
+            4,
+            8,
+            16,
+            24,
+            32,
+            48,
+            80
+          ],
+          "surfaces": {
+            "flat": {
+              "bg": "transparent"
+            },
+            "overlay": {
+              "bg": "#1a1a1a",
+              "border": "#1a1a1a",
+              "shadow": "none"
+            },
+            "raised": {
+              "bg": "#efe7d6",
+              "border": "#1a1a1a",
+              "shadow": "5px 5px 0 #1a1a1a"
+            }
+          },
+          "typeRamp": {
+            "body": 17,
+            "display": 56,
+            "heading": 36,
+            "small": 13
+          }
+        },
+        "paletteMode": "restrained",
+        "reasoning": "Constructivist propaganda poster: aged off-white canvas (#efe7d6) with a single revolutionary red accent (#c8161d) on the page-title hero block — everything else is industrial black/charcoal on the off-white base. Zero-radius angular surfaces, heavy offset shadows (poster-block effect), grain texture for stencil/industrial feel, uppercase tight-tracking display headlines for revolutionary graphic urgency.",
+        "rules": [
+          {
+            "styles": {
+              "fontWeight": "900",
+              "letterSpacing": "-0.03em",
+              "textShadow": "3px 3px 0 #1a1a1a",
+              "textTransform": "uppercase"
+            },
+            "target": "cnj4mfy"
+          },
+          {
+            "styles": {
+              "color": "#efe7d6",
+              "fontWeight": "700",
+              "letterSpacing": "0.06em",
+              "textTransform": "uppercase"
+            },
+            "target": "ciqat5s"
+          }
+        ]
+      },
+      "usage": {
+        "completion_tokens": 5241,
+        "neurons": 2710.109375,
+        "prompt_tokens": 4822,
+        "prompt_tokens_details": {
+          "cached_tokens": 0
+        },
+        "total_tokens": 10063
+      }
+    }
+  }
+}

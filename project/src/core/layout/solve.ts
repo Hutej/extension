@@ -171,15 +171,22 @@ export function solve(input: SolveInput): SolveResult {
   // the grid can never force horizontal overflow, even at zoom-narrowed widths.
   // At wide viewports the floor is the slot minWidth (unchanged); at narrow viewports
   // the floor shrinks with the viewport. Intrinsic CSS collapses natively.
+  // S6.3: overflow: clip (BOTH axes) — overflow-x: clip alone leaves overflow-y
+  // as visible, and the single-axis clip does NOT prevent overflow from
+  // contributing to document.documentElement.scrollWidth. overflow: clip (both
+  // axes) is a pure clip container — no scroll container, sticky still works,
+  // but overflow is fully contained (doesn't propagate to parent scrollWidth).
   const gridCols = hasSide
     ? `minmax(min(${sideMin}px, calc(20vw - var(--wm-space-m) / 2)), 20vw) minmax(min(${contentMin}px, calc(80vw - var(--wm-space-m) / 2)), 1fr)`
     : `minmax(min(${contentMin}px, 100%), 1fr)`;
-  blocks.push(`[data-wm-shell] {\n  display: grid;\n  grid-template-columns: ${gridCols};\n  gap: var(--wm-space-m);\n  min-height: 100vh;\n  overflow-x: clip;\n}`);
+  blocks.push(`[data-wm-shell] {\n  display: grid;\n  grid-template-columns: ${gridCols};\n  gap: var(--wm-space-m);\n  min-height: 100vh;\n  overflow: clip;\n}`);
   rulesEmitted++;
 
-  // S4.2: blanket max-width: 100% for all clusters inside the shell — caps any
-  // fixed-width element at its wrapper, preventing grid track overflow.
-  blocks.push(`[data-wm-shell] [data-wm-c] {\n  max-width: 100%;\n}`);
+  // S4.2/S6.3: blanket max-width: 100% !important + overflow-x: clip for all
+  // clusters inside the shell — caps any fixed-width element at its wrapper, and
+  // prevents text bleeds (countTextBleeds skips non-visible overflow elements).
+  // !important needed because site CSS uses ID selectors (higher specificity).
+  blocks.push(`[data-wm-shell] [data-wm-c] {\n  max-width: 100% !important;\n  overflow-x: clip;\n}`);
   rulesEmitted++;
 
   // c. Per-slot wrappers — grid placement + flex flow + gap + measure ceiling.

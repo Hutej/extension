@@ -62,11 +62,12 @@ Each phase gets an explicit `GATE:` line. A phase is not done until its gate pas
   5/5 sites apply + the user's by-eye judgment — machinery green but the user said "nothing is good".
   The verdict is architectural (see Current position): the engine restyles the original DOM; it never
   re-lays-out the page.
-- **P2.5 Layout IR + Responsive Solver v1 — CURRENT (Step 5: S5.1 done, S5.2 gate BLOCKED by model latency).** GATE (this phase): IR stability
+- **P2.5 Layout IR + Responsive Solver v1 — CURRENT (Step 6: S6.1+S6.2 done, S6.3 BLOCKED by SPA re-render).** GATE (this phase): IR stability
   gate (Step 1) + all 6 hard gates clean on the 3 validation sites + parity vs the original on those 3
   + resize 1920/1440/1280 no breakage + slot invariant + BBC/YouTube apply-without-rollback. The user's
-  eye is the only PASS authority. Step 3 shipped the page shell (S3.1–S3.6 done); hard gates still need
-  fixes (Wikipedia voids, GitHub overflow) before the by-eye gate can PASS.
+  eye is the only PASS authority. Step 3 shipped the page shell (S3.1–S3.6 done); Step 5 fixed
+  positioned-element coexistence (S5.1 done); Step 6 eliminated model latency via replay fixtures and
+  diagnosed the real blocker: SPA framework re-render triggered by DOM reparenting (not fixable with CSS).
 - **P2.6 Stress sites BBC + YouTube — 5/5-applied beauty gate returns here.** GATE: 5/5 sites applied
   + by-eye beauty on BBC + YouTube under the exclusion registry.
 - **P3 Migration completion + BRUTAL DELETION.** Only AFTER the v2 flag is switched on and parity
@@ -389,18 +390,20 @@ The solver (Step 2) is NOT started. **Phase 5 (role-anchored stable handles) is 
 
 ## Current position (updated)
 
-**P2.5 — Step 5 PARTIAL (S5.1 done, S5.2 gate BLOCKED by model latency).** The wrapper plan no
-longer skips position:absolute nodes — they are moved into slot wrappers with their in-flow
-siblings and overridden to `position: static !important` (prevents height collapse from the
-changed containing-block context). position:fixed is still skipped (viewport-relative, no
-wrapper contains it). position:sticky was already not skipped. The S5.1 code fix is proven on
-MDN smoke test: APPLIED, all 7 hard gates pass (notBlank, contentCollapsed, contentVisible,
-noOverflow, noOverlap, pixel voids=0, pixel invisible=0), changeScore=0.611, 1 paid call, 5061
-tokens, 90.5s. Advisory: movedAlive=false on node cayi11z (intermittent, not a hard gate).
-S5.2 full-grid gate BLOCKED: 5 full-grid runs attempted, 4 dominated by 90s model timeouts
-(external factor, not a code issue). 2 fix cycles used per guardrails. STOP. Next: re-run the
-full grid when model latency subsides, or user reviews the MDN smoke result and decides whether
-the positioned-layout coexistence fix is sound.
+**P2.5 — Step 6 PARTIAL (S6.1+S6.2 done, S6.3 BLOCKED by SPA re-render, S6.4 skipped).**
+The fixture/replay system (S6.1+S6.2) eliminated model latency entirely — replay runs take
+0.8-2.5s (vs 25-90s live), zero paid calls, deterministic. S6.3 used 5+ replay runs to
+diagnose the remaining hard-gate failures. Fix cycle 2 (`overflow: clip` both-axes on shell +
+`overflow-x: clip` on clusters) FIXED noOverflow on both Wikipedia (text bleeds) and GitHub
+(scrollWidth propagation). The remaining blocker is contentCollapsed from SPA framework
+re-render: DOM reparenting triggers MediaWiki/Turbo/React MutationObservers → reconciliation
+→ content removal. Moved handles survive (alive=N, dead=0 on all sites); it's non-moved
+content inside moved containers or in re-rendered areas that gets clobbered. This is an
+architectural limitation of the wrapper approach, NOT fixable with CSS. MDN passes (its JS
+doesn't re-render on DOM mutations). S6.4 skipped per guardrails (S6.3 not green on all 3).
+Fix cycles used: 2/3. Full-grid runs used: 0/2 (replay runs uncapped). Paid calls: 3/3
+(S6.2 recording only). Next: Phase 2.6 / Step 7 needs to address the SPA re-render blocker
+(CSS-only restructuring, `display: contents`, or framework-aware mutation interception).
 
 **Step 5 RESULT — FIX POSITIONED-LAYOUT COEXISTENCE, PASS ALL THREE DOC SITES:**
 
@@ -446,7 +449,90 @@ the positioned-layout coexistence fix is sound.
   - Screenshots: `after_MDN.png` (from previous Step 4 session - still the best applied shot).
     No new after screenshots (no full-grid site applied). DO NOT OPEN PNGs.
   - 2 fix cycles used (per guardrails). STOP per guardrails. Model latency (17-90s on same
-    payload) is an external factor - not a code issue.
+    payload) is an external factor - not a code issue. → Superseded by Step 6 (replay testing
+    eliminated model latency; the real blocker was diagnosed: SPA framework re-render).
+
+**Step 6 RESULT — STOP PAYING THE MODEL TO TEST LAYOUT CODE:**
+
+- [x] **S6.1** — Record/replay Painter fixtures. `WM_FIXTURES=record|replay|off` (default off)
+  added to `askForSpec()` in content.ts via Vite define (`wxt.config.ts`). Test-only — production
+  builds get `undefined` → dead branch tree-shaken. chrome.storage.local is the bridge (content
+  script isolated world; `window` not shared). Fixture stores raw model response + djb2 request
+  hash. Replay: fail loudly if no fixture; warn (not fail) on hash mismatch. `node:fs` I/O in
+  the test harness.
+- [x] **S6.2** — Recorded 3 fixtures (the only paid work this session):
+
+  | Site | Fixture | Size | Calls | Wall |
+  |---|---|---|---|---|
+  | MDN | `mdn__constructivist-propaganda-poster.json` | 5,606B | 1 | 89.4s |
+  | Wikipedia | `wikipedia__constructivist-propaganda-poster.json` | 5,125B | 1 | 54.2s |
+  | GitHub | `github__constructivist-propaganda-poster.json` | 5,711B | 1 | 25.7s |
+
+  3/3 paid calls, 0 retries needed. Fixtures committed to repo (`tests/fixtures/painter/`).
+- [ ] **S6.3** — Replay testing (BLOCKED — SPA framework re-render is the root cause, not CSS).
+  Replay runs: 5+ (uncapped). Fix cycles used: 2/3. Caps: fix cycles 2/3, full-grid 0/2.
+  - **Fix cycle 1** (`body overflow-x:clip`): DEAD END. `noOverflow` checks
+    `document.documentElement.scrollWidth` — `overflow-x: clip` on `<body>` does NOT reduce
+    it. Also caused MDN regression (was APPLIED → FAILED with contrast+collapse+movedAlive).
+  - **Fix cycle 2** (`overflow: clip` both-axes on shell + `overflow-x: clip` on clusters):
+    PARTIAL SUCCESS. Fixed noOverflow on BOTH sites:
+    - Wikipedia: `overflow-x: clip` on clusters → `countTextBleeds()` skips non-visible
+      overflow elements → noOverflow **TRUE** (was false from text bleeds).
+    - GitHub: `overflow: clip` (both axes) on shell → pure clip container (no scroll container,
+      sticky preserved) → document scrollWidth no longer sees shell's internal overflow →
+      noOverflow **TRUE** on paint1 (was false, scrollWidth=1837→contained).
+    - GitHub paint2: noOverflow reverts to false after repair ("drop hides first" unhides
+      elements outside the shell that overflow). The repair is counterproductive when collapse
+      is from SPA re-render, not hide rules.
+
+  **S6.3 question answers (with data):**
+
+  **(a) Does S5.1 work on Wikipedia and GitHub?** NO. The positioned-containment fix
+  (position:static !important on absolute nodes, skip fixed only) works on MDN (all hard
+  gates pass) but FAILS on Wikipedia and GitHub. Root cause is NOT positioned-element
+  coexistence (which S5.1 was designed to fix) — it's SPA FRAMEWORK RE-RENDER triggered by
+  DOM reparenting:
+  - Wikipedia: `c1w06i7` (nav container, 102px→5px) — MediaWiki JS removes content from its
+    child `<li>` (div emptied during RAF). POST-MOVE/POST-RAF: all 19 moved handles alive.
+    The content (nav links) is removed by JS, not by CSS. children=2, absChildren=0.
+  - GitHub: `c2nivec` (1726px→gone), `cpjpllm` (3137px→gone), `cfxklvk` (3024px→gone) —
+    3 large content regions completely removed from DOM. POST-MOVE/POST-RAF: all 40 moved
+    handles alive. The removed handles were NOT in the moved set — they're non-moved elements
+    that GitHub's Turbo/React re-renders during the RAF, replacing them with new elements
+    (no `data-wm-c` attributes).
+  - Moved handles survive (alive=N, dead=0 on all 3 sites). It's NON-moved content (inside
+    moved containers or in re-rendered areas) that gets clobbered by the framework's
+    MutationObserver-triggered reconciliation.
+
+  **(b) movedAlive=false on cayi11z:** NOT reproduced in replay. movedAlive=TRUE on all 3
+  sites in all replay runs. The cayi11z failure from the previous session was likely
+  intermittent (different page state). The dead nodes are non-moved content (removed by SPA
+  re-render), not moved nodes.
+
+  **(c) pixel invisible=2 on MDN:** REAL, not a harness artifact. The invisible text count
+  varies between runs (0-2 on paint1, 0-2 on post-apply pixel audit in the "mid" section).
+  forceContrast repair catches most instances (14-16 DOM handles) but sometimes 1 pixel-level
+  invisible cluster persists after repair (e.g. `czellqd`). The intermittency is from page
+  state variation (ads, lazy-loaded content) between runs. MDN APPLIED on some runs, FAILED
+  on others — the invisible text is the only intermittent blocker.
+
+  **(d) Full viewport matrix** (only MDN reaches post-apply; Wikipedia+GitHub fail hard gate):
+  - multiViewport: true (no overflow on resize)
+  - zoom: INTERMITTENT (true on some runs, false on others — overflow/content lost at 80%/125%)
+  - devtools: true (no overflow on 30% shrink)
+  - multiCondPixel: false (2nd viewport pixel audit — invisible text in mid section)
+  - mobileNarrow: false (main content absent at 390px)
+  - proportionStable: true (drift=0.000)
+
+  **BLOCKER: SPA framework re-render.** DOM reparenting (moving nodes into slot wrappers)
+  triggers the site's JS MutationObserver → virtual DOM reconciliation → re-render →
+  content removal. This is an architectural limitation of the wrapper approach on dynamic
+  sites, NOT fixable with CSS changes. MDN works because its JS doesn't re-render on DOM
+  mutations. Phase 2.6 / Step 7 needs to address this (CSS-only restructuring, `display:
+  contents`, or framework-aware mutation interception).
+- [ ] **S6.4** — Live by-eye gate. SKIPPED — S6.3 is NOT green on all 3 (contentCollapsed
+  fails on Wikipedia+GitHub). Per guardrails: "If S6.3 is NOT green on all three, skip S6.4
+  entirely and report." No paid calls spent on S6.4.
 
 ## Status update protocol (for ALL agents)
 

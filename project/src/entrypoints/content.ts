@@ -537,6 +537,15 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const v2WrapResult = applySlotWrappers(v2SolveResult.wrappers, liveDom, txnLog);
     const v2MovedHandles = txnLog.movedHandles();
     logDebug(`v2 solver: ${v2SolveResult.wrappers.length} slot wrappers, ${v2WrapResult.nodesMoved} nodes moved, ${v2SolveResult.rulesEmitted} CSS rules, ${v2SolveResult.matchedTargets} matched targets`);
+    // S6.3: diagnostic — check moved handles are alive right after the move (before CSS/RAF).
+    {
+      let alive = 0, dead = 0;
+      for (const h of v2MovedHandles) {
+        if (document.querySelector(`[data-wm-c="${h}"]`)) alive++; else dead++;
+      }
+      const totalStamped = document.querySelectorAll('[data-wm-c]').length;
+      logDebug(`v2 POST-MOVE: movedHandles alive=${alive} dead=${dead} totalStamped=${totalStamped}`);
+    }
 
     // Compile aesthetic CSS from the Painter's spec.
     let v2Options: CompileOptions = { paletteMode: v2Spec.paletteMode };
@@ -560,6 +569,15 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     let v2PaintCount = 1;
     document.documentElement.dataset['webmorphPaintCount'] = '1';
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
+    // S6.3: diagnostic — after RAF, check if framework clobbered moved nodes.
+    {
+      let alive = 0, dead = 0;
+      for (const h of v2MovedHandles) {
+        if (document.querySelector(`[data-wm-c="${h}"]`)) alive++; else dead++;
+      }
+      const totalStamped = document.querySelectorAll('[data-wm-c]').length;
+      logDebug(`v2 POST-RAF: movedHandles alive=${alive} dead=${dead} totalStamped=${totalStamped}`);
+    }
 
     // S4.3: verify (DOM + pixel) — the safety net v2 was missing.
     const v2VerifyMs = performance.now();
@@ -568,6 +586,60 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     let v2Pixel = v2Px.result;
     let v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
     logDebug(`v2 paint1: checks=${JSON.stringify(v2Verify.checks)} pixel(passed=${v2Pixel.passed} voids=${v2Pixel.voids.length} invisible=${v2Pixel.invisibleText.length} squeeze=${v2Pixel.squeeze.length}) change=${v2Verify.changeScore.toFixed(3)}`);
+
+    // S6.3: diagnostic — which elements cause overflow? (find what scrollWidth > innerWidth)
+    if (!v2Verify.checks.noOverflow) {
+      const sw = document.documentElement.scrollWidth, iw = window.innerWidth || 1;
+      const beforeSw = before.scrollWidth, beforeRatio = beforeSw / iw, afterRatio = sw / iw;
+      const threshold = Math.max(beforeRatio * 1.02, 1.02) + 0.01;
+      logDebug(`v2 OVERFLOW: beforeSW=${beforeSw} afterSW=${sw} innerWidth=${iw} beforeRatio=${beforeRatio.toFixed(3)} afterRatio=${afterRatio.toFixed(3)} threshold=${threshold.toFixed(3)}`);
+      // Scan all elements (capped) for any whose rect.right exceeds viewport.
+      const wide: string[] = [];
+      let scanned = 0;
+      for (const el of document.querySelectorAll('*') as unknown as HTMLElement[]) {
+        if (scanned++ > 3000) break;
+        if (el.hasAttribute?.('data-webmorph-ui')) continue;
+        const r = el.getBoundingClientRect();
+        if (r.right > iw + 2) {
+          const inShell = el.closest?.('[data-wm-shell]') != null;
+          wide.push(`<${el.tagName.toLowerCase()}${el.id ? '#' + el.id : ''} right=${Math.round(r.right)} w=${Math.round(r.width)} inShell=${inShell}>`);
+          if (wide.length >= 12) break;
+        }
+      }
+      if (wide.length) logDebug(`v2 OVERFLOW wide elems: ${wide.join(', ')}`);
+      else logDebug(`v2 OVERFLOW: no element rect.right > iw — overflow may be from scrollWidth of a clipped container`);
+    }
+    // S6.3: diagnostic — which regions collapsed?
+    if (!v2Verify.checks.contentCollapsed && v2Verify.details) {
+      const collapseDetail = v2Verify.details.find((d) => d.startsWith('content collapsed'));
+      if (collapseDetail) {
+        logDebug(`v2 COLLAPSE: ${collapseDetail}`);
+        // Deep-dive: for each collapsed handle, query the live DOM.
+        const handles = collapseDetail.match(/c[a-z0-9]+/g) || [];
+        for (const h of handles.slice(0, 6)) {
+          const el = document.querySelector(`[data-wm-c="${h}"]`) as HTMLElement | null;
+          if (!el) { logDebug(`v2 COLLAPSE ${h}: NOT IN DOM (removed or attr stripped)`); continue; }
+          const cs = getComputedStyle(el);
+          const r = el.getBoundingClientRect();
+          // Check for absolute children (the S5.1 fix only handles top-level slot nodes).
+          let absChildren = 0, totalChildren = 0;
+          for (const child of el.querySelectorAll('*')) {
+            totalChildren++;
+            if (getComputedStyle(child).position === 'absolute') absChildren++;
+          }
+          logDebug(`v2 COLLAPSE ${h}: display=${cs.display} pos=${cs.position} w=${Math.round(r.width)} h=${Math.round(r.height)} overflow=${cs.overflowX}/${cs.overflowY} minH=${cs.minHeight} parent=${el.parentElement?.tagName}#${el.parentElement?.id||''} .[data-wm-slot]=${el.closest('[data-wm-slot]')?.getAttribute('data-wm-slot')||'none'} children=${totalChildren} absChildren=${absChildren} html="${el.innerHTML.slice(0, 120).replace(/\n/g, ' ')}"`);
+        }
+      }
+    }
+    // S6.3: diagnostic — shell overflow state
+    {
+      const shell = document.querySelector('[data-wm-shell]') as HTMLElement | null;
+      if (shell) {
+        const cs = getComputedStyle(shell);
+        const r = shell.getBoundingClientRect();
+        logDebug(`v2 SHELL: overflow-x=${cs.overflowX} overflow-y=${cs.overflowY} w=${Math.round(r.width)} h=${Math.round(r.height)} scrollW=${shell.scrollWidth} scrollH=${shell.scrollHeight}`);
+      }
+    }
 
     // S4.3: deterministic repair (free — no paid reReason). forceContrast + squeeze
     // repairs from planRepair, recompiled + re-applied as paint 2. Runs BEFORE the
@@ -1040,8 +1112,32 @@ function failVerify(spec: DesignSpec, verify: VerifyResult): TransformOutcome {
   return { ok: false, message: 'Result failed checks: ' + verify.details.slice(0, 3).join('; '), spec, reasoning: spec.reasoning, verify };
 }
 
+// S6.1: fixture mode — inlined at build time, 'off' (default) → dead branch in production.
+const FIXTURE_MODE = (process.env.WM_FIXTURES ?? 'off') as 'off' | 'record' | 'replay';
+
+// ponytail: djb2 — 4-line non-crypto hash for stale-fixture detection (not security).
+function djb2(s: string): string {
+  let h = 5381;
+  for (let i = 0; i < s.length; i++) h = ((h << 5) + h + s.charCodeAt(i)) | 0;
+  return (h >>> 0).toString(16);
+}
+
 function askForSpec(role: Role, intent: string, perception: string, critique?: string, timeoutMs?: number): Promise<SpecResponse> {
   return new Promise((resolve) => {
+    // S6.1: fixture replay — return stored response, zero network. The harness
+    // injects the fixture via chrome.storage.local before the transform.
+    if (FIXTURE_MODE === 'replay') {
+      const key = 'webmorph_fixture_' + role;
+      chrome.storage.local.get([key], (data) => {
+        const fx = data[key] as { hash: string; response: SpecResponse } | undefined;
+        if (!fx) { resolve({ ok: false, kind: 'fixture_missing', message: `No fixture for role ${role}. Expected chrome.storage.local key ${key}.` }); return; }
+        const currentHash = djb2(perception);
+        if (currentHash !== fx.hash) console.warn(`[WebMorph] STALE FIXTURE ${role}: request hash ${currentHash} != fixture hash ${fx.hash} — replaying anyway`);
+        resolve(fx.response);
+      });
+      return;
+    }
+
     let done = false;
     // MV3 sendMessage timeout: if the SW is killed mid-fetch (the ~30s idle kill
     // terminates the SW during a 70-90s model call), the callback never fires — a
@@ -1057,7 +1153,14 @@ function askForSpec(role: Role, intent: string, perception: string, critique?: s
       done = true;
       clearTimeout(t);
       if (chrome.runtime.lastError || !response) resolve({ ok: false, message: chrome.runtime.lastError?.message || 'No response from design engine.' });
-      else resolve(response as SpecResponse);
+      else {
+        // S6.1: fixture record — store the raw response via chrome.storage.local
+        // for the harness to read and write to disk.
+        if (FIXTURE_MODE === 'record' && response?.ok) {
+          chrome.storage.local.set({ ['webmorph_fixture_' + role]: { hash: djb2(perception), response } });
+        }
+        resolve(response as SpecResponse);
+      }
     });
   });
 }
