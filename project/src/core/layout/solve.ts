@@ -73,10 +73,14 @@ export interface PlacementInfo {
 export interface SolveResult {
   /** Map of handle → placement info for nodes that should be grid items. */
   placement: Map<string, PlacementInfo>;
-  /** The grid-template-columns value for the NCA. */
+  /** The INTENDED grid-template-columns (from the placement map, before DOM resolution). */
   gridTemplate: string;
-  /** Whether the grid has a side column. */
+  /** Whether the grid has a side column (intent, before DOM resolution). */
   hasSide: boolean;
+  /** Raw side-track min-width in px (intent — actual template built from placed proxies). */
+  sideMin: number;
+  /** Raw content-track min-width in px (intent). */
+  contentMin: number;
   /** Per-node CSS declarations (handle → decls) for fluid text + overflow safety. */
   perNodeDecls: Map<string, string[]>;
   rulesEmitted: number;
@@ -89,18 +93,36 @@ export interface SolveResult {
 export interface PlacementResult {
   /** Combined structural CSS (fluid tokens + grid + display:contents + grid-column + per-node). */
   css: string;
-  /** Count of handles that fell back to [data-wm-c] selector (S7.2). */
+  /** Total selector fallbacks (sum of the four split counters, for backward compat). */
   selectorFallback: number;
-  /** Total handles attempted to place. */
+  /** S8.5: NCA selector fell back to [data-wm-grid]. */
+  selectorFallbackNca: number;
+  /** S8.5: placed-proxy selector fell back to [data-wm-grid]. */
+  selectorFallbackProxy: number;
+  /** S8.5: display:contents selector fell back to [data-wm-grid]. */
+  selectorFallbackContents: number;
+  /** S8.5: per-node CSS selector fell back to [data-wm-c]. */
+  selectorFallbackPerNode: number;
+  /** Count of proxies placed with grid-column (S8.1 — was "nodesPlaced" in S7). */
   nodesPlaced: number;
-  /** Handles that could NOT be placed (intermediate couldn't be collapsed). */
+  /** Handles that could NOT be placed (element not found in DOM). */
   nodesNotPlaceable: string[];
-  /** Number of intermediates collapsed with display:contents. */
+  /** Number of mixed proxies collapsed with display:contents (the only display:contents use). */
   intermediatesCollapsed: number;
-  /** Number of intermediates skipped (not safe to collapse). */
+  /** Always 0 with the proxy algorithm (no intermediate chain collapse). */
   intermediatesSkipped: number;
-  /** Reason each intermediate was skipped. */
+  /** Reason each proxy was rejected (unused with proxy algorithm; kept for compat). */
   skippedReasons: string[];
+  /** S8.1: count of proxies rejected as "mixed" (subtree spans >1 non-overflow slot). */
+  mixedProxies: number;
+  /** S8.1: count of distinct proxy elements placed. */
+  proxyCount: number;
+  /** S8.1: diagnostic — NCA tag + proxy slot summary (for dev logging). */
+  diagnostics: string;
+  /** S8.1: handles of display:contents'd elements that carry [data-wm-c] —
+   *  the caller exempts these from the contentIntact check (box dissolved but
+   *  content is visible in children that are now grid items). */
+  contentsHandles: string[];
 }
 
 // ── Solve (pure: no DOM access, no model calls) ─────────────────────
@@ -207,7 +229,7 @@ export function solve(input: SolveInput): SolveResult {
   }
 
   return {
-    placement, gridTemplate: gridCols, hasSide,
+    placement, gridTemplate: gridCols, hasSide, sideMin, contentMin,
     perNodeDecls,
     rulesEmitted: 1 /* :root */ + placement.size + perNodeDecls.size,
     matchedTargets, impossibleNodes, droppedOptionals,
@@ -306,199 +328,262 @@ function nearestCommonAncestor(els: HTMLElement[]): HTMLElement | null {
   return null;
 }
 
-/** DISPLAY:CONTENTS SAFETY RULES (principled, no hostnames):
- *  Never collapse an element that:
- *    - paints anything (background-color/image, border, box-shadow, outline)
- *    - contributes layout its children rely on (non-zero padding, or is itself a
- *      flex/grid container whose children are positioned by it)
- *    - carries list/table semantics (ul, ol, li, table, thead, tbody, tr, td, th)
- *    - has an explicit ARIA role or is a landmark element */
-function canCollapse(el: HTMLElement): { safe: boolean; reason?: string } {
-  const tag = el.tagName.toLowerCase();
-  const cs = getComputedStyle(el);
-
-  // Paints anything
-  const bg = cs.backgroundColor;
-  if (bg && bg !== 'rgba(0, 0, 0, 0)' && bg !== 'transparent')
-    return { safe: false, reason: `${tag}:has background-color` };
-  if (cs.backgroundImage && cs.backgroundImage !== 'none')
-    return { safe: false, reason: `${tag}:has background-image` };
-  const bt = parseFloat(cs.borderTopWidth) || 0;
-  const br = parseFloat(cs.borderRightWidth) || 0;
-  const bb = parseFloat(cs.borderBottomWidth) || 0;
-  const bl = parseFloat(cs.borderLeftWidth) || 0;
-  if (bt > 0 || br > 0 || bb > 0 || bl > 0)
-    return { safe: false, reason: `${tag}:has border` };
-  if (cs.boxShadow && cs.boxShadow !== 'none')
-    return { safe: false, reason: `${tag}:has box-shadow` };
-  if (cs.outlineStyle && cs.outlineStyle !== 'none')
-    return { safe: false, reason: `${tag}:has outline` };
-
-  // Contributes layout its children rely on
-  const pt = parseFloat(cs.paddingTop) || 0;
-  const pr = parseFloat(cs.paddingRight) || 0;
-  const pb = parseFloat(cs.paddingBottom) || 0;
-  const pl = parseFloat(cs.paddingLeft) || 0;
-  if (pt > 0 || pr > 0 || pb > 0 || pl > 0)
-    return { safe: false, reason: `${tag}:has non-zero padding` };
-  if (cs.display.includes('flex') || cs.display.includes('grid'))
-    return { safe: false, reason: `${tag}:is flex/grid container` };
-
-  // List/table semantics
-  if (['ul', 'ol', 'li', 'table', 'thead', 'tbody', 'tfoot', 'tr', 'td', 'th', 'caption', 'colgroup', 'col'].includes(tag))
-    return { safe: false, reason: `${tag}:list/table semantics` };
-
-  // Explicit ARIA role or landmark element
-  if (el.getAttribute('role'))
-    return { safe: false, reason: `${tag}:has ARIA role (${el.getAttribute('role')})` };
-  if (['header', 'nav', 'main', 'aside', 'footer', 'section', 'article', 'form', 'search', 'figure', 'details', 'dialog'].includes(tag))
-    return { safe: false, reason: `${tag}:landmark element` };
-
-  return { safe: true };
-}
-
-/** Get the intermediates between an element and an ancestor (exclusive of both). */
-function intermediatesBetween(el: HTMLElement, ancestor: HTMLElement): HTMLElement[] {
-  const out: HTMLElement[] = [];
-  let n: HTMLElement | null = el.parentElement;
-  while (n && n !== ancestor) {
-    out.push(n);
-    n = n.parentElement;
-  }
-  return out;
+// S8.1: deterministic slot priority for proxy slot assignment (no model input).
+const SLOT_PRIORITY = ['masthead', 'toc', 'nav-local', 'main', 'footer'];
+function slotPriority(slotId: string): number {
+  const i = SLOT_PRIORITY.indexOf(slotId);
+  return i === -1 ? 99 : i;
 }
 
 /** Execute the placement against the live DOM and emit all structural CSS.
- *  Zero DOM mutation — only CSS is emitted. The caller applies it as a stylesheet.
- *  S7.1: grid on NCA, display:contents on safe intermediates, grid-column on placed nodes.
- *  S7.2: selectors from structuralPath, fallback to [data-wm-c], count fallbacks. */
+ *  Zero DOM mutation — only CSS (and data-* attribute stamps for targeting) is emitted.
+ *
+ *  S8.1 — PROXY PLACEMENT. For each placed handle, the PLACEMENT PROXY is the
+ *  NCA's direct child that is an ancestor-or-self of the handle. We place the
+ *  PROXY with grid-column — its background, border and padding are preserved,
+ *  nothing is collapsed. A proxy whose subtree spans >1 non-overflow slot is
+ *  "mixed": it gets display:contents and its children are recursed. That is
+ *  the ONLY use of display:contents. Two handles sharing a proxy: keep one,
+ *  it takes the highest-priority slot (SLOT_PRIORITY — no randomness).
+ *
+ *  S8.3 — template from ACTUALLY placed proxies (not the intended set).
+ *  min-width:0 propagated up the NCA ancestor chain to body. min-height:100vh
+ *  DELETED (compiler was making a design decision). overflow-x:clip BANNED.
+ *
+ *  S8.5 — selectorFallback split into 4 counters (NCA, proxy, contents, perNode).
+ *  nodesNotPlaceable reconciled (no double counting). */
 export function computeGridPlacementCss(result: SolveResult): PlacementResult {
-  const { placement, gridTemplate, hasSide, perNodeDecls } = result;
+  const { placement, perNodeDecls } = result;
   const blocks: string[] = [];
-  let selectorFallback = 0;
+  // S8.5: split selectorFallback into 4 counters.
+  let selectorFallbackNca = 0;
+  let selectorFallbackProxy = 0;
+  let selectorFallbackContents = 0;
+  let selectorFallbackPerNode = 0;
   let intermediatesCollapsed = 0;
-  let intermediatesSkipped = 0;
+  let mixedProxies = 0;
   const skippedReasons: string[] = [];
   const nodesNotPlaceable: string[] = [];
-  let nodesPlaced = 0;
 
-  if (placement.size === 0) {
-    return { css: '', selectorFallback: 0, nodesPlaced: 0, nodesNotPlaceable: [], intermediatesCollapsed: 0, intermediatesSkipped: 0, skippedReasons: [] };
-  }
+  const empty = (css: string): PlacementResult => ({
+    css, selectorFallback: 0, selectorFallbackNca: 0, selectorFallbackProxy: 0,
+    selectorFallbackContents: 0, selectorFallbackPerNode: 0,
+    nodesPlaced: 0, nodesNotPlaceable: [...nodesNotPlaceable],
+    intermediatesCollapsed: 0, intermediatesSkipped: 0, skippedReasons: [],
+    mixedProxies: 0, proxyCount: 0, diagnostics: '(empty)', contentsHandles: [],
+  });
+
+  if (placement.size === 0) return empty('');
 
   // a. :root fluid tokens
   blocks.push(`:root {${FLUID_TOKENS}\n}`);
 
-  // b. Resolve placed handles to live elements.
+  // b. Resolve placed handles to live elements. S8.5: single loop, no double counting.
   const placedEls: Map<string, HTMLElement> = new Map();
   for (const [handle] of placement) {
     const el = document.querySelector<HTMLElement>(`[data-wm-c="${handle}"]`);
     if (el) placedEls.set(handle, el);
     else nodesNotPlaceable.push(handle);
   }
-  if (placedEls.size === 0) {
-    return { css: `:root {${FLUID_TOKENS}\n}`, selectorFallback: 0, nodesPlaced: 0, nodesNotPlaceable: [...placement.keys()], intermediatesCollapsed: 0, intermediatesSkipped: 0, skippedReasons: [] };
-  }
+  if (placedEls.size === 0) return empty(`:root {${FLUID_TOKENS}\n}`);
 
   // c. Find the NCA of all placed elements.
   const els = [...placedEls.values()];
   const nca = nearestCommonAncestor(els);
   if (!nca) {
-    // No common ancestor — can't place. Emit only fluid tokens.
     nodesNotPlaceable.push(...placedEls.keys());
-    return { css: `:root {${FLUID_TOKENS}\n}`, selectorFallback: 0, nodesPlaced: 0, nodesNotPlaceable: [...placedEls.keys()], intermediatesCollapsed: 0, intermediatesSkipped: 0, skippedReasons: [] };
+    return empty(`:root {${FLUID_TOKENS}\n}`);
   }
 
-  // d. Emit display: grid on the NCA.
+  // d. Build handle data: for each placed handle, its element + slotId.
+  const handleData: { handle: string; el: HTMLElement; slotId: string }[] = [];
+  for (const [handle, info] of placement) {
+    const el = placedEls.get(handle);
+    if (!el) continue;  // already in nodesNotPlaceable from step b
+    handleData.push({ handle, el, slotId: info.slotId });
+  }
+
+  // For an element, return the set of non-overflow slots of placed handles in its subtree.
+  const nonOverflowSlotsUnder = (el: HTMLElement): Set<string> => {
+    const slots = new Set<string>();
+    for (const hd of handleData) {
+      if (hd.slotId === 'overflow') continue;
+      if (el === hd.el || el.contains(hd.el)) slots.add(hd.slotId);
+    }
+    return slots;
+  };
+
+  // e. S8.1: BFS proxy placement. Level 0 = NCA's direct children containing placed handles.
+  //     Non-mixed proxy (≤1 non-overflow slot) → place with grid-column.
+  //     Mixed proxy (>1 non-overflow slot) → display:contents + recurse on children.
+  //     Non-handle children (no placed handle in subtree) get grid-column: 1/-1 so they
+  //     don't auto-place into a narrow side track and squeeze content.
+  const placedProxies = new Map<HTMLElement, string>();  // proxy el → assigned slotId
+  const contentsEls: HTMLElement[] = [];  // mixed proxies that get display:contents
+  const contentsHandles: string[] = [];  // handles of display:contents'd elements with [data-wm-c]
+  const fullWidthEls: HTMLElement[] = [];  // non-handle grid items → full width
+  const seenEls = new Set<HTMLElement>();  // dedup across BFS levels
+
+  let currentLevel: HTMLElement[] = [];
+  for (const child of nca.children) {
+    if (!(child instanceof HTMLElement)) continue;
+    seenEls.add(child);
+    if (handleData.some((hd) => child === hd.el || child.contains(hd.el))) {
+      currentLevel.push(child);
+    } else {
+      fullWidthEls.push(child);  // NCA child with no placed handles → full width
+    }
+  }
+
+  while (currentLevel.length > 0) {
+    const nextLevel: HTMLElement[] = [];
+    for (const candidate of currentLevel) {
+      if (placedProxies.has(candidate) || contentsEls.includes(candidate)) continue;
+      const slots = nonOverflowSlotsUnder(candidate);
+      if (slots.size <= 1) {
+        // Not mixed — place this proxy. Assign the highest-priority non-overflow slot
+        // (deterministic; "keep one" when multiple handles share this proxy).
+        let slotId = 'overflow';
+        for (const s of slots) {
+          if (slotId === 'overflow' || slotPriority(s) < slotPriority(slotId)) slotId = s;
+        }
+        placedProxies.set(candidate, slotId);
+      } else {
+        // Mixed — display:contents + recurse on children. The proxy's box is
+        // dissolved so its children become grid items. If the proxy carries a
+        // [data-wm-c] handle, that handle's region collapses (box gone) — the
+        // caller exempts these handles from the contentIntact check (the content
+        // is still visible in the children, now grid items).
+        contentsEls.push(candidate);
+        mixedProxies++;
+        if (candidate.hasAttribute('data-wm-c')) {
+          contentsHandles.push(candidate.getAttribute('data-wm-c')!);
+        }
+        for (const child of candidate.children) {
+          if (!(child instanceof HTMLElement)) continue;
+          if (seenEls.has(child)) continue;
+          seenEls.add(child);
+          if (handleData.some((hd) => child === hd.el || child.contains(hd.el))) {
+            nextLevel.push(child);
+          } else {
+            fullWidthEls.push(child);  // no placed handles → full width
+          }
+        }
+      }
+    }
+    currentLevel = nextLevel;
+  }
+
+  // f. S8.3: compute grid-template-columns from the ACTUALLY placed proxies.
+  const slotById = new Map<string, SlotDef>();
+  for (const s of DOCUMENTATION_SLOTS) slotById.set(s.id, s);
+  const placedSlots = new Set<string>();
+  for (const slotId of placedProxies.values()) placedSlots.add(slotId);
+  const hasSide = [...placedSlots].some((id) => slotById.get(id)?.preferredWidth === 'side');
+  const sideMin = Math.max(0, ...[...placedSlots]
+    .filter((id) => slotById.get(id)?.preferredWidth === 'side')
+    .map((id) => slotById.get(id)?.minWidth ?? 0));
+  const contentMin = Math.max(320, ...[...placedSlots]
+    .filter((id) => slotById.get(id)?.preferredWidth === 'content')
+    .map((id) => slotById.get(id)?.minWidth ?? 320));
+  const gridTemplate = hasSide
+    ? `minmax(min(${sideMin}px, calc(20vw - var(--wm-space-m) / 2)), 20vw) minmax(min(${contentMin}px, calc(80vw - var(--wm-space-m) / 2)), 1fr)`
+    : `minmax(min(${contentMin}px, 100%), 1fr)`;
+
+  // g. Emit display: grid on the NCA. S8.3: min-height:100vh DELETED, min-width:0 added.
   const ncaSelector = buildSelector(nca);
   let ncaCssSelector: string;
   if (ncaSelector && selectorIsUnique(ncaSelector, nca)) {
     ncaCssSelector = ncaSelector;
   } else {
-    // Fallback: stamp a unique debug attribute on the NCA for targeting.
-    // This is a minimal attribute addition (not a structural mutation) —
-    // frameworks don't reconcile data-* attribute changes.
     nca.setAttribute('data-wm-grid', 'nca');
     ncaCssSelector = '[data-wm-grid="nca"]';
-    selectorFallback++;
+    selectorFallbackNca++;
   }
-  blocks.push(`${ncaCssSelector} {\n  display: grid;\n  grid-template-columns: ${gridTemplate};\n  gap: var(--wm-space-m);\n  min-height: 100vh;\n}`);
+  // S8.3: if the NCA's parent is a flex/grid container, the NCA is a flex/grid item
+  // and needs max-width:100% to avoid blowing out the parent.
+  const ncaParentCs = nca.parentElement ? getComputedStyle(nca.parentElement) : null;
+  const ncaIsFlexGridItem = ncaParentCs != null &&
+    (ncaParentCs.display.includes('flex') || ncaParentCs.display.includes('grid'));
+  const ncaDecls = ['display: grid', `grid-template-columns: ${gridTemplate}`, 'gap: var(--wm-space-m)', 'min-width: 0', 'overflow-wrap: break-word'];
+  if (ncaIsFlexGridItem) ncaDecls.push('max-width: 100%');
+  blocks.push(`${ncaCssSelector} {\n${ncaDecls.map((d) => `  ${d};`).join('\n')}\n}`);
 
-  // e. For each placed node: find intermediates, check safety, emit display:contents + grid-column.
-  const collapsedSet = new Set<HTMLElement>();  // dedup intermediates shared by multiple nodes
-  for (const [handle, info] of placement) {
-    const el = placedEls.get(handle);
-    if (!el) { nodesNotPlaceable.push(handle); continue; }
-
-    // Find intermediates between el and NCA.
-    const intermed = intermediatesBetween(el, nca);
-
-    // Check if ALL intermediates can be safely collapsed.
-    let allSafe = true;
-    const safeIntermed: HTMLElement[] = [];
-    for (const im of intermed) {
-      if (collapsedSet.has(im)) { safeIntermed.push(im); continue; }  // already checked
-      const check = canCollapse(im);
-      if (check.safe) {
-        safeIntermed.push(im);
-      } else {
-        allSafe = false;
-        intermediatesSkipped++;
-        skippedReasons.push(check.reason ?? 'unknown');
-        break;  // first unsafe intermediate blocks this node
-      }
+  // h. S8.3: propagate min-width:0 up the NCA's ancestor chain to body.
+  //    Stage 2 of the solver was never applied to the NCA's own ancestors.
+  //    Without this, noOverflow reads documentElement.scrollWidth which includes
+  //    the NCA's content forcing an ancestor wider than the viewport.
+  let ancIdx = 0;
+  for (let ancestor = nca.parentElement; ancestor && ancestor !== document.body && ancestor !== document.documentElement; ancestor = ancestor.parentElement) {
+    if (!(ancestor instanceof HTMLElement)) continue;
+    ancestor.setAttribute('data-wm-minw', String(ancIdx++));
+    const aParentCs = ancestor.parentElement ? getComputedStyle(ancestor.parentElement) : null;
+    if (aParentCs && (aParentCs.display.includes('flex') || aParentCs.display.includes('grid'))) {
+      ancestor.setAttribute('data-wm-minw-fg', '');
     }
-
-    if (!allSafe) {
-      nodesNotPlaceable.push(handle);
-      continue;
+  }
+  if (ancIdx > 0) {
+    blocks.push('[data-wm-minw] {\n  min-width: 0;\n}');
+    if (document.querySelector('[data-wm-minw-fg]')) {
+      blocks.push('[data-wm-minw-fg] {\n  max-width: 100%;\n}');
     }
+  }
 
-    // Emit display: contents on safe intermediates (deduped).
-    for (const im of safeIntermed) {
-      if (collapsedSet.has(im)) continue;
-      collapsedSet.add(im);
-      const imSel = buildSelector(im);
-      let imCssSelector: string;
-      if (imSel && selectorIsUnique(imSel, im)) {
-        imCssSelector = imSel;
-      } else {
-        im.setAttribute('data-wm-grid', `i${intermediatesCollapsed}`);
-        imCssSelector = `[data-wm-grid="i${intermediatesCollapsed}"]`;
-        selectorFallback++;
-      }
-      blocks.push(`${imCssSelector} {\n  display: contents;\n}`);
-      intermediatesCollapsed++;
-    }
-
-    // Emit grid-column on the placed node.
-    const nodeSel = buildSelector(el);
-    let nodeCssSelector: string;
-    if (nodeSel && selectorIsUnique(nodeSel, el)) {
-      nodeCssSelector = nodeSel;
+  // i. Emit display:contents on mixed proxies (the ONLY use of display:contents).
+  for (const el of contentsEls) {
+    const sel = buildSelector(el);
+    let cssSelector: string;
+    if (sel && selectorIsUnique(sel, el)) {
+      cssSelector = sel;
     } else {
-      nodeCssSelector = `[data-wm-c="${handle}"]`;
-      selectorFallback++;
+      el.setAttribute('data-wm-grid', `c${intermediatesCollapsed}`);
+      cssSelector = `[data-wm-grid="c${intermediatesCollapsed}"]`;
+      selectorFallbackContents++;
     }
-    const decls: string[] = [`grid-column: ${info.gridColumn}`, 'min-width: 0'];
-    // Content slot: prose measure ceiling + centered within track.
-    if (info.preferredWidth === 'content') {
-      decls.push('max-width: 65ch');
-      decls.push('margin-inline: auto');
-    }
-    // Overflow safety: cap fixed-width nodes at 100%.
-    if (el.hasAttribute('data-wm-c')) {
-      const node = result.perNodeDecls.get(handle);
-      if (node) decls.push(...node);
-    }
-    blocks.push(`${nodeCssSelector} {\n${decls.map((d) => `  ${d};`).join('\n')}\n}`);
-    nodesPlaced++;
+    blocks.push(`${cssSelector} {\n  display: contents;\n}`);
+    intermediatesCollapsed++;
   }
 
-  // f. Per-node CSS for nodes NOT in the placement (excluded, overflow, absolute, fixed).
-  // These still need fluid text + overflow safety, but no grid-column.
-  for (const [handle, decls] of result.perNodeDecls) {
-    if (placement.has(handle)) continue;  // already emitted with grid-column
+  // i.2. Full-width grid items: children of the NCA or display:contents'd proxies
+  //      that contain NO placed handles. Without explicit grid-column they'd be
+  //      auto-placed into the narrow side track, squeezing content. Full-width
+  //      (1/-1) keeps them in document flow harmlessly.
+  for (const el of fullWidthEls) {
+    const sel = buildSelector(el);
+    let cssSelector: string;
+    if (sel && selectorIsUnique(sel, el)) {
+      cssSelector = sel;
+    } else {
+      el.setAttribute('data-wm-grid', `f${fullWidthEls.indexOf(el)}`);
+      cssSelector = `[data-wm-grid="f${fullWidthEls.indexOf(el)}"]`;
+      selectorFallbackContents++;
+    }
+    blocks.push(`${cssSelector} {\n  grid-column: 1 / -1;\n}`);
+  }
+
+  // j. Emit grid-column on placed proxies. The proxy's box (bg/border/padding) is preserved.
+  for (const [el, slotId] of placedProxies) {
+    const slot = slotById.get(slotId);
+    const pw = slot?.preferredWidth ?? 'full';
+    const gridColumn = (pw === 'full' || !hasSide) ? '1 / -1'
+      : pw === 'side' ? '1' : '2';
+    const sel = buildSelector(el);
+    let cssSelector: string;
+    if (sel && selectorIsUnique(sel, el)) {
+      cssSelector = sel;
+    } else {
+      el.setAttribute('data-wm-grid', `p${selectorFallbackProxy}`);
+      cssSelector = `[data-wm-grid="p${selectorFallbackProxy}"]`;
+      selectorFallbackProxy++;
+    }
+    const decls = [`grid-column: ${gridColumn}`];
+    blocks.push(`${cssSelector} {\n${decls.map((d) => `  ${d};`).join('\n')}\n}`);
+  }
+
+  // k. Per-node CSS (fluid text + overflow safety) for ALL nodes — placed handles
+  //    get their text sizing on the original [data-wm-c] element (the proxy is
+  //    structural; the semantic text node carries the font-size token).
+  for (const [handle, decls] of perNodeDecls) {
     const el = document.querySelector<HTMLElement>(`[data-wm-c="${handle}"]`);
     if (!el) continue;
     const sel = buildSelector(el);
@@ -507,13 +592,25 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
       cssSelector = sel;
     } else {
       cssSelector = `[data-wm-c="${handle}"]`;
-      selectorFallback++;
+      selectorFallbackPerNode++;
     }
     blocks.push(`${cssSelector} {\n${decls.map((d) => `  ${d};`).join('\n')}\n}`);
   }
 
+  const selectorFallback = selectorFallbackNca + selectorFallbackProxy + selectorFallbackContents + selectorFallbackPerNode;
   const css = blocks.join('\n\n');
-  return { css, selectorFallback, nodesPlaced, nodesNotPlaceable, intermediatesCollapsed, intermediatesSkipped, skippedReasons };
+  // S8.5: nodesPlaced = handles placed (every found handle gets a proxy by
+  // construction — the BFS always terminates at the handle's non-mixed element).
+  // matched = nodesPlaced + nodesNotPlaceable.length, exactly.
+  const proxySummary = [...placedProxies.entries()].map(([el, s]) => `${el.tagName.toLowerCase()}→${s}`).join(', ');
+  const diagnostics = `NCA=${nca.tagName.toLowerCase()} proxies=[${proxySummary}] mixed=${mixedProxies} fullWidth=${fullWidthEls.length} template=${gridTemplate}`;
+  return {
+    css, selectorFallback, selectorFallbackNca, selectorFallbackProxy,
+    selectorFallbackContents, selectorFallbackPerNode,
+    nodesPlaced: handleData.length, nodesNotPlaceable,
+    intermediatesCollapsed, intermediatesSkipped: 0, skippedReasons,
+    mixedProxies, proxyCount: placedProxies.size, diagnostics, contentsHandles,
+  };
 }
 
 // ── Constraint merge (priority sort, never "first wins") ─────────────

@@ -32,12 +32,12 @@ export interface RepairDecision {
 export interface Attempt {
   spec: DesignSpec;
   css: string;
-  notBroken: boolean;   // notBlank && noOverflow && noOverlap && contrastOk && contentCollapsed && contentVisible
+  notBroken: boolean;   // notBlank && noOverflow && noOverlap && contrastOk && contentIntact && contentVisible
   changeScore: number;
   covered: boolean;
   coherent: boolean;
   changed: boolean;
-  contentCollapsed: boolean;
+  contentIntact: boolean;
 }
 
 export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasonsDone: number, paletteMode?: 'restrained' | 'vivid', pixel?: PixelVerifyResult | null, canReReason: boolean = true, opTargets?: Set<string>): RepairDecision {
@@ -69,7 +69,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // repairs (padding/sizing/layout) run ONLY for overflow/overlap failures — they
   // can never reduce accent, so they must not be spent on a coherence failure.
 
-  // S7.3h: forceContrast runs BEFORE contentCollapsed. With CSS-only placement
+  // S7.3h: forceContrast runs BEFORE contentIntact. With CSS-only placement
   // (S7.1), collapse is no longer caused by reparenting, so drop-hides should
   // rarely fire. Contrast (invisible text) is more fundamental than layout — you
   // can't fix layout on text the user can't see. The old ordering let drop-hides
@@ -104,7 +104,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // (maxHeight/height constraints), then all layout (flex/grid collapse).
   // S7.3h: runs AFTER forceContrast — collapse is a layout issue, contrast is
   // visibility. With CSS-only placement, this rarely fires (no reparenting).
-  if (!c.contentCollapsed) {
+  if (!c.contentIntact) {
     if (!prev.dropHides) return { action: 'recompile', options: { ...prev, dropHides: true }, reason: 'content collapsed — drop hides first' };
     // Targeted: drop layout on ONLY the collapsed region(s), preserving the rest of
     // the design. The blanket dropSizing below nukes ALL layout (turns a real reshape
@@ -270,7 +270,7 @@ export function bestNonBroken(attempts: Attempt[]): Attempt | null {
   // A design with 2 small collapsed sidebar items is better than no design at all.
   let fallback: Attempt | null = null;
   for (const a of attempts) {
-    if (a.contentCollapsed) continue;
+    if (a.contentIntact) continue;
     if (!fallback || a.changeScore > fallback.changeScore) fallback = a;
   }
   if (fallback) return fallback;

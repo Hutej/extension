@@ -549,7 +549,8 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     // Solver (free): placement data + grid template. S7.1: CSS-only, no DOM mutation.
     const v2SolveResult = solve({ ir: v2IR, assignment: v2Assignment, excluded: v2ExcludedSet });
     const v2Placement = computeGridPlacementCss(v2SolveResult);
-    logDebug(`v2 solver: ${v2SolveResult.matchedTargets} matched, ${v2Placement.nodesPlaced} placed, ${v2Placement.nodesNotPlaceable.length} not placeable, ${v2Placement.intermediatesCollapsed} collapsed, ${v2Placement.intermediatesSkipped} skipped, ${v2Placement.selectorFallback} selector fallbacks, ${v2SolveResult.rulesEmitted} CSS rules`);
+    logDebug(`v2 solver: ${v2SolveResult.matchedTargets} matched, ${v2Placement.nodesPlaced} placed (proxies=${v2Placement.proxyCount}), ${v2Placement.nodesNotPlaceable.length} not placeable, ${v2Placement.intermediatesCollapsed} display:contents (mixed=${v2Placement.mixedProxies}), selectorFallback=${v2Placement.selectorFallback} (nca=${v2Placement.selectorFallbackNca} proxy=${v2Placement.selectorFallbackProxy} contents=${v2Placement.selectorFallbackContents} perNode=${v2Placement.selectorFallbackPerNode}), ${v2SolveResult.rulesEmitted} CSS rules`);
+    logDebug(`v2 placement diag: ${v2Placement.diagnostics}`);
     if (v2Placement.skippedReasons.length) logDebug(`v2 display:contents skips: ${v2Placement.skippedReasons.slice(0, 10).join('; ')}`);
 
     // Compile aesthetic CSS from the Painter's spec.
@@ -568,6 +569,12 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     if (v2Spec.composition) for (const rule of v2Spec.composition) if (rule.styles || rule.layout || rule.hide) v2ModelAddressed.add(rule.target);
     if (v2Spec.intents?.length) for (const h of expandIntents(v2Spec, perception).expandedTargets) v2ModelAddressed.add(h);
 
+    // S8.1: display:contents'd elements with [data-wm-c] have their box dissolved.
+    // Their content is visible in the children (now grid items), but the handle's
+    // region collapses. Exempt these handles from the contentIntact check so a
+    // real structural reshape isn't falsely flagged as content collapse.
+    const v2ContentsHandles = new Set(v2Placement.contentsHandles);
+
     // Paint 1: apply combined CSS (structural grid + aesthetic surface).
     const v2ApplyMs = performance.now();
     applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
@@ -578,11 +585,25 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     // S4.3: verify (DOM + pixel) — the safety net v2 was missing.
     const v2VerifyMs = performance.now();
     // S7.1: no moved handles — CSS-only placement, zero DOM mutation.
-    let v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), new Set(), reflowOpportunity);
+    let v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, v2ContentsHandles, new Set(), reflowOpportunity);
     let v2Px = await captureAndPixelVerify(beforeTop);
     let v2Pixel = v2Px.result;
     let v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
     logDebug(`v2 paint1: checks=${JSON.stringify(v2Verify.checks)} pixel(passed=${v2Pixel.passed} voids=${v2Pixel.voids.length} invisible=${v2Pixel.invisibleText.length} squeeze=${v2Pixel.squeeze.length}) change=${v2Verify.changeScore.toFixed(3)}`);
+    if (v2Verify.details.length) logDebug(`v2 paint1 details: ${v2Verify.details.join(' | ')}`);
+    // S8: targeted bleed repair — apply overflow-x: auto ONLY to bleeding elements
+    // (from verify.bleedTargets). The blanket CSS rule was too aggressive (BFC
+    // height collapse on Wikipedia). This is free, deterministic, targeted.
+    if (v2Verify.bleedTargets.length > 0) {
+      let bleedFixed = 0;
+      for (const h of v2Verify.bleedTargets) {
+        for (const el of document.querySelectorAll<HTMLElement>(`[data-wm-c="${h}"]`)) {
+          el.style.setProperty('overflow-x', 'auto', 'important');
+          bleedFixed++;
+        }
+      }
+      logDebug(`v2 bleed repair: overflow-x: auto on ${bleedFixed} element(s) across ${v2Verify.bleedTargets.length} handle(s): ${v2Verify.bleedTargets.join(', ')}`);
+    }
 
     // S4.3: deterministic repair (free — no paid reReason). forceContrast + squeeze
     // repairs from planRepair, recompiled + re-applied as paint 2. Runs BEFORE the
@@ -597,7 +618,11 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     }
     const v2NeedsRepair = !v2Verify.checks.contrastOk || v2Pixel.invisibleText.length > 0 ||
       v2Pixel.squeeze.length > 0 || !v2Verify.checks.noOverflow || !v2Verify.checks.noOverlap ||
-      !v2Verify.checks.contentCollapsed || !v2Verify.checks.contentVisible;
+      !v2Verify.checks.contentIntact || !v2Verify.checks.contentVisible;
+    // Save paint1 state — if repair regresses a hard gate, revert to paint1.
+    const v2Paint1Css = v2CombinedCss;
+    const v2Paint1Verify = v2Verify;
+    const v2Paint1Pixel = v2Pixel;
     if (v2NeedsRepair) {
       const v2Repair = planRepair(v2Verify, v2Options, 0, v2Spec.paletteMode, v2Pixel, false, new Set());
       logDebug(`v2 repair -> ${v2Repair.action}: ${v2Repair.reason}`);
@@ -620,22 +645,61 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
         v2PaintCount = 2;
         document.documentElement.dataset['webmorphPaintCount'] = '2';
         await new Promise<void>((r) => requestAnimationFrame(() => r()));
+        // S8: re-check for bleeds AFTER forceContrast (it paints new elements that
+        // may now have scrollWidth > clientWidth). Apply overflow-x: auto inline.
+        {
+          let postBleeds = 0;
+          for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
+            if (!(el instanceof HTMLElement) || el.clientWidth === 0) continue;
+            const cs = getComputedStyle(el);
+            if (cs.overflowX === 'visible' && el.scrollWidth > el.clientWidth + 8) {
+              el.style.setProperty('overflow-x', 'auto', 'important');
+              postBleeds++;
+            }
+          }
+          if (postBleeds) logDebug(`v2 post-repair bleed fix: ${postBleeds} element(s)`);
+        }
         // Re-verify after repair.
-        v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), new Set(), reflowOpportunity);
+        v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, v2ContentsHandles, new Set(), reflowOpportunity);
         v2Px = await captureAndPixelVerify(beforeTop);
         v2Pixel = v2Px.result;
         v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
         logDebug(`v2 paint2(repair): checks=${JSON.stringify(v2Verify.checks)} pixel(passed=${v2Pixel.passed} voids=${v2Pixel.voids.length} invisible=${v2Pixel.invisibleText.length} squeeze=${v2Pixel.squeeze.length})`);
+        // S8: repair regression guard — if paint2 broke a hard gate that paint1
+        // passed, the repair made things worse. Revert to paint1 CSS + state.
+        // The repair is supposed to help (fix contrast), not hurt (break overflow).
+        const p1Gates = v2Paint1Verify.checks.notBlank && v2Paint1Verify.checks.contentIntact &&
+          v2Paint1Verify.checks.contentVisible && v2Paint1Verify.checks.noOverflow &&
+          v2Paint1Verify.checks.noOverlap && v2Paint1Verify.checks.layoutReshaped &&
+          v2Paint1Verify.checks.usesRoom && v2Paint1Pixel.voids.length === 0 &&
+          v2Paint1Pixel.invisibleText.length === 0;
+        const p2Gates = v2Verify.checks.notBlank && v2Verify.checks.contentIntact &&
+          v2Verify.checks.contentVisible && v2Verify.checks.noOverflow &&
+          v2Verify.checks.noOverlap && v2Verify.checks.layoutReshaped &&
+          v2Verify.checks.usesRoom && v2Pixel.voids.length === 0 &&
+          v2Pixel.invisibleText.length === 0;
+        if (p1Gates && !p2Gates) {
+          logDebug(`v2 repair REGRESSION — paint1 hard gates passed, paint2 failed. Reverting to paint1.`);
+          v2CombinedCss = v2Paint1Css;
+          applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
+          v2Verify = v2Paint1Verify;
+          v2Pixel = v2Paint1Pixel;
+          v2PaintCount = 1;
+          document.documentElement.dataset['webmorphPaintCount'] = '1';
+        }
       }
     }
     const v2VerifyMsTotal = Math.round(performance.now() - v2VerifyMs);
 
     // S4.3: HARD GATES (the final check, AFTER repair). These FAIL the run and
     // roll back: overflow, hidden content, horizontal scrolling, element overlap.
-    // Squeeze is ADVISORY (logged, never blocks — it's a spacing/readability issue
-    // the repair already attempted, not a content-destroying defect).
-    const v2HardGates = v2Verify.checks.notBlank && v2Verify.checks.contentCollapsed &&
+    // S8.2: enforcedReshape (layoutReshaped && usesRoom) is now a HARD gate with
+    // rollback — a recolor/reskin can no longer report green. movedAlive is N/A
+    // for v2 (zero moves → vacuously true) so it is NOT in the hard gate expression.
+    // Squeeze is ADVISORY (logged, never blocks).
+    const v2HardGates = v2Verify.checks.notBlank && v2Verify.checks.contentIntact &&
       v2Verify.checks.contentVisible && v2Verify.checks.noOverflow && v2Verify.checks.noOverlap &&
+      v2Verify.checks.layoutReshaped && v2Verify.checks.usesRoom &&
       v2Pixel.voids.length === 0 && v2Pixel.invisibleText.length === 0;
     if (!v2HardGates) {
       const failures = [
@@ -854,7 +918,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   try {
     const p1 = await applyOnce(spec, options);
     phase1Sanitized = p1.sanitized; phase1Verify = p1.verify; lastVerify = p1.verify; lastPixel = p1.pixel; lastBreakdown = p1.breakdown; lastCompiled = p1.compiled;
-    attempts.push({ spec, css: p1.sanitized, notBroken: p1.verify.checks.notBlank && p1.verify.checks.noOverflow && p1.verify.checks.noOverlap && p1.verify.checks.contrastOk && p1.verify.checks.contentCollapsed && p1.verify.checks.contentVisible, changeScore: p1.verify.changeScore, covered: p1.verify.checks.covered, coherent: p1.verify.checks.coherent, changed: p1.verify.checks.changed, contentCollapsed: p1.verify.checks.contentCollapsed });
+    attempts.push({ spec, css: p1.sanitized, notBroken: p1.verify.checks.notBlank && p1.verify.checks.noOverflow && p1.verify.checks.noOverlap && p1.verify.checks.contrastOk && p1.verify.checks.contentIntact && p1.verify.checks.contentVisible, changeScore: p1.verify.changeScore, covered: p1.verify.checks.covered, coherent: p1.verify.checks.coherent, changed: p1.verify.checks.changed, contentIntact: p1.verify.checks.contentIntact });
     logDebug(`paint1: rules=${p1.compiled.rulesEmitted} baseCoat=${p1.compiled.baseCoatCount} checks=${JSON.stringify(p1.verify.checks)} pixel(passed=${p1.pixel.passed} voids=${p1.pixel.voids.length} invisible=${p1.pixel.invisibleText.length} squeeze=${p1.pixel.squeeze.length}) change=${p1.verify.changeScore.toFixed(3)} accent=${p1.verify.accentFraction.toFixed(3)} coverage=${p1.verify.coverageFraction.toFixed(3)} modelCov=${p1.verify.modelCoverageFraction.toFixed(3)}${p1.compiled.droppedProps.length ? ' dropped=[' + p1.compiled.droppedProps.slice(0, 12).join(',') + ']' : ''}`);
     logDebug(`  detail: ${p1.verify.details.join(' | ')}`);
     if (!p1.pixel.passed) logDebug(`  pixel critiques: ${p1.pixel.critiques.join(' | ')}`);
@@ -886,7 +950,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       // Critic round would push past the hard abort. Ship paint 1 if non-broken.
       if (!canReReason()) {
         logDebug('Critic skipped — time budget exhausted; shipping paint 1');
-        if (!(phase1Verify!.checks.notBlank && phase1Verify!.checks.contentCollapsed)) {
+        if (!(phase1Verify!.checks.notBlank && phase1Verify!.checks.contentIntact)) {
           removeStyleEverywhere(activeShadowRoots); markFailed('time budget — no revision');
           return { ...failVerify(spec, phase1Verify!), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
         }
@@ -914,16 +978,16 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
           try {
             const p2 = await applyOnce(spec, options);
             lastVerify = p2.verify; lastPixel = p2.pixel; lastBreakdown = p2.breakdown; lastCompiled = p2.compiled; lastCompiled = p2.compiled;
-            attempts.push({ spec, css: p2.sanitized, notBroken: p2.verify.checks.notBlank && p2.verify.checks.noOverflow && p2.verify.checks.noOverlap && p2.verify.checks.contrastOk && p2.verify.checks.contentCollapsed && p2.verify.checks.contentVisible, changeScore: p2.verify.changeScore, covered: p2.verify.checks.covered, coherent: p2.verify.checks.coherent, changed: p2.verify.checks.changed, contentCollapsed: p2.verify.checks.contentCollapsed });
+            attempts.push({ spec, css: p2.sanitized, notBroken: p2.verify.checks.notBlank && p2.verify.checks.noOverflow && p2.verify.checks.noOverlap && p2.verify.checks.contrastOk && p2.verify.checks.contentIntact && p2.verify.checks.contentVisible, changeScore: p2.verify.changeScore, covered: p2.verify.checks.covered, coherent: p2.verify.checks.coherent, changed: p2.verify.checks.changed, contentIntact: p2.verify.checks.contentIntact });
             logDebug(`paint2(critic): checks=${JSON.stringify(p2.verify.checks)} pixel(passed=${p2.pixel.passed})`);
             // If paint 2 is broken, rollback+fail (no 3rd paint to revert).
-            if (!(p2.verify.checks.notBlank && p2.verify.checks.contentCollapsed)) {
+            if (!(p2.verify.checks.notBlank && p2.verify.checks.contentIntact)) {
               removeStyleEverywhere(activeShadowRoots); markFailed('revision broke content');
               return { ...failVerify(spec, p2.verify), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
             }
           } catch {
             // Critic'd spec produced no styles — keep paint 1 if non-broken.
-            if (!(phase1Verify!.checks.notBlank && phase1Verify!.checks.contentCollapsed)) {
+            if (!(phase1Verify!.checks.notBlank && phase1Verify!.checks.contentIntact)) {
               removeStyleEverywhere(activeShadowRoots); markFailed('revision failed');
               return { ...failVerify(spec, phase1Verify!), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
             }
@@ -940,9 +1004,9 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       try {
         const p2 = await applyOnce(spec, options);
         lastVerify = p2.verify; lastPixel = p2.pixel; lastBreakdown = p2.breakdown; lastCompiled = p2.compiled;
-        attempts.push({ spec, css: p2.sanitized, notBroken: p2.verify.checks.notBlank && p2.verify.checks.noOverflow && p2.verify.checks.noOverlap && p2.verify.checks.contrastOk && p2.verify.checks.contentCollapsed && p2.verify.checks.contentVisible, changeScore: p2.verify.changeScore, covered: p2.verify.checks.covered, coherent: p2.verify.checks.coherent, changed: p2.verify.checks.changed, contentCollapsed: p2.verify.checks.contentCollapsed });
+        attempts.push({ spec, css: p2.sanitized, notBroken: p2.verify.checks.notBlank && p2.verify.checks.noOverflow && p2.verify.checks.noOverlap && p2.verify.checks.contrastOk && p2.verify.checks.contentIntact && p2.verify.checks.contentVisible, changeScore: p2.verify.changeScore, covered: p2.verify.checks.covered, coherent: p2.verify.checks.coherent, changed: p2.verify.checks.changed, contentIntact: p2.verify.checks.contentIntact });
         logDebug(`paint2(repair): checks=${JSON.stringify(p2.verify.checks)} pixel(passed=${p2.pixel.passed}) change=${p2.verify.changeScore.toFixed(3)} accent=${p2.verify.accentFraction.toFixed(3)}`);
-        if (!(p2.verify.checks.notBlank && p2.verify.checks.contentCollapsed)) {
+        if (!(p2.verify.checks.notBlank && p2.verify.checks.contentIntact)) {
           // Repair broke content — revert to paint 1 (paint 1 is still on screen?
           // No — paint 2 overwrote it). Re-applying paint 1 would be a 3rd paint.
           // Rollback+fail honestly instead.

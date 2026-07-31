@@ -39,7 +39,7 @@ export interface ConformanceResult {
 
 export interface VerifyResult {
   passed: boolean;
-  checks: { notBlank: boolean; noOverflow: boolean; noOverlap: boolean; contrastOk: boolean; changed: boolean; coherent: boolean; covered: boolean; contentCollapsed: boolean; contentVisible: boolean; layoutReshaped: boolean; usesRoom: boolean; movedAlive: boolean; reflowAddressed: boolean };
+  checks: { notBlank: boolean; noOverflow: boolean; noOverlap: boolean; contrastOk: boolean; changed: boolean; coherent: boolean; covered: boolean; contentIntact: boolean; contentVisible: boolean; layoutReshaped: boolean; usesRoom: boolean; movedAlive: boolean; reflowAddressed: boolean };
   changeScore: number;
   layoutReshapedScore: number;   // structural-change signal (columns + content width + region widths)
   accentFraction: number;
@@ -101,14 +101,14 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   for (const ra of before.regions) {
     if (ra.h < 100) continue;
     // Exempt clusters intentionally removed by an op (risk 5: a remove deletes
-    // the handle from the after-fingerprint; without this, contentCollapsed
+    // the handle from the after-fingerprint; without this, contentIntact
     // false-fails on a legitimate structural removal).
     if (removedHandles?.has(ra.handle)) continue;
     const rb = afterByHandle.get(ra.handle);
     if (!rb || rb.h < 20) collapsedRegions.push(ra.handle);
   }
-  const contentCollapsed = collapsedRegions.length === 0;
-  if (!contentCollapsed) {
+  const contentIntact = collapsedRegions.length === 0;
+  if (!contentIntact) {
     const detail = collapsedRegions.slice(0, 6).map((h) => {
       const rb = before.regions.find((r) => r.handle === h);
       const ra = afterByHandle.get(h);
@@ -131,7 +131,7 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
 
   // 1d) Moved nodes alive — a move/reorder op must leave the node present, visible,
   // and sized after relocation. A move that orphaned the node (parent gone), hid it,
-  // or zeroed its rect is a silent break the DOM notBlank/contentCollapsed checks
+  // or zeroed its rect is a silent break the DOM notBlank/contentIntact checks
   // don't catch (the handle may still "exist" but be display:none under a new
   // ancestor). Each moved handle is re-resolved live and checked: present, display
   // !=none, visibility !=hidden, opacity >=0.1, rect >0, role preserved.
@@ -281,11 +281,11 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   // "is this a real redesign" checks (layoutReshaped + usesRoom) are computed for the
   // report but NOT enforced in `passed` when skipReshapeChecks is set. The by-eye-
   // safety bars (notBlank, noOverflow, noOverlap, contrastOk, covered,
-  // contentCollapsed, contentVisible) still hold — a palette change must not break
+  // contentIntact, contentVisible) still hold — a palette change must not break
   // the page. The recolor pixel detector is skipped at the call site (no `before`).
   const enforcedReshape = skipReshapeChecks ? true : (layoutReshaped && usesRoom);
-  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentCollapsed && contentVisible && movedAlive && enforcedReshape && !reflowSkipped;
-  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentCollapsed, contentVisible, layoutReshaped, usesRoom, movedAlive, reflowAddressed }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, collapseTargets: [...collapsedRegions], contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), contentWidthBefore: beforeW, contentWidthAfter: afterW, repeatedAccent, contrastNoHandle: noHandle.count, movedDead, reflowSkippedHandles, details };
+  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentIntact && contentVisible && movedAlive && enforcedReshape && !reflowSkipped;
+  return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentIntact, contentVisible, layoutReshaped, usesRoom, movedAlive, reflowAddressed }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, collapseTargets: [...collapsedRegions], contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), contentWidthBefore: beforeW, contentWidthAfter: afterW, repeatedAccent, contrastNoHandle: noHandle.count, movedDead, reflowSkippedHandles, details };
 }
 
 /**
@@ -552,18 +552,28 @@ function measureFramedClusterFraction(): number {
 // ── contrast ───────────────────────────────────────────────────────
 
 function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<string, string>, noHandle: { count: number }): boolean {
-  // Largest type first: display/hero text is the most visible place to fail.
-  // Phase-1 root-cause fix: the OLD code did `.slice(0, 200)` BEFORE the font-size
-  // sort — on a markup-heavy page the first 200 matched elements in DOM order could
-  // be chrome (nav links, list items), leaving main-content <p> paragraphs past #200
-  // excluded from sampling ENTIRELY. Collect ALL candidates, sort by font size
-  // descending, THEN cap the sample at CONTRAST_SAMPLE_COUNT in the loop below.
-  const candidates = Array.from(document.querySelectorAll('h1, h2, h3, h4, p, li, td, a, span, blockquote'))
-    .filter((el) => !el.hasAttribute('data-webmorph-ui') && (el.textContent || '').trim().length >= 5)
-    .map((el) => ({ el, fs: parseFloat(getComputedStyle(el).fontSize) || 0 }))
-    .sort((a, b) => b.fs - a.fs);
-  let checked = 0, failed = 0, failedTop = 0;
-  for (const { el, fs } of candidates) {
+  // S8.4: sample ONE REPRESENTATIVE PER [data-wm-c] handle (reuses the
+  // findBleedTargets dedupe pattern) instead of a global size-sorted element
+  // list. The old code had two compounding bugs:
+  //  (a) candidates filtered to textContent.trim().length >= 5 — "MDN" is 3
+  //      chars and never entered the list;
+  //  (b) candidates sorted by font-size DESCENDING then capped at
+  //      CONTRAST_SAMPLE_COUNT — 13px text was last in line and cut by the cap
+  //      even after fixing (a).
+  // Fix: one representative per handle, no char filter, no font-size sort. All
+  // handle sizes are represented, not just large text.
+  const seen = new Set<string>();
+  const reps: { el: HTMLElement; h: string; fs: number }[] = [];
+  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
+    if (!(el instanceof HTMLElement) || el.hasAttribute('data-webmorph-ui')) continue;
+    const h = el.getAttribute('data-wm-c')!;
+    if (seen.has(h)) continue;
+    seen.add(h);
+    reps.push({ el, h, fs: parseFloat(getComputedStyle(el).fontSize) || 0 });
+  }
+  let checked = 0, failed = 0;
+  const checkedReps: { el: HTMLElement; h: string; fs: number; failed: boolean }[] = [];
+  for (const { el, h, fs } of reps) {
     if (checked >= CONTRAST_SAMPLE_COUNT) break;
     const rect = el.getBoundingClientRect();
     if (rect.width === 0 || rect.height === 0) continue;
@@ -575,39 +585,26 @@ function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<s
     const threshold = isLarge ? 3.0 : MIN_CONTRAST_RATIO;
     const eb = effectiveBackground(el);
     // Gradient-aware: if a gradient bar sits in the effective-background chain, the
-    // text must clear the floor against EVERY stop (links over a light→dark gradient
-    // are invisible at the light end). A fail against the worst stop = a fail.
+    // text must clear the floor against EVERY stop. A fail against the worst stop = a fail.
     const gradStops = gradientStopsInChain(el);
     const worstStop = gradStops.length ? gradStops.reduce((a, b) => (contrastRatio(fg, b) < contrastRatio(fg, a) ? b : a)) : null;
     const failsSolid = contrastRatio(fg, eb) < threshold;
     const failsGradient = worstStop != null && contrastRatio(fg, worstStop) < threshold;
-    if (failsSolid || failsGradient) {
+    const didFail = failsSolid || failsGradient;
+    checkedReps.push({ el, h, fs, failed: didFail });
+    if (didFail) {
       failed++;
-      if (checked <= CONTRAST_TOP_FAIL_COUNT) failedTop++;
-      const h = el.closest('[data-wm-c]')?.getAttribute('data-wm-c');
-      if (h) {
-        targets.add(h);
-        // Capture the EFFECTIVE background the text actually sits on (walked up
-        // the parent chain) — the repair needs this, not the handle's own bg, or
-        // it picks a readable color against the wrong surface (root cause of the
-        // persistent contrast failure: text on an ancestor's painted panel).
-        targetBgs.set(h, `rgb(${Math.round(eb[0])},${Math.round(eb[1])},${Math.round(eb[2])})`);
-      } else {
-        // Phase-1 class: NO-HANDLE. The failing text has no [data-wm-c] ancestor —
-        // it lives outside any cluster (text the perception didn't group). The OLD
-        // code counted it toward `failed` (forcing contrastOk=false) but added NO
-        // repair target, so the failure was silently unfixable: forceContrast only
-        // targets handles, and the pixel detector only scans [data-wm-c] rects.
-        // Surface the count so the loop can act (base-coat / canvas floor) instead
-        // of silently dropping the unfixable failure.
-        noHandle.count++;
-        details.push(`low contrast on UNCLUSTERED "${(el.textContent || '').trim().slice(0, 24)}" (no [data-wm-c] — falls back to the canvas text floor)`);
-        continue;
-      }
+      targets.add(h);
+      targetBgs.set(h, `rgb(${Math.round(eb[0])},${Math.round(eb[1])},${Math.round(eb[2])})`);
       details.push(`low contrast on "${(el.textContent || '').trim().slice(0, 24)}"`);
     }
   }
-  // Strict: ≤2 failures out of 50, AND zero failures among top-10 largest text.
+  // S8.4: failedTop = failures among the top-N largest-font representatives.
+  // Preserves the strict "top-10 largest text must ALL pass" rule WITHOUT the
+  // global font-size sort that cut 13px text from sampling entirely.
+  const sorted = [...checkedReps].sort((a, b) => b.fs - a.fs);
+  const failedTop = sorted.slice(0, CONTRAST_TOP_FAIL_COUNT).filter((r) => r.failed).length;
+  // Strict: ≤2 failures out of the sample, AND zero failures among top-N largest.
   return !(checked > 0 && (failedTop > 0 || failed > CONTRAST_MAX_FAILURES));
 }
 

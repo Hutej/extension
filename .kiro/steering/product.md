@@ -391,20 +391,24 @@ The solver (Step 2) is NOT started. **Phase 5 (role-anchored stable handles) is 
 
 ## Current position (updated)
 
-**P2.5 — Step 6 PARTIAL (S6.1+S6.2 done, S6.3 BLOCKED by SPA re-render, S6.4 skipped).**
-The fixture/replay system (S6.1+S6.2) eliminated model latency entirely — replay runs take
-0.8-2.5s (vs 25-90s live), zero paid calls, deterministic. S6.3 used 5+ replay runs to
-diagnose the remaining hard-gate failures. Fix cycle 2 (`overflow: clip` both-axes on shell +
-`overflow-x: clip` on clusters) FIXED noOverflow on both Wikipedia (text bleeds) and GitHub
-(scrollWidth propagation). The remaining blocker is contentCollapsed from SPA framework
-re-render: DOM reparenting triggers MediaWiki/Turbo/React MutationObservers → reconciliation
-→ content removal. Moved handles survive (alive=N, dead=0 on all sites); it's non-moved
-content inside moved containers or in re-rendered areas that gets clobbered. This is an
-architectural limitation of the wrapper approach, NOT fixable with CSS. MDN passes (its JS
-doesn't re-render on DOM mutations). S6.4 skipped per guardrails (S6.3 not green on all 3).
-Fix cycles used: 2/3. Full-grid runs used: 0/2 (replay runs uncapped). Paid calls: 3/3
-(S6.2 recording only). Next: Phase 2.6 / Step 7 needs to address the SPA re-render blocker
-(CSS-only restructuring, `display: contents`, or framework-aware mutation interception).
+**P2.5 — Step 8 DONE (S8.1–S8.7 all shipped).** Step 8 replaced the collapsing-chain placement
+algorithm with ancestor-proxy placement: walk up from each placed handle to the NCA's direct child
+(the proxy), place the proxy with grid-column preserving bg/border/padding. display:contents only
+on mixed proxies (subtree spans >1 non-overflow slot). Coverage went from 2/1/3 placed nodes
+(MDN/Wikipedia/GitHub) to 28/21/31 — a real relayout, not a reskin. The existing enforcedReshape gate
+was wired as a hard v2 gate (9 conditions) with rollback; movedAlive removed (N/A with zero moves).
+GitHub noOverflow fixed at the root: template computed from actually-placed set (not intended),
+min-width:0 propagated up the NCA ancestor chain, text bleeds fixed by removing min-width:0 from
+grid items + targeted overflow-x:auto on actually-bleeding elements + post-forceContrast re-check.
+Contrast sampler rewritten (one per handle, no char-length filter — can now see "MDN").
+selectorFallback split into 4 counters; nodesNotPlaceable reconciled (matched = placed +
+notPlaceable). S8.6 replay proof: 9/9 hard gates pass on all 3 sites with 28/21/31 placed nodes.
+S8.7 live run: "1970s sci-fi paperback cover", 3 paid calls (1 per site), all under 120s, all 9/9
+hard gates pass. Screenshots captured for user judgment.
+
+Fix cycles used: noOverflow 3/3, contentIntact 2/3, layoutReshaped 1/3. Full-grid live runs: 1/2.
+Replay runs: ~15 (uncapped). Paid calls: 3/3 (S8.7 live only). Next: user by-eye judgment of S8.7
+screenshots. If PASS, move to next phase. If FAIL, iterate on design quality.
 
 **Step 5 RESULT — FIX POSITIONED-LAYOUT COEXISTENCE, PASS ALL THREE DOC SITES:**
 
@@ -551,29 +555,99 @@ Fix cycles used: 2/3. Full-grid runs used: 0/2 (replay runs uncapped). Paid call
   stamps data-wm-grid attribute when selector isn't unique. Style re-insertion MutationObserver
   ALREADY EXISTS in execute/index.ts startDefense() — no new code needed.
   Selector-fallback fraction: MDN 12/29=41%, Wikipedia 1/39=2.5%, GitHub 9/46=20%.
-- [ ] **S7.3** — Prove it in replay. PARTIALLY DONE — 2/3 sites pass hard gates:
-  - contentCollapsed: MDN=true, Wikipedia=true, GitHub=true — **S6.3 BLOCKER COMPLETELY GONE**
-  - Hard gates: MDN=7/7 PASS, Wikipedia=7/7 PASS, GitHub=noOverflow FAIL (grid causes h-overflow)
-  - Node survival: MDN 29 matched/2 placed/28 notPlaceable, Wikipedia 39/1/38, GitHub 46/3/43
-  - display:contents: MDN 1 collapsed/26 skipped, Wikipedia 0/38, GitHub 3/43
-  - Viewport matrix: MDN multiViewport=true zoom=false mobileNarrow=false; Wikipedia ALL true;
-    GitHub not tested (hard gate fail)
-  - **S7.3g MDN invisible text ROOT CAUSE FOUND**: (1) Test harness pixelAudit captured at
-    device-pixel resolution but built rects in CSS pixels — coordinate mismatch on high-DPI
-    displays causing false invisible-text positives. FIXED: downscale to window.innerWidth.
-    (2) DOM contrast sampler skips text < 5 chars (verify/index.ts:562). "MDN" is 3 chars —
-    never flagged. (3) Header/nav are position:sticky — always at viewport top; text at
-    fontSize=13 is at pixel variance threshold boundary. Intermittent: invisible=0 in one
-    run, invisible=3-6 in others. Partially fixed by DPI fix.
-  - **S7.3h Repair priority inversion FIXED**: Moved forceContrast BEFORE contentCollapsed in
-    repair/index.ts. With CSS-only placement, collapse is rare (no reparenting). Verified:
-    contentCollapsed=true on all 3 sites, drop-hides never fired.
-  - **NEW FINDING (flagged, not fixed)**: GitHub noOverflow failure. Grid template from solver
-    causes horizontal overflow. S6.3's overflow:clip shell hacks were deleted by S7.1. Fix
-    would be overflow-x:clip on NCA — but fix cycle cap reached (3/3).
-  Fix cycles used: 3/3. Full-grid runs used: 0/2 (replay runs uncapped, ~10 used). Paid calls: 0.
+- [x] **S7.3** — Prove it in replay. DONE (superseded by S8.6 — all 3 sites pass 9/9 v2 hard gates
+  with 28/21/31 placed nodes). See Step 8 RESULT below for the full gate matrix.
 - [ ] **S7.4** — Live by-eye gate. SKIPPED — S7.3 is NOT green on all 3 (GitHub noOverflow fail,
   MDN intermittent invisible text). Per guardrails: "If S7.3 is not green, skip S7.4 and report."
+
+**Step 8 RESULT — MAKE THE RELAYOUT REAL (ancestor-proxy placement + hard gates):**
+
+The Step-7 pixelAudit DPI diagnosis (device pixels vs CSS pixels) was excellent and retroactively
+INVALIDATES every earlier pixel-gate number on a high-DPI display. All prior pixel-voids/invisible
+counts were measured at device-pixel resolution but built in CSS pixels — coordinate mismatch.
+Fixed: downscale to window.innerWidth. Step 7 placed only 2/29 on MDN, 1/39 on Wikipedia, 3/46 on
+GitHub — "one placed node is not a relayout; the gates went green because the page barely changed."
+
+- [x] **S8.1** — Place ancestors, stop collapsing chains. computeGridPlacementCss() rewritten:
+  canCollapse()/intermediatesBetween() DELETED. For each placed handle, walk up from the element
+  until the parent IS the NCA — that ancestor (NCA's direct child) is the PLACEMENT PROXY. Place
+  the proxy with grid-column, preserving bg/border/padding. Two proxies → same element: keep
+  one, highest-priority slot (deterministic: masthead > toc > nav-local > main > footer). Mixed
+  proxy (subtree spans >1 non-overflow slot) → display:contents on that proxy + place children
+  (ONLY display:contents use). No `break` on first blocker. selectorFallback split into 4
+  counters (see S8.5). | BEFORE → AFTER placement: MDN 2/29 → 28/29 (15 proxies, 22
+  display:contents, 1 notPlaceable), Wikipedia 1/39 → 21/39 (21 proxies, 45 display:contents, 18
+  notPlaceable), GitHub 3/46 → 31/46 (31 proxies, 63 display:contents, 15 notPlaceable).
+- [x] **S8.2** — Reuse the relayout gate that already exists. No new gate added — verify/index.ts
+  already computes layoutReshaped, layoutReshapedScore, usesRoom, enforcedReshape. Wired
+  enforcedReshape (= layoutReshaped && usesRoom) as HARD v2 gate with rollback (v2HardGates: 9
+  conditions). movedAlive removed from v2 pass expression — reported as N/A (zero moves with
+  CSS-only placement). PROVEN: gate FAILS on a deliberately crippled run (1 proxy →
+  layoutReshaped=false → no apply) and PASSES on real runs. A non-relayout can no longer report
+  green.
+- [x] **S8.3** — GitHub noOverflow at the root. Cause 1 (phantom track): gridTemplate was computed
+  in pure solve() from INTENDED placement. Fixed: compute template from ACTUALLY placed set
+  (post-DOM resolution) in computeGridPlacementCss(). Cause 2 (no min-width propagation): NCA
+  got display:grid + gap + min-height:100vh but no min-width:0. Fixed: emit min-width:0 on NCA
+  + every ancestor up to body; max-width:100% where ancestor is a flex/grid item. Also deleted
+  min-height:100vh (S8.3 directive). BANNED: overflow-x:clip as a fix (it hides a real failure).
+  Text bleeds (noNewBleeds=false) fixed by: (1) removing min-width:0 from placed proxies +
+  fullWidthEls (grid items keep default min-width:auto → no shrink below min-content), (2)
+  targeted inline-style overflow-x:auto on actually-bleeding elements (scrollWidth >
+  clientWidth + 8), (3) re-checking for bleeds AFTER forceContrast recompile (it paints new
+  elements → new bleeds). overflow-wrap:break-word on NCA as harmless inherited property.
+- [x] **S8.4** — Fix the contrast sampler. checkContrast() in verify/index.ts rewritten: was
+  filtering text ≥5 chars + size-sorted global cap → could not see text like "MDN" (3 chars).
+  Now samples ONE element per [data-wm-c] handle (reuses findBleedTargets dedupe by handle),
+  no char-length filter, no size-sort cap. The sampler can now see short text. contentCollapsed
+  → contentIntact renamed in 3 code files (verify, repair, content).
+- [x] **S8.5** — Clean up contaminated metrics. selectorFallback split into 4 counters:
+  selectorFallbackId (anchor by id), selectorFallbackRole (anchor by role/aria), selectorFallbackNth
+  (nth-of-type chain), selectorFallbackAttr (stamped data-wm-grid attr). nodesNotPlaceable
+  reconciled: matched = placed + notPlaceable (was contaminated by counting blocked
+  intermediates per-node). contentsHandles collected (handles of display:contents'd elements
+  with [data-wm-c]) → passed to verifyStyle as removedHandles → contentIntact exempts them.
+  PRE-EXISTING BUG flagged in repair/index.ts bestNonBroken() L273 (inverted condition, NOT
+  fixed — out of scope).
+- [x] **S8.6** — Replay proof on all 3 doc sites. WM_FIXTURES=replay, 0 paid calls, uncapped
+  replay runs. V2 HARD GATE = 9 conditions: notBlank, contentIntact, contentVisible, noOverflow,
+  noOverlap, layoutReshaped, usesRoom, pixel-voids=0, pixel-invisible=0. (product.md said 6,
+  prior report said 7, verify/index.ts exposes 13 booleans; `passed` uses 12 incl
+  enforcedReshape + movedAlive. The v2 path uses v2HardGates = 9, NOT `passed`. movedAlive =
+  N/A. This reconciles the discrepancy.)
+
+  | Gate | MDN | Wikipedia | GitHub |
+  |------|-----|----------|--------|
+  | notBlank | true | true | true |
+  | contentIntact | true | true | true |
+  | contentVisible | true | true | true |
+  | noOverflow | true | true | true |
+  | noOverlap | true | true | true |
+  | layoutReshaped | true | true | true |
+  | usesRoom | true | true | true |
+  | pixel voids=0 | true (0) | true (0) | true (0) |
+  | pixel invisible=0 | true (0) | true (0) | true (0) |
+
+  Placed-node counts alongside gates: MDN 28/29, Wikipedia 21/39, GitHub 31/46. A green row
+  can no longer mean "nothing happened" — placement went from 2/1/3 to 28/21/31.
+  Regression guard: if paint2 regresses a hard gate that paint1 passed, reverts to paint1.
+  Post-apply pixel audit: MDN voids=0 invisible=0, Wikipedia voids=0 invisible=0, GitHub
+  voids=0 invisible=2 (cd8prvn at mid/deep scroll — not a hard gate, post-apply finding).
+  Fix cycles: noOverflow 3/3, contentIntact 2/3, layoutReshaped 1/3. Full-grid live runs: 0/2.
+  Replay runs: ~15 (uncapped). Paid calls: 0.
+- [x] **S8.7** — Live by-eye run. S8.6 green on all 3 → proceeded. WM_FIXTURES=off, ONE-SHOT
+  MANDATE, ≤120s hard abort. Aesthetic prompt (never used before, verbatim all 3 sites):
+  "1970s sci-fi paperback cover". 3 paid calls (1 per site).
+
+  | Site | Wall-clock | Paid calls | Tokens | Applied | Hard gates | Post-apply |
+  |------|-----------|------------|--------|---------|------------|------------|
+  | MDN | 90.6s | 1 | 11,828 | YES | 9/9 PASS | voids=0 inv=0 squeeze=0 |
+  | Wikipedia | 62.9s | 1 | 8,174 | YES | 9/9 PASS | voids=0 inv=0 squeeze=0 |
+  | GitHub | 17.2s | 1 | 6,441 | YES | 9/9 PASS | voids=0 inv=2 squeeze=0 |
+
+  All 3 under 120s hard abort. Total tokens: 26,443. Total wall-clock: 170.7s. Screenshots
+  captured by harness (before/after at desktop viewport). Agents did NOT open PNGs. The user's
+  eye is the only PASS authority — these screenshots are for user judgment.
 
 ## Status update protocol (for ALL agents)
 
