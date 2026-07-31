@@ -573,8 +573,6 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     // Their content is visible in the children (now grid items), but the handle's
     // region collapses. Exempt these handles from the contentIntact check so a
     // real structural reshape isn't falsely flagged as content collapse.
-    const v2ContentsHandles = new Set(v2Placement.contentsHandles);
-
     // Paint 1: apply combined CSS (structural grid + aesthetic surface).
     const v2ApplyMs = performance.now();
     applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
@@ -585,25 +583,12 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     // S4.3: verify (DOM + pixel) — the safety net v2 was missing.
     const v2VerifyMs = performance.now();
     // S7.1: no moved handles — CSS-only placement, zero DOM mutation.
-    let v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, v2ContentsHandles, new Set(), reflowOpportunity);
+    let v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), new Set(), reflowOpportunity);
     let v2Px = await captureAndPixelVerify(beforeTop);
     let v2Pixel = v2Px.result;
     let v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
     logDebug(`v2 paint1: checks=${JSON.stringify(v2Verify.checks)} pixel(passed=${v2Pixel.passed} voids=${v2Pixel.voids.length} invisible=${v2Pixel.invisibleText.length} squeeze=${v2Pixel.squeeze.length}) change=${v2Verify.changeScore.toFixed(3)}`);
     if (v2Verify.details.length) logDebug(`v2 paint1 details: ${v2Verify.details.join(' | ')}`);
-    // S8: targeted bleed repair — apply overflow-x: auto ONLY to bleeding elements
-    // (from verify.bleedTargets). The blanket CSS rule was too aggressive (BFC
-    // height collapse on Wikipedia). This is free, deterministic, targeted.
-    if (v2Verify.bleedTargets.length > 0) {
-      let bleedFixed = 0;
-      for (const h of v2Verify.bleedTargets) {
-        for (const el of document.querySelectorAll<HTMLElement>(`[data-wm-c="${h}"]`)) {
-          el.style.setProperty('overflow-x', 'auto', 'important');
-          bleedFixed++;
-        }
-      }
-      logDebug(`v2 bleed repair: overflow-x: auto on ${bleedFixed} element(s) across ${v2Verify.bleedTargets.length} handle(s): ${v2Verify.bleedTargets.join(', ')}`);
-    }
 
     // S4.3: deterministic repair (free — no paid reReason). forceContrast + squeeze
     // repairs from planRepair, recompiled + re-applied as paint 2. Runs BEFORE the
@@ -645,22 +630,8 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
         v2PaintCount = 2;
         document.documentElement.dataset['webmorphPaintCount'] = '2';
         await new Promise<void>((r) => requestAnimationFrame(() => r()));
-        // S8: re-check for bleeds AFTER forceContrast (it paints new elements that
-        // may now have scrollWidth > clientWidth). Apply overflow-x: auto inline.
-        {
-          let postBleeds = 0;
-          for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-            if (!(el instanceof HTMLElement) || el.clientWidth === 0) continue;
-            const cs = getComputedStyle(el);
-            if (cs.overflowX === 'visible' && el.scrollWidth > el.clientWidth + 8) {
-              el.style.setProperty('overflow-x', 'auto', 'important');
-              postBleeds++;
-            }
-          }
-          if (postBleeds) logDebug(`v2 post-repair bleed fix: ${postBleeds} element(s)`);
-        }
         // Re-verify after repair.
-        v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, v2ContentsHandles, new Set(), reflowOpportunity);
+        v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), new Set(), reflowOpportunity);
         v2Px = await captureAndPixelVerify(beforeTop);
         v2Pixel = v2Px.result;
         v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
@@ -672,12 +643,12 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
           v2Paint1Verify.checks.contentVisible && v2Paint1Verify.checks.noOverflow &&
           v2Paint1Verify.checks.noOverlap && v2Paint1Verify.checks.layoutReshaped &&
           v2Paint1Verify.checks.usesRoom && v2Paint1Pixel.voids.length === 0 &&
-          v2Paint1Pixel.invisibleText.length === 0;
+          v2Paint1Pixel.invisibleText.length === 0 && v2Paint1Pixel.squeeze.length === 0;
         const p2Gates = v2Verify.checks.notBlank && v2Verify.checks.contentIntact &&
           v2Verify.checks.contentVisible && v2Verify.checks.noOverflow &&
           v2Verify.checks.noOverlap && v2Verify.checks.layoutReshaped &&
           v2Verify.checks.usesRoom && v2Pixel.voids.length === 0 &&
-          v2Pixel.invisibleText.length === 0;
+          v2Pixel.invisibleText.length === 0 && v2Pixel.squeeze.length === 0;
         if (p1Gates && !p2Gates) {
           logDebug(`v2 repair REGRESSION — paint1 hard gates passed, paint2 failed. Reverting to paint1.`);
           v2CombinedCss = v2Paint1Css;
@@ -696,25 +667,24 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     // S8.2: enforcedReshape (layoutReshaped && usesRoom) is now a HARD gate with
     // rollback — a recolor/reskin can no longer report green. movedAlive is N/A
     // for v2 (zero moves → vacuously true) so it is NOT in the hard gate expression.
-    // Squeeze is ADVISORY (logged, never blocks).
+    // S9.4: squeeze is now a HARD gate — text crushed below MIN_CHARS_PER_LINE fails.
     const v2HardGates = v2Verify.checks.notBlank && v2Verify.checks.contentIntact &&
       v2Verify.checks.contentVisible && v2Verify.checks.noOverflow && v2Verify.checks.noOverlap &&
       v2Verify.checks.layoutReshaped && v2Verify.checks.usesRoom &&
-      v2Pixel.voids.length === 0 && v2Pixel.invisibleText.length === 0;
+      v2Pixel.voids.length === 0 && v2Pixel.invisibleText.length === 0 &&
+      v2Pixel.squeeze.length === 0;
     if (!v2HardGates) {
       const failures = [
         ...Object.entries(v2Verify.checks).filter(([, v]) => !v).map(([k]) => k),
         ...(v2Pixel.voids.length ? v2Pixel.voids.map((h) => 'void:' + h) : []),
         ...(v2Pixel.invisibleText.length ? v2Pixel.invisibleText.map((h) => 'invis:' + h) : []),
+        ...(v2Pixel.squeeze.length ? v2Pixel.squeeze.map((h) => 'squeeze:' + h) : []),
       ].join(', ');
       removeStyleEverywhere(activeShadowRoots);
       markFailed('v2 hard gate: ' + failures);
       logDebug(`v2 ROLLBACK — hard gate: ${failures}`);
       return { ok: false, message: 'v2 hard gate: ' + failures, spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
     }
-    // Advisory: squeeze survivors (logged, never blocks).
-    if (v2Pixel.squeeze.length) logDebug(`v2 ADVISORY: ${v2Pixel.squeeze.length} squeezed cluster(s): ${v2Pixel.squeeze.join(', ')}`);
-
     // Persist + defend + mark applied.
     const v2Key = storageKey();
     const v2State = await loadSiteState(v2Key);

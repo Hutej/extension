@@ -119,10 +119,6 @@ export interface PlacementResult {
   proxyCount: number;
   /** S8.1: diagnostic — NCA tag + proxy slot summary (for dev logging). */
   diagnostics: string;
-  /** S8.1: handles of display:contents'd elements that carry [data-wm-c] —
-   *  the caller exempts these from the contentIntact check (box dissolved but
-   *  content is visible in children that are now grid items). */
-  contentsHandles: string[];
 }
 
 // ── Solve (pure: no DOM access, no model calls) ─────────────────────
@@ -370,7 +366,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     selectorFallbackContents: 0, selectorFallbackPerNode: 0,
     nodesPlaced: 0, nodesNotPlaceable: [...nodesNotPlaceable],
     intermediatesCollapsed: 0, intermediatesSkipped: 0, skippedReasons: [],
-    mixedProxies: 0, proxyCount: 0, diagnostics: '(empty)', contentsHandles: [],
+    mixedProxies: 0, proxyCount: 0, diagnostics: '(empty)',
   });
 
   if (placement.size === 0) return empty('');
@@ -420,7 +416,6 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   //     don't auto-place into a narrow side track and squeeze content.
   const placedProxies = new Map<HTMLElement, string>();  // proxy el → assigned slotId
   const contentsEls: HTMLElement[] = [];  // mixed proxies that get display:contents
-  const contentsHandles: string[] = [];  // handles of display:contents'd elements with [data-wm-c]
   const fullWidthEls: HTMLElement[] = [];  // non-handle grid items → full width
   const seenEls = new Set<HTMLElement>();  // dedup across BFS levels
 
@@ -456,9 +451,6 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
         // is still visible in the children, now grid items).
         contentsEls.push(candidate);
         mixedProxies++;
-        if (candidate.hasAttribute('data-wm-c')) {
-          contentsHandles.push(candidate.getAttribute('data-wm-c')!);
-        }
         for (const child of candidate.children) {
           if (!(child instanceof HTMLElement)) continue;
           if (seenEls.has(child)) continue;
@@ -505,29 +497,9 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   const ncaParentCs = nca.parentElement ? getComputedStyle(nca.parentElement) : null;
   const ncaIsFlexGridItem = ncaParentCs != null &&
     (ncaParentCs.display.includes('flex') || ncaParentCs.display.includes('grid'));
-  const ncaDecls = ['display: grid', `grid-template-columns: ${gridTemplate}`, 'gap: var(--wm-space-m)', 'min-width: 0', 'overflow-wrap: break-word'];
+  const ncaDecls = ['display: grid', `grid-template-columns: ${gridTemplate}`, 'gap: var(--wm-space-m)', 'min-width: 0'];
   if (ncaIsFlexGridItem) ncaDecls.push('max-width: 100%');
   blocks.push(`${ncaCssSelector} {\n${ncaDecls.map((d) => `  ${d};`).join('\n')}\n}`);
-
-  // h. S8.3: propagate min-width:0 up the NCA's ancestor chain to body.
-  //    Stage 2 of the solver was never applied to the NCA's own ancestors.
-  //    Without this, noOverflow reads documentElement.scrollWidth which includes
-  //    the NCA's content forcing an ancestor wider than the viewport.
-  let ancIdx = 0;
-  for (let ancestor = nca.parentElement; ancestor && ancestor !== document.body && ancestor !== document.documentElement; ancestor = ancestor.parentElement) {
-    if (!(ancestor instanceof HTMLElement)) continue;
-    ancestor.setAttribute('data-wm-minw', String(ancIdx++));
-    const aParentCs = ancestor.parentElement ? getComputedStyle(ancestor.parentElement) : null;
-    if (aParentCs && (aParentCs.display.includes('flex') || aParentCs.display.includes('grid'))) {
-      ancestor.setAttribute('data-wm-minw-fg', '');
-    }
-  }
-  if (ancIdx > 0) {
-    blocks.push('[data-wm-minw] {\n  min-width: 0;\n}');
-    if (document.querySelector('[data-wm-minw-fg]')) {
-      blocks.push('[data-wm-minw-fg] {\n  max-width: 100%;\n}');
-    }
-  }
 
   // i. Emit display:contents on mixed proxies (the ONLY use of display:contents).
   for (const el of contentsEls) {
@@ -609,7 +581,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     selectorFallbackContents, selectorFallbackPerNode,
     nodesPlaced: handleData.length, nodesNotPlaceable,
     intermediatesCollapsed, intermediatesSkipped: 0, skippedReasons,
-    mixedProxies, proxyCount: placedProxies.size, diagnostics, contentsHandles,
+    mixedProxies, proxyCount: placedProxies.size, diagnostics,
   };
 }
 

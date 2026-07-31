@@ -270,7 +270,7 @@ export function bestNonBroken(attempts: Attempt[]): Attempt | null {
   // A design with 2 small collapsed sidebar items is better than no design at all.
   let fallback: Attempt | null = null;
   for (const a of attempts) {
-    if (a.contentIntact) continue;
+    if (!a.contentIntact) continue;
     if (!fallback || a.changeScore > fallback.changeScore) fallback = a;
   }
   if (fallback) return fallback;

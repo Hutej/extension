@@ -6,6 +6,11 @@
  * Run: cd project && node --experimental-strip-types --env-file=.env tests/popup.test.ts
  *   WMGRID=smoke  — 1 site, 1 prompt, <3min (regression catch)
  *   WMGRID=full   — 5 sites, 5 prompts (default, acceptance grid)
+ *
+ * S9.6 FIX-CYCLE CAP: max 3 fix cycles for the WHOLE step, summed across ALL gates.
+ * Not 3 per gate — 3 total. The agent must report the total as a single number.
+ * A red gate after the cap is a FINDING, not a problem to fix. Enforced by
+ * discipline: if you are about to run this harness a 4th time, STOP and report.
  */
 
 import { chromium, type Page, type BrowserContext } from 'playwright';
