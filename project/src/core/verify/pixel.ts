@@ -184,7 +184,8 @@ export interface PixelVerifyResult {
   invisibleText: string[]; // cluster handles whose text renders invisible
   squeeze: string[];       // cluster handles squeezed below readable measure
   recolor: boolean;         // true if before/after reads as a recolor (stock structure, hue-only shift)
-  passed: boolean;         // true iff all three lists are empty AND no recolor
+  captureFailed: boolean;   // S10.3: true if any capture returned 0-size data — pixel results untrustworthy
+  passed: boolean;         // true iff all three lists are empty AND no recolor AND no captureFailed
   critiques: string[];     // human-readable, for the repair router
 }
 
@@ -311,7 +312,11 @@ export function pixelVerify(captures: PixelInput[], rectsPerCapture: ClusterRect
   // Recolor: stock structure + hue-only shift = a recolor, mechanically. Only when
   // a before-capture is supplied. captures[0] = the scrollY=0 after-shot.
   const recolor = before && captures.length > 0 ? detectRecolor(before, captures[0]) : false;
-  const passed = voids.length === 0 && invisible.length === 0 && squeeze.length === 0 && !recolor;
+  // S10.3a: detect capture failure — any capture with 0-size data means pixel
+  // results are untrustworthy. Without this, variance() returns 765 for 0-sample
+  // rects, both detectors skip, and the pixel gate reports PASS on a broken capture.
+  const captureFailed = captures.some((c) => c.width === 0 || c.height === 0 || c.data.length === 0);
+  const passed = !captureFailed && voids.length === 0 && invisible.length === 0 && squeeze.length === 0 && !recolor;
   const critiques = [
     ...voids.map((h) => decorativeVoids.has(h)
       ? `cluster ${h} is a DECORATIVE DEAD-ZONE — a large gradient/texture region with NO text or image content that drowned the page's content. CSS cannot collapse this; you MUST use a "remove" op on the decorative wrapper (or restyle it so the content column reclaims the space). Do NOT decorate it — remove it or let the content use the room.`
@@ -319,8 +324,9 @@ export function pixelVerify(captures: PixelInput[], rectsPerCapture: ClusterRect
     ...invisible.map((h) => `cluster ${h} renders invisible — its text has near-zero contrast against its effective background`),
     ...squeeze.map((h) => `cluster ${h} text is squeezed below a readable measure (chars-per-line < floor) — widen it`),
   ];
+  if (captureFailed) critiques.push('CAPTURE FAILED — one or more screenshots returned 0-size data. Pixel results are untrustworthy; treat as a hard failure.');
   if (recolor) critiques.push('The redesign reads as a RECOLOR — the edge/structure map is near-identical to the original and only the hue shifted. A recolor is a FAILURE. You MUST change the structural layout: column count, content/region widths, spacing, arrangement — not just paint.');
-  return { voids, invisibleText: invisible, squeeze, recolor, passed, critiques };
+  return { voids, invisibleText: invisible, squeeze, recolor, captureFailed, passed, critiques };
 }
 
 

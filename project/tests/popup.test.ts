@@ -896,15 +896,33 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
     result.wallMs = Date.now() - t0;
     console.log(`  wall-clock: ${(result.wallMs / 1000).toFixed(1)}s applied=${result.applied}`);
 
-    // Screenshot after.
+    // Screenshot after — this is the POST-MARKER state (post-rollback on failure).
+    // S10.2: label it as "_rolledback" (the original page on failure, or the
+    // applied design on success). The transformed screenshot was captured by
+    // the content script BEFORE the hard gate and stored in chrome.storage.local.
     await page.evaluate(() => new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r()))));
     await page.waitForTimeout(1500);
-    const shotName = markerSeen ? `after_${site.name}.png` : `timeout_${site.name}.png`;
+    const shotName = markerSeen ? `after_${site.name}_rolledback.png` : `timeout_${site.name}.png`;
     try {
       await page.screenshot({ path: path.join(ARTIFACTS_DIR, shotName), fullPage: true });
     } catch {
       await page.screenshot({ path: path.join(ARTIFACTS_DIR, shotName) });
     }
+
+    // S10.2: read the transformed screenshot (captured at verify time, CSS still
+    // applied) from chrome.storage.local and save it to disk.
+    try {
+      const worker = context.serviceWorkers()[0];
+      if (worker) {
+        const shotData = await worker.evaluate(() => chrome.storage.local.get('webmorph_transformed_shot')) as Record<string, string>;
+        if (shotData?.webmorph_transformed_shot) {
+          const base64 = shotData.webmorph_transformed_shot.replace(/^data:image\/png;base64,/, '');
+          fs.writeFileSync(path.join(ARTIFACTS_DIR, `after_${site.name}_transformed.png`), Buffer.from(base64, 'base64'));
+          console.log(`  transformed screenshot saved: after_${site.name}_transformed.png`);
+        }
+        await worker.evaluate(() => chrome.storage.local.remove('webmorph_transformed_shot')).catch(() => {});
+      }
+    } catch { /* best effort */ }
 
     // Read result JSON from popup.
     const resultJson = await popup.$eval('#webmorph-result', (el) => el.textContent).catch(() => '');
@@ -923,6 +941,22 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
           console.log(`  checks: ${JSON.stringify(parsed.verify.checks)}`);
           console.log(`  coverage: ${result.coverageFraction.toFixed(3)} modelCov: ${result.modelCoverageFraction.toFixed(3)} change: ${result.changeScore.toFixed(3)}`);
         }
+        // S10.4: print placement info + grid-template-columns VERBATIM.
+        if (parsed.placement) {
+          const p = parsed.placement;
+          console.log(`  PLACEMENT placed=${p.placed} proxies=${p.proxies} subgrid=${p.subgridProxies} notPlaceable=${p.notPlaceable} mixed=${p.mixedProxies}`);
+          console.log(`  grid-template-columns: ${p.gridTemplate}`);
+        }
+        // S10.4: print verify details (column count before → after, layoutReshaped info).
+        if (parsed.verify?.details) {
+          const layoutDetail = parsed.verify.details.find((d: string) => d.includes('layoutReshaped='));
+          if (layoutDetail) console.log(`  VERIFY DETAIL: ${layoutDetail}`);
+        }
+        // S10.4: scrollWidth vs innerWidth.
+        try {
+          const sw = await page.evaluate(() => ({ scrollWidth: document.documentElement.scrollWidth, innerWidth: window.innerWidth }));
+          console.log(`  scrollWidth=${sw.scrollWidth} innerWidth=${sw.innerWidth} overflow=${sw.scrollWidth > sw.innerWidth + 4}`);
+        } catch { /* page may have closed */ }
         if (parsed.ledger) {
           const l = parsed.ledger;
           // Per-role ledger: roleCalls (architect/painter/critic) when present, else
@@ -938,6 +972,10 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
             const frac = typeof l.escapeHatchFraction === 'number' ? l.escapeHatchFraction : 0;
             console.log(`  ESCAPE-HATCH uses=${(l.escapeHatchUses ?? []).length} fraction=${(frac * 100).toFixed(0)}%${frac > 0.20 ? ' — >20% (PIVOT-FAILURE FLAG: model dodging the intent DSL)' : ''}`);
           }
+        }
+        // S10.4: print pixel audit summary from the in-transform pixel verify.
+        if (parsed.pixel) {
+          console.log(`  PIXEL AUDIT: voids=${parsed.pixel.voids ?? 0} invisible=${parsed.pixel.invisibleText ?? 0} squeeze=${parsed.pixel.squeeze ?? 0} captureFailed=${parsed.pixel.captureFailed ?? false} passed=${parsed.pixel.passed ?? false}`);
         }
         const conf = parsed.conformance;
         if (conf) {
@@ -1007,7 +1045,7 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
 
     // Log WebMorph console output for debugging failures.
     if (wmLogs.length) {
-      const relevant = wmLogs.filter((l) => l.includes('PAID') || l.includes('repair') || l.includes('FAILED') || l.includes('INCOMPLETE') || l.includes('dropLayout') || l.includes('rollback') || l.includes('keepBest') || l.includes('iter 0') || l.includes('collapsed') || l.includes('COLLAPSE') || l.includes('OVERFLOW') || l.includes('LEDGER') || l.includes('REFLOW') || l.includes('reflow') || l.includes('PHASE2') || l.includes('paint1') || l.includes('paint2') || l.includes('SHELL') || l.includes('POST-MOVE') || l.includes('POST-RAF') || l.includes('solver'));
+      const relevant = wmLogs.filter((l) => l.includes('PAID') || l.includes('repair') || l.includes('FAILED') || l.includes('INCOMPLETE') || l.includes('dropLayout') || l.includes('rollback') || l.includes('keepBest') || l.includes('iter 0') || l.includes('collapsed') || l.includes('COLLAPSE') || l.includes('OVERFLOW') || l.includes('LEDGER') || l.includes('REFLOW') || l.includes('reflow') || l.includes('PHASE2') || l.includes('paint1') || l.includes('paint2') || l.includes('SHELL') || l.includes('POST-MOVE') || l.includes('POST-RAF') || l.includes('solver') || l.includes('placement') || l.includes('grid-template'));
       if (relevant.length) console.log(`  logs: ${relevant.slice(0, 30).join(' | ')}`);
     }
 

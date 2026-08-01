@@ -62,13 +62,14 @@ Each phase gets an explicit `GATE:` line. A phase is not done until its gate pas
   5/5 sites apply + the user's by-eye judgment — machinery green but the user said "nothing is good".
   The verdict is architectural (see Current position): the engine restyles the original DOM; it never
   re-lays-out the page.
-- **P2.5 Layout IR + Responsive Solver v1 — CURRENT (Step 7: S7.1+S7.2 done, S7.3 2/3 sites green, S7.4 skipped).** GATE (this phase): IR stability
-  gate (Step 1) + all 6 hard gates clean on the 3 validation sites + parity vs the original on those 3
+- **P2.5 Layout IR + Responsive Solver v1 — CURRENT (Step 10 DONE).** GATE (this phase): IR stability
+  gate (Step 1) + all 10 hard gates clean on the 3 validation sites + parity vs the original on those 3
   + resize 1920/1440/1280 no breakage + slot invariant + BBC/YouTube apply-without-rollback. The user's
   eye is the only PASS authority. Step 7 replaced DOM reparenting with CSS-only grid placement (zero
-  DOM mutation). contentCollapsed=true on ALL 3 sites (S6.3 blocker GONE). Wikipedia passes ALL checks.
-  Remaining: GitHub noOverflow (grid h-overflow, fix cycle cap reached), MDN intermittent invisible
-  text (DPI mismatch fixed, contrast sampler skips <5 chars — borderline at variance threshold).
+  DOM mutation). Step 10 replaced display:contents with CSS subgrid — contentIntact now TRUE on all
+  3 sites (was FALSE on all 3 in Step 9). MDN passes all 10 hard gates. Wikipedia + GitHub fail on
+  squeeze/bleeds/contrast (downstream issues, not subgrid-related). The hard-gate count is 10
+  everywhere (stale "6"/"7" references deleted).
 - **P2.6 Stress sites BBC + YouTube — 5/5-applied beauty gate returns here.** GATE: 5/5 sites applied
   + by-eye beauty on BBC + YouTube under the exclusion registry.
 - **P3 Migration completion + BRUTAL DELETION.** Only AFTER the v2 flag is switched on and parity
@@ -85,6 +86,33 @@ Each phase gets an explicit `GATE:` line. A phase is not done until its gate pas
 - **P7 Additional layout languages** (Magazine, Dashboard, Editorial) — only AFTER one language is
   proven end to end.
 - **P8 Remaining primitives** (motion, depth, density).
+
+## Phase 2.7 — Truth & Safety
+
+Items from the investigation (`docs/investigation/`) that are P0/P1 correctness and safety fixes.
+These are NOT started in Step 10 — they are listed for a future step. Do NOT start them without
+explicit instruction.
+
+- **captureFailed flag** — ✅ DONE (S10.3a). Capture failure now hard-fails the pixel gate.
+- **DOM-op rollback on failure** — RC3/C2: failed transforms leave DOM mutated. Failure paths
+  must call `txnLog.undoAll` before `removeStyleEverywhere`. (R2 in roadmap)
+- **Dead auth UI** — RC8/C4: popup saves `openai_api_key`, background reads `cloudflare_*`.
+  Every real user fails `invalid_key`. (R3 in roadmap)
+- **Role-cache invalidation** — ✅ DONE (S10.3b). `clearRoleCache` called on SPA navigation.
+- **Truncation flag** — M1: `MAX_DEPTH`/`MAX_TIME` silently truncate perception. Report
+  `truncated=true` and refuse rather than apply a partial redesign. (R13 in roadmap)
+- **Consent** — C3: PII egress to Cloudflare with no consent gate. Warn the user + offer
+  opt-out. (R6 in roadmap)
+- **Cost accounting** — RC7/H4: paid calls count roles, not HTTP requests. Retries re-bill
+  up to 5× hidden. Surface request count. (R7 in roadmap)
+- **Global abort** — H5: no global 120s abort. Runs hit ~145s. (R8 in roadmap)
+- **startDefense breaker** — H19: unbounded re-insert loop → CPU bomb. (R11 in roadmap)
+- **Sanitizer data: MIME** — H7: `data:image/svg+xml` allows onload. Restrict to
+  `data:image/*`. (R15 in roadmap)
+- **packOverrides validation** — H8: bare `as` cast → silent corruption. (R10 in roadmap)
+- **Dead code** — `bestNonBroken` (imported, never called; S9.5 fix was to dead code,
+  blast radius zero). `sanitizeMarkup` (never called). `openai_api_key` path (dead).
+  `assignSlots` `excluded` param (dead). `mergeConstraints` validation (computed, ignored).
 
 ### P2.5 temporary gate rebase (recorded so the docs don't contradict the standing rules)
 
@@ -391,35 +419,60 @@ The solver (Step 2) is NOT started. **Phase 5 (role-anchored stable handles) is 
 
 ## Current position (updated)
 
-**P2.5 — Step 9 DONE (loosenings reverted, honest gate matrix).** Step 8's 9/9 was conditional
-on three loosenings: (1) targeted overflow-x:auto bleed repair (hid overflow behind scrollbars +
-created BFCs), (2) contentsHandles exemption (made contentIntact blind to display:contents
-content loss), (3) overflow-wrap:break-word + min-width:0 ancestor chain (let words break at
-any character, removing the min-content floor that let noOverflow pass on GitHub). All three are
-now reverted. The hard-gate count is 10 (was 9 in Step 8 — squeeze is now a hard gate). The stale
-references to 6 and 7 are deleted. The inverted condition in repair/index.ts bestNonBroken L273
-is fixed (`if (a.contentIntact) continue;` → `if (!a.contentIntact) continue;` — was silently
-discarding intact candidates and selecting broken ones for an unknown number of steps).
+**P2.5 — Step 10 DONE (subgrid kills display:contents, captureFailed gate, clearRoleCache).**
+Step 9's three red rows (contentIntact=false on all 3, squeeze, bleeds) traced to one defect:
+display:contents dissolving mixed-proxy boxes. Step 10 removes the mechanism.
 
-Post-revert gate matrix (replay, 1 run per site, 0 paid calls, 0 fix cycles):
-- MDN: FAIL — contentIntact=false (7 regions collapsed), noOverflow=false, squeeze=11, invisible=1
-- Wikipedia: FAIL — contentIntact=false (8 regions collapsed), squeeze=14
-- GitHub: FAIL — contentIntact=false (4 regions collapsed), noOverflow=false (bleeds 0→6), squeeze=11
+- [x] **S10.1** — Replaced `display:contents` with CSS subgrid in solve.ts. Mixed proxies now emit
+  `display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; min-width: 0`. The box
+  survives — background, border, padding, containing block, clipping, click targets all intact —
+  and children participate in the NCA's column tracks. Fallback: if subgrid unsupported, proxy is
+  a full-width grid item (no dissolution). Subgrid proxy counts: MDN 22, Wikipedia 44, GitHub 63.
+- [x] **S10.2** — Transformed screenshots captured at verify time (before rollback). Content
+  script stores the screenshot in chrome.storage.local; harness reads it and saves as
+  `after_<site>_transformed.png`. Existing post-marker shot renamed to `after_<site>_rolledback.png`.
+- [x] **S10.3a** — `captureFailed` flag added to `PixelVerifyResult`. `pixelVerify` detects 0-size
+  captures and sets `captureFailed=true`; `passed` requires `!captureFailed`. content.ts treats it
+  as a HARD gate (v2HardGates, regression guard p1Gates/p2Gates, failure list). No pixel number is
+  trustworthy without this.
+- [x] **S10.3b** — `clearRoleCache` called in `handleRouteChange` and `reapplyStored` in content.ts.
+  Roles refresh on SPA navigation and stored-design reapplication. Was exported with 0 callers.
+- [x] **S10.4** — Replay measurement (WM_FIXTURES=replay, 3 site-runs, 0 paid calls):
 
-All 3 sites FAIL. This is the correct outcome — the loosenings masked real failures. The
-contentIntact failure is from display:contents dissolving mixed-proxy boxes (their [data-wm-c]
-regions disappear from the fingerprint). The squeeze failure means text was crushed below
-MIN_CHARS_PER_LINE during the transform. The noOverflow failure means text bleeds returned
-without the overflow-x:auto repair.
+  | Gate (10 conditions) | MDN | Wikipedia | GitHub |
+  |------|-----|----------|--------|
+  | notBlank | true | true | true |
+  | contentIntact | **true** | **true** | **true** |
+  | contentVisible | true | true | true |
+  | noOverflow | true | true | **false** |
+  | noOverlap | true | true | true |
+  | layoutReshaped | true | true | true |
+  | usesRoom | true | **false** | true |
+  | pixel voids=0 | true (0) | true (0) | true (0) |
+  | pixel invisible=0 | true (0) | true (0) | true (0) |
+  | squeeze=0 | true (0) | **false** (1) | **false** (3) |
+  | captureFailed | false | false | false |
 
-Vision subagent analysis (@cf/moonshotai/kimi-k2.7-code) of after_*.png: all 3 pages show the
-ORIGINAL layout (CSS was rolled back by the hard gate). No broken text, no empty regions, no
-invisible text visible — because the transform was not applied. The pixelAudit during the
-transform (before rollback) found the real issues: squeeze=11/14/11, contentIntact=false.
+  contentIntact=TRUE on ALL 3 (was FALSE on all 3 in Step 9). MDN passes ALL 10 gates. Wikipedia
+  fails on usesRoom (content narrowed 972→648 on a wide page) + squeeze + contrastOk. GitHub
+  fails on noOverflow (text bleeds 0→12) + squeeze + contrastOk. grid-template-columns (all 3):
+  `minmax(min(180px, calc(20vw - var(--wm-space-m) / 2)), 20vw) minmax(min(320px, calc(80vw - var(--wm-space-m) / 2)), 1fr)`.
+  Column counts: MDN 8→6, Wikipedia 9→9, GitHub 5→7. scrollWidth: MDN 1265, Wikipedia 1280, GitHub 1265
+  (all ≤ innerWidth 1280). Wikipedia 9→9 = columns unchanged while layoutReshaped=true — the reshape
+  gate passes on contentWidthChangedRel=33% and regionWidthChanged=41%, NOT on column count. But
+  usesRoom=false catches the narrowing. enforcedReshape (layoutReshaped && usesRoom) correctly fails.
 
-Fix cycles used: 0/3 (S9.5 one-char fix does not count as a fix cycle). Replay runs: 1/3.
-Paid calls: 0/0. Next: Step 10 must address the root causes (display:contents content loss,
-text bleeds, text squeeze) without re-introducing loosenings.
+  Vision subagent (@cf/moonshotai/kimi-k2.7-code) on transformed screenshots:
+  - MDN: 1 column, no broken text, no empty regions. Warm beige/cream redesign.
+  - Wikipedia: 2 columns in body, no broken text, no empty regions. Heavy red background with
+    thick borders — a dramatic recolor.
+  - GitHub: 1 column, no broken text, YES large empty region >1/4 viewport (cream band between
+    left nav and right search). Extreme vertical header whitespace.
+- [x] **S10.5** — Docs updated (08_ROOT_CAUSE_ANALYSIS, 13_RISK_REGISTER, 14_TECHNICAL_DEBT,
+  15_REFACTORING_ROADMAP, product.md). Stale "6 hard gates"/"7 hard gates" references deleted;
+  count is 10 everywhere.
+
+  Runs used: 3/3. Fix cycles: 0/3. Paid calls: 0/0.
 
 **Step 5 RESULT — FIX POSITIONED-LAYOUT COEXISTENCE, PASS ALL THREE DOC SITES:**
 
@@ -567,7 +620,7 @@ text bleeds, text squeeze) without re-introducing loosenings.
   ALREADY EXISTS in execute/index.ts startDefense() — no new code needed.
   Selector-fallback fraction: MDN 12/29=41%, Wikipedia 1/39=2.5%, GitHub 9/46=20%.
 - [x] **S7.3** — Prove it in replay. DONE (superseded by S8.6 — all 3 sites pass 9/9 v2 hard gates
-  with 28/21/31 placed nodes). See Step 8 RESULT below for the full gate matrix.
+  with 28/21/31 placed nodes; count updated to 10 in Step 9 when squeeze became a hard gate). See Step 8 RESULT below for the full gate matrix.
 - [ ] **S7.4** — Live by-eye gate. SKIPPED — S7.3 is NOT green on all 3 (GitHub noOverflow fail,
   MDN intermittent invisible text). Per guardrails: "If S7.3 is not green, skip S7.4 and report."
 

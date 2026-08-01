@@ -10,7 +10,7 @@
  * persistence (origin + normalized pathname).
  */
 
-import { perceive, serializePerception, serializePainterPerception, serializeV2Painter, clearHandles, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
+import { perceive, serializePerception, serializePainterPerception, serializeV2Painter, clearHandles, clearRoleCache, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
 import { compileSpec, deriveBaseTone, type CompileOptions } from '@/core/compile';
 import { expandIntents } from '@/core/compile/expand.ts';
 import { sanitizeCss } from '@/core/sanitize';
@@ -79,7 +79,9 @@ export interface TransformOutcome {
   reasoning?: string;
   spec?: DesignSpec;
   verify?: VerifyResult;
-  pixel?: { passed: boolean; voids: number; invisibleText: number; squeeze: number };
+  pixel?: { passed: boolean; voids: number; invisibleText: number; squeeze: number; captureFailed?: boolean };
+  /** S10.4: placement diagnostics for the report. */
+  placement?: { placed: number; proxies: number; subgridProxies: number; notPlaceable: number; gridTemplate: string; mixedProxies: number };
   /** Phase-1: the per-failure-class breakdown of SURVIVING invisible-text clusters
    *  (still invisible after the final paint). null when none survived. Each record
    *  names the root-cause class {no-handle, wrong-bg, cascade-loss, multi-bg} + the
@@ -549,9 +551,10 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     // Solver (free): placement data + grid template. S7.1: CSS-only, no DOM mutation.
     const v2SolveResult = solve({ ir: v2IR, assignment: v2Assignment, excluded: v2ExcludedSet });
     const v2Placement = computeGridPlacementCss(v2SolveResult);
-    logDebug(`v2 solver: ${v2SolveResult.matchedTargets} matched, ${v2Placement.nodesPlaced} placed (proxies=${v2Placement.proxyCount}), ${v2Placement.nodesNotPlaceable.length} not placeable, ${v2Placement.intermediatesCollapsed} display:contents (mixed=${v2Placement.mixedProxies}), selectorFallback=${v2Placement.selectorFallback} (nca=${v2Placement.selectorFallbackNca} proxy=${v2Placement.selectorFallbackProxy} contents=${v2Placement.selectorFallbackContents} perNode=${v2Placement.selectorFallbackPerNode}), ${v2SolveResult.rulesEmitted} CSS rules`);
+    logDebug(`v2 solver: ${v2SolveResult.matchedTargets} matched, ${v2Placement.nodesPlaced} placed (proxies=${v2Placement.proxyCount}), ${v2Placement.nodesNotPlaceable.length} not placeable, ${v2Placement.intermediatesCollapsed} mixed-proxy (${v2Placement.subgridProxies} subgrid, mixed=${v2Placement.mixedProxies}), selectorFallback=${v2Placement.selectorFallback} (nca=${v2Placement.selectorFallbackNca} proxy=${v2Placement.selectorFallbackProxy} contents=${v2Placement.selectorFallbackContents} perNode=${v2Placement.selectorFallbackPerNode}), ${v2SolveResult.rulesEmitted} CSS rules`);
     logDebug(`v2 placement diag: ${v2Placement.diagnostics}`);
-    if (v2Placement.skippedReasons.length) logDebug(`v2 display:contents skips: ${v2Placement.skippedReasons.slice(0, 10).join('; ')}`);
+    logDebug(`v2 grid-template-columns: ${v2Placement.gridTemplateColumns}`);
+    if (v2Placement.skippedReasons.length) logDebug(`v2 subgrid skips: ${v2Placement.skippedReasons.slice(0, 10).join('; ')}`);
 
     // Compile aesthetic CSS from the Painter's spec.
     let v2Options: CompileOptions = { paletteMode: v2Spec.paletteMode };
@@ -643,12 +646,14 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
           v2Paint1Verify.checks.contentVisible && v2Paint1Verify.checks.noOverflow &&
           v2Paint1Verify.checks.noOverlap && v2Paint1Verify.checks.layoutReshaped &&
           v2Paint1Verify.checks.usesRoom && v2Paint1Pixel.voids.length === 0 &&
-          v2Paint1Pixel.invisibleText.length === 0 && v2Paint1Pixel.squeeze.length === 0;
+          v2Paint1Pixel.invisibleText.length === 0 && v2Paint1Pixel.squeeze.length === 0 &&
+          !v2Paint1Pixel.captureFailed;
         const p2Gates = v2Verify.checks.notBlank && v2Verify.checks.contentIntact &&
           v2Verify.checks.contentVisible && v2Verify.checks.noOverflow &&
           v2Verify.checks.noOverlap && v2Verify.checks.layoutReshaped &&
           v2Verify.checks.usesRoom && v2Pixel.voids.length === 0 &&
-          v2Pixel.invisibleText.length === 0 && v2Pixel.squeeze.length === 0;
+          v2Pixel.invisibleText.length === 0 && v2Pixel.squeeze.length === 0 &&
+          !v2Pixel.captureFailed;
         if (p1Gates && !p2Gates) {
           logDebug(`v2 repair REGRESSION — paint1 hard gates passed, paint2 failed. Reverting to paint1.`);
           v2CombinedCss = v2Paint1Css;
@@ -662,28 +667,43 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     }
     const v2VerifyMsTotal = Math.round(performance.now() - v2VerifyMs);
 
+    // S10.2: capture the transformed frame at verify time (CSS still applied).
+    // Stored in chrome.storage.local for the harness to read and save to disk.
+    // This is the ONLY screenshot that shows the transformed state — the post-
+    // marker screenshot is taken after rollback (CSS gone) on hard-gate failure.
+    try {
+      await new Promise<void>((resolve) => {
+        chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, (resp: { ok: boolean; dataUrl?: string }) => {
+          if (chrome.runtime.lastError || !resp?.ok || !resp.dataUrl) { resolve(); return; }
+          chrome.storage.local.set({ webmorph_transformed_shot: resp.dataUrl }, () => resolve());
+        });
+      });
+    } catch { /* best effort — don't block the gate */ }
+
     // S4.3: HARD GATES (the final check, AFTER repair). These FAIL the run and
     // roll back: overflow, hidden content, horizontal scrolling, element overlap.
     // S8.2: enforcedReshape (layoutReshaped && usesRoom) is now a HARD gate with
     // rollback — a recolor/reskin can no longer report green. movedAlive is N/A
     // for v2 (zero moves → vacuously true) so it is NOT in the hard gate expression.
     // S9.4: squeeze is now a HARD gate — text crushed below MIN_CHARS_PER_LINE fails.
+    // S10.3a: captureFailed is a HARD gate — a broken capture can't report PASS.
     const v2HardGates = v2Verify.checks.notBlank && v2Verify.checks.contentIntact &&
       v2Verify.checks.contentVisible && v2Verify.checks.noOverflow && v2Verify.checks.noOverlap &&
       v2Verify.checks.layoutReshaped && v2Verify.checks.usesRoom &&
       v2Pixel.voids.length === 0 && v2Pixel.invisibleText.length === 0 &&
-      v2Pixel.squeeze.length === 0;
+      v2Pixel.squeeze.length === 0 && !v2Pixel.captureFailed;
     if (!v2HardGates) {
       const failures = [
         ...Object.entries(v2Verify.checks).filter(([, v]) => !v).map(([k]) => k),
         ...(v2Pixel.voids.length ? v2Pixel.voids.map((h) => 'void:' + h) : []),
         ...(v2Pixel.invisibleText.length ? v2Pixel.invisibleText.map((h) => 'invis:' + h) : []),
         ...(v2Pixel.squeeze.length ? v2Pixel.squeeze.map((h) => 'squeeze:' + h) : []),
+        ...(v2Pixel.captureFailed ? ['captureFailed'] : []),
       ].join(', ');
       removeStyleEverywhere(activeShadowRoots);
       markFailed('v2 hard gate: ' + failures);
       logDebug(`v2 ROLLBACK — hard gate: ${failures}`);
-      return { ok: false, message: 'v2 hard gate: ' + failures, spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
+      return { ok: false, message: 'v2 hard gate: ' + failures, spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0, placement: { placed: v2Placement.nodesPlaced, proxies: v2Placement.proxyCount, subgridProxies: v2Placement.subgridProxies, notPlaceable: v2Placement.nodesNotPlaceable.length, gridTemplate: v2Placement.gridTemplateColumns, mixedProxies: v2Placement.mixedProxies } };
     }
     // Persist + defend + mark applied.
     const v2Key = storageKey();
@@ -702,19 +722,20 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
 
     const v2TotalMs = Date.now() - t0;
     const v2ModelMs = roleCalls.reduce((s, c) => s + c.ms, 0);
-    logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] verify=${v2VerifyMsTotal}ms total=${v2TotalMs}ms paidCalls=${paidCalls()} placed=${v2Placement.nodesPlaced} collapsed=${v2Placement.intermediatesCollapsed} notPlaceable=${v2Placement.nodesNotPlaceable.length} selectorFallback=${v2Placement.selectorFallback} paints=${v2PaintCount}`);
+    logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] verify=${v2VerifyMsTotal}ms total=${v2TotalMs}ms paidCalls=${paidCalls()} placed=${v2Placement.nodesPlaced} subgrid=${v2Placement.subgridProxies} notPlaceable=${v2Placement.nodesNotPlaceable.length} selectorFallback=${v2Placement.selectorFallback} paints=${v2PaintCount}`);
 
     return {
       ok: true, spec: v2Spec, verify: v2Verify,
-      pixel: { passed: v2Pixel.passed, voids: v2Pixel.voids.length, invisibleText: v2Pixel.invisibleText.length, squeeze: v2Pixel.squeeze.length },
+      pixel: { passed: v2Pixel.passed, voids: v2Pixel.voids.length, invisibleText: v2Pixel.invisibleText.length, squeeze: v2Pixel.squeeze.length, captureFailed: v2Pixel.captureFailed },
       invisibleBreakdown: v2Breakdown,
       changeScore: v2Verify.changeScore,
       modelCoverageFraction: v2Verify.modelCoverageFraction,
       paidCalls: paidCalls(), wallMs: v2TotalMs, paintCount: v2PaintCount,
       clusters: perception.clusters.length,
+      placement: { placed: v2Placement.nodesPlaced, proxies: v2Placement.proxyCount, subgridProxies: v2Placement.subgridProxies, notPlaceable: v2Placement.nodesNotPlaceable.length, gridTemplate: v2Placement.gridTemplateColumns, mixedProxies: v2Placement.mixedProxies },
       usage: roleCalls.length ? { total: roleCalls.reduce((s, c) => s + (c.promptTokens ?? 0) + (c.completionTokens ?? 0), 0) } : undefined,
       ledger: {
-        perceiveMs: perception.builtInMs, serializeChars: v2Serialized.length, roleCalls,
+        perceiveMs: perception.builtInMs, serializeChars: v2Serialized.length, serializeCharsBefore: lastSerializeBudget.before, roleCalls,
         compileMs: 0, applyMs: Math.round(performance.now() - v2ApplyMs), verifyMs: v2VerifyMsTotal,
         pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: v2TotalMs,
         paidCalls: paidCalls(), repairRounds: v2PaintCount - 1, paintCount: v2PaintCount,
@@ -1159,6 +1180,7 @@ async function reapplyStored(): Promise<boolean> {
     if (!state.style) return false;
   }
   if (!state.enabled || !state.style?.css) return false;
+  clearRoleCache();  // S10.3b: invalidate stale roles from the previous route
   clearHandles();
   let perception = perceive();
   activeShadowRoots = perception.shadowRoots;
@@ -1329,6 +1351,7 @@ function onRouteChange(): void {
 
 async function handleRouteChange(): Promise<void> {
   if (inFlight) return; // a transform is running — it will handle the current page
+  clearRoleCache();  // S10.3b: invalidate stale roles on SPA navigation
   stopDynamicDefense();
   activeSpec = null;
   removeStyleEverywhere(activeShadowRoots);

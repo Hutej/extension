@@ -91,7 +91,7 @@ export interface SolveResult {
 
 /** Result of the DOM-grounded CSS emission. */
 export interface PlacementResult {
-  /** Combined structural CSS (fluid tokens + grid + display:contents + grid-column + per-node). */
+  /** Combined structural CSS (fluid tokens + grid + subgrid + grid-column + per-node). */
   css: string;
   /** Total selector fallbacks (sum of the four split counters, for backward compat). */
   selectorFallback: number;
@@ -109,6 +109,10 @@ export interface PlacementResult {
   nodesNotPlaceable: string[];
   /** Number of mixed proxies collapsed with display:contents (the only display:contents use). */
   intermediatesCollapsed: number;
+  /** S10.1: count of mixed proxies emitted with subgrid (replaces display:contents). */
+  subgridProxies: number;
+  /** S10.1: the emitted grid-template-columns string (for logging/verification). */
+  gridTemplateColumns: string;
   /** Always 0 with the proxy algorithm (no intermediate chain collapse). */
   intermediatesSkipped: number;
   /** Reason each proxy was rejected (unused with proxy algorithm; kept for compat). */
@@ -338,9 +342,9 @@ function slotPriority(slotId: string): number {
  *  NCA's direct child that is an ancestor-or-self of the handle. We place the
  *  PROXY with grid-column — its background, border and padding are preserved,
  *  nothing is collapsed. A proxy whose subtree spans >1 non-overflow slot is
- *  "mixed": it gets display:contents and its children are recursed. That is
- *  the ONLY use of display:contents. Two handles sharing a proxy: keep one,
- *  it takes the highest-priority slot (SLOT_PRIORITY — no randomness).
+ *  "mixed": it gets subgrid (S10.1, replacing display:contents) and its children
+ *  are recursed. That is the ONLY use of subgrid. Two handles sharing a proxy:
+ *  keep one, it takes the highest-priority slot (SLOT_PRIORITY — no randomness).
  *
  *  S8.3 — template from ACTUALLY placed proxies (not the intended set).
  *  min-width:0 propagated up the NCA ancestor chain to body. min-height:100vh
@@ -365,7 +369,8 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     css, selectorFallback: 0, selectorFallbackNca: 0, selectorFallbackProxy: 0,
     selectorFallbackContents: 0, selectorFallbackPerNode: 0,
     nodesPlaced: 0, nodesNotPlaceable: [...nodesNotPlaceable],
-    intermediatesCollapsed: 0, intermediatesSkipped: 0, skippedReasons: [],
+    intermediatesCollapsed: 0, subgridProxies: 0, gridTemplateColumns: '',
+    intermediatesSkipped: 0, skippedReasons: [],
     mixedProxies: 0, proxyCount: 0, diagnostics: '(empty)',
   });
 
@@ -411,7 +416,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
 
   // e. S8.1: BFS proxy placement. Level 0 = NCA's direct children containing placed handles.
   //     Non-mixed proxy (≤1 non-overflow slot) → place with grid-column.
-  //     Mixed proxy (>1 non-overflow slot) → display:contents + recurse on children.
+  //     Mixed proxy (>1 non-overflow slot) → subgrid (S10.1) + recurse on children.
   //     Non-handle children (no placed handle in subtree) get grid-column: 1/-1 so they
   //     don't auto-place into a narrow side track and squeeze content.
   const placedProxies = new Map<HTMLElement, string>();  // proxy el → assigned slotId
@@ -444,11 +449,11 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
         }
         placedProxies.set(candidate, slotId);
       } else {
-        // Mixed — display:contents + recurse on children. The proxy's box is
-        // dissolved so its children become grid items. If the proxy carries a
-        // [data-wm-c] handle, that handle's region collapses (box gone) — the
-        // caller exempts these handles from the contentIntact check (the content
-        // is still visible in the children, now grid items).
+        // Mixed — subgrid (S10.1) + recurse on children. The proxy's box
+        // survives (subgrid preserves bg/border/padding/containing block/clipping).
+        // Children participate in the NCA's column tracks via the inherited
+        // subgrid template. If the proxy carries a [data-wm-c] handle, its
+        // region is NOT collapsed (unlike the old display:contents).
         contentsEls.push(candidate);
         mixedProxies++;
         for (const child of candidate.children) {
@@ -501,7 +506,16 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   if (ncaIsFlexGridItem) ncaDecls.push('max-width: 100%');
   blocks.push(`${ncaCssSelector} {\n${ncaDecls.map((d) => `  ${d};`).join('\n')}\n}`);
 
-  // i. Emit display:contents on mixed proxies (the ONLY use of display:contents).
+  // S10.1: subgrid support check. Chrome 117+ supports subgrid (this is an MV3
+  // Chrome extension — no fallback needed in practice). If not supported, the
+  // proxy is placed as a full-width grid item WITHOUT dissolving its box.
+  const subgridSupported = typeof CSS !== 'undefined' && CSS.supports('grid-template-columns', 'subgrid');
+  let subgridProxies = 0;
+
+  // i. S10.1: emit subgrid on mixed proxies (replaces display:contents). The box
+  //    survives — background, border, padding, containing block, clipping and click
+  //    targets all intact — and children participate in the NCA's column tracks.
+  //    Fallback: grid-column: 1 / -1 (full-width grid item, no dissolution).
   for (const el of contentsEls) {
     const sel = buildSelector(el);
     let cssSelector: string;
@@ -512,7 +526,12 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
       cssSelector = `[data-wm-grid="c${intermediatesCollapsed}"]`;
       selectorFallbackContents++;
     }
-    blocks.push(`${cssSelector} {\n  display: contents;\n}`);
+    if (subgridSupported) {
+      blocks.push(`${cssSelector} {\n  display: grid;\n  grid-template-columns: subgrid;\n  grid-column: 1 / -1;\n  min-width: 0;\n}`);
+      subgridProxies++;
+    } else {
+      blocks.push(`${cssSelector} {\n  grid-column: 1 / -1;\n}`);
+    }
     intermediatesCollapsed++;
   }
 
@@ -575,12 +594,13 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   // construction — the BFS always terminates at the handle's non-mixed element).
   // matched = nodesPlaced + nodesNotPlaceable.length, exactly.
   const proxySummary = [...placedProxies.entries()].map(([el, s]) => `${el.tagName.toLowerCase()}→${s}`).join(', ');
-  const diagnostics = `NCA=${nca.tagName.toLowerCase()} proxies=[${proxySummary}] mixed=${mixedProxies} fullWidth=${fullWidthEls.length} template=${gridTemplate}`;
+  const diagnostics = `NCA=${nca.tagName.toLowerCase()} proxies=[${proxySummary}] mixed=${mixedProxies} subgrid=${subgridProxies} fullWidth=${fullWidthEls.length} template=${gridTemplate}`;
   return {
     css, selectorFallback, selectorFallbackNca, selectorFallbackProxy,
     selectorFallbackContents, selectorFallbackPerNode,
     nodesPlaced: handleData.length, nodesNotPlaceable,
-    intermediatesCollapsed, intermediatesSkipped: 0, skippedReasons,
+    intermediatesCollapsed, subgridProxies, gridTemplateColumns: gridTemplate,
+    intermediatesSkipped: 0, skippedReasons,
     mixedProxies, proxyCount: placedProxies.size, diagnostics,
   };
 }
