@@ -18,7 +18,7 @@
 ## Doc drift
 - **`solve.ts:23`** claims "data-wm-c is a DEBUG label only; nothing in emitted CSS depends on it" — **false for v1** (100% of v1 CSS is keyed on `data-wm-c`, `perceive:503`).
 - **`expand.ts:104`** comment says 5-char handles; code uses 6 (`:108`, `spec:510`).
-- **`ARCHITECTURE.md`** says hard gates = 6; `verify/index.ts` exposes 13 booleans; v2 uses 10 (`v2HardGates` since S9.4 added squeeze + S10.3a added captureFailed); the count was 6/7/9/10 across docs — now reconciled to 10 everywhere (S10.5).
+- **`ARCHITECTURE.md`** says hard gates = 6; `verify/index.ts` exposes 13 booleans; v2 uses 11 (`v2HardGates` since S9.4 added squeeze, S10.3a added captureFailed, S11.3 added planHonoured); the count was 6/7/9/10/11 across docs — now reconciled to 11 everywhere (S11.7).
 - **`--wm-step-1`** deleted token referenced in docs.
 - **`ir.ts` field comment** says `sourceOrder` is "DOM document-order index" — it is prominence order (`perceive:515`).
 

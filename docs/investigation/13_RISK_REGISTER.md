@@ -37,6 +37,8 @@
 | H18 | `deepFreeze` doesn't freeze Maps → immutability contract runtime-false | `ir:211-214` | 5 | 2 | P3 |
 | H19 | `startDefense` no circuit breaker → CPU bomb on style-stripping site | `execute:62` | 3 | 4 | P1 |
 | H20 | `verifyStyle` layout thrashing (8-10 scans + 3 reflows, runs 2-3×) | `verify:79` | 5 | 3 | P2 |
+| H21 | Void detector blind to inter-cluster regions — `detectVoids` only checks named `ClusterRect[]`; a large empty band BETWEEN clusters (GitHub's cream gap) has no rect and scores voids=0 | `pixel:85` → S11.5: `detectPageVoids` added (full-capture scan for flat regions >¼ viewport) | 4 | 3 | ~~P2~~ DONE |
+| H22 | `layoutReshaped` is a relayout proxy, not a truth — went green on a one-column MDN page (width deltas alone) | `verify:199` → S11.4: demoted to advisory; `planHonoured` (S11.3) replaces it as the structural-reshape gate | 4 | 3 | ~~P2~~ DONE |
 
 ## Medium
 

@@ -89,6 +89,16 @@ export interface SolveResult {
   droppedOptionals: { handle: string; kind: string; reason: string }[];
 }
 
+/** S11.3: the solver's emit-time plan — what the CSS intends, asserted at verify time. */
+export interface SolverPlan {
+  /** Number of grid tracks (1 or 2). */
+  trackCount: number;
+  /** Slot ID → grid-column-start (1 for side/full, 2 for content). */
+  slotToTrack: Record<string, number>;
+  /** Intended distinct column count (=== trackCount when both tracks have proxies). */
+  expectedColumns: number;
+}
+
 /** Result of the DOM-grounded CSS emission. */
 export interface PlacementResult {
   /** Combined structural CSS (fluid tokens + grid + subgrid + grid-column + per-node). */
@@ -111,8 +121,14 @@ export interface PlacementResult {
   intermediatesCollapsed: number;
   /** S10.1: count of mixed proxies emitted with subgrid (replaces display:contents). */
   subgridProxies: number;
+  /** S11.1: count of multi-slot proxies placed as single-track grid items (not earning subgrid). */
+  singleTrackProxies: number;
+  /** S11.2: total children of subgrid proxies that received explicit grid-column. */
+  subgridChildAssignments: number;
   /** S10.1: the emitted grid-template-columns string (for logging/verification). */
   gridTemplateColumns: string;
+  /** S11.3: the solver's emit-time plan (asserted at verify time). */
+  plan: SolverPlan;
   /** Always 0 with the proxy algorithm (no intermediate chain collapse). */
   intermediatesSkipped: number;
   /** Reason each proxy was rejected (unused with proxy algorithm; kept for compat). */
@@ -369,7 +385,9 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     css, selectorFallback: 0, selectorFallbackNca: 0, selectorFallbackProxy: 0,
     selectorFallbackContents: 0, selectorFallbackPerNode: 0,
     nodesPlaced: 0, nodesNotPlaceable: [...nodesNotPlaceable],
-    intermediatesCollapsed: 0, subgridProxies: 0, gridTemplateColumns: '',
+    intermediatesCollapsed: 0, subgridProxies: 0, singleTrackProxies: 0,
+    subgridChildAssignments: 0, gridTemplateColumns: '',
+    plan: { trackCount: 0, slotToTrack: {}, expectedColumns: 0 },
     intermediatesSkipped: 0, skippedReasons: [],
     mixedProxies: 0, proxyCount: 0, diagnostics: '(empty)',
   });
@@ -414,13 +432,31 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     return slots;
   };
 
+  // S11.1: a proxy earns subgrid ONLY if its descendants span both a side-track
+  // slot AND a content slot (two different slot KINDS, not just two slot IDs).
+  // A proxy spanning two content slots (e.g. main + comments) does NOT earn
+  // subgrid — it goes to a single track. This stops track inheritance.
+  const slotById = new Map<string, SlotDef>();
+  for (const s of DOCUMENTATION_SLOTS) slotById.set(s.id, s);
+  const earnsSubgrid = (slots: Set<string>): boolean => {
+    let hasSide = false, hasContent = false;
+    for (const s of slots) {
+      const pw = slotById.get(s)?.preferredWidth;
+      if (pw === 'side') hasSide = true;
+      if (pw === 'content') hasContent = true;
+    }
+    return hasSide && hasContent;
+  };
+
   // e. S8.1: BFS proxy placement. Level 0 = NCA's direct children containing placed handles.
   //     Non-mixed proxy (≤1 non-overflow slot) → place with grid-column.
   //     Mixed proxy (>1 non-overflow slot) → subgrid (S10.1) + recurse on children.
   //     Non-handle children (no placed handle in subtree) get grid-column: 1/-1 so they
   //     don't auto-place into a narrow side track and squeeze content.
+  let singleTrackProxies = 0;
+  let subgridChildAssignments = 0;
   const placedProxies = new Map<HTMLElement, string>();  // proxy el → assigned slotId
-  const contentsEls: HTMLElement[] = [];  // mixed proxies that get display:contents
+  const contentsEls: HTMLElement[] = [];  // earned-subgrid proxies (S11.1)
   const fullWidthEls: HTMLElement[] = [];  // non-handle grid items → full width
   const seenEls = new Set<HTMLElement>();  // dedup across BFS levels
 
@@ -440,30 +476,31 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     for (const candidate of currentLevel) {
       if (placedProxies.has(candidate) || contentsEls.includes(candidate)) continue;
       const slots = nonOverflowSlotsUnder(candidate);
-      if (slots.size <= 1) {
-        // Not mixed — place this proxy. Assign the highest-priority non-overflow slot
-        // (deterministic; "keep one" when multiple handles share this proxy).
+      if (!earnsSubgrid(slots)) {
+        // S11.1: does NOT earn subgrid — place as a single-track grid item.
+        // Assign the highest-priority non-overflow slot (deterministic; "keep one"
+        // when multiple handles share this proxy). Multi-slot proxies that don't
+        // span side+content (e.g. two content slots) go here — no track inheritance.
         let slotId = 'overflow';
         for (const s of slots) {
           if (slotId === 'overflow' || slotPriority(s) < slotPriority(slotId)) slotId = s;
         }
         placedProxies.set(candidate, slotId);
+        if (slots.size > 1) singleTrackProxies++;
       } else {
-        // Mixed — subgrid (S10.1) + recurse on children. The proxy's box
-        // survives (subgrid preserves bg/border/padding/containing block/clipping).
-        // Children participate in the NCA's column tracks via the inherited
-        // subgrid template. If the proxy carries a [data-wm-c] handle, its
-        // region is NOT collapsed (unlike the old display:contents).
+        // S11.1: EARNS subgrid — spans both a side track and a content track.
+        // S11.2: every child gets explicit grid-column (derived from its slot).
         contentsEls.push(candidate);
         mixedProxies++;
         for (const child of candidate.children) {
           if (!(child instanceof HTMLElement)) continue;
           if (seenEls.has(child)) continue;
           seenEls.add(child);
+          subgridChildAssignments++;
           if (handleData.some((hd) => child === hd.el || child.contains(hd.el))) {
             nextLevel.push(child);
           } else {
-            fullWidthEls.push(child);  // no placed handles → full width
+            fullWidthEls.push(child);  // no placed handles → full width (1/-1)
           }
         }
       }
@@ -472,8 +509,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   }
 
   // f. S8.3: compute grid-template-columns from the ACTUALLY placed proxies.
-  const slotById = new Map<string, SlotDef>();
-  for (const s of DOCUMENTATION_SLOTS) slotById.set(s.id, s);
+  // (slotById was constructed before the BFS — S11.1.)
   const placedSlots = new Set<string>();
   for (const slotId of placedProxies.values()) placedSlots.add(slotId);
   const hasSide = [...placedSlots].some((id) => slotById.get(id)?.preferredWidth === 'side');
@@ -553,11 +589,13 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   }
 
   // j. Emit grid-column on placed proxies. The proxy's box (bg/border/padding) is preserved.
+  // S11.3: stamp each placed proxy with data-wm-plan-slot for the plan assertion.
   for (const [el, slotId] of placedProxies) {
     const slot = slotById.get(slotId);
     const pw = slot?.preferredWidth ?? 'full';
     const gridColumn = (pw === 'full' || !hasSide) ? '1 / -1'
       : pw === 'side' ? '1' : '2';
+    el.setAttribute('data-wm-plan-slot', slotId);
     const sel = buildSelector(el);
     let cssSelector: string;
     if (sel && selectorIsUnique(sel, el)) {
@@ -590,16 +628,31 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
 
   const selectorFallback = selectorFallbackNca + selectorFallbackProxy + selectorFallbackContents + selectorFallbackPerNode;
   const css = blocks.join('\n\n');
+
+  // S11.3: build the emit-time plan — what the CSS INTENDS, asserted at verify time.
+  const trackCount = hasSide ? 2 : 1;
+  const slotToTrack: Record<string, number> = {};
+  for (const slotId of placedSlots) {
+    const pw = slotById.get(slotId)?.preferredWidth ?? 'full';
+    slotToTrack[slotId] = (pw === 'content' && hasSide) ? 2 : 1;
+  }
+  // expectedColumns = number of tracks that actually have placed proxies.
+  const track1Used = Object.values(slotToTrack).includes(1);
+  const track2Used = Object.values(slotToTrack).includes(2);
+  const expectedColumns = (track1Used ? 1 : 0) + (track2Used ? 1 : 0) || 1;
+  const plan: SolverPlan = { trackCount, slotToTrack, expectedColumns };
+
   // S8.5: nodesPlaced = handles placed (every found handle gets a proxy by
   // construction — the BFS always terminates at the handle's non-mixed element).
   // matched = nodesPlaced + nodesNotPlaceable.length, exactly.
   const proxySummary = [...placedProxies.entries()].map(([el, s]) => `${el.tagName.toLowerCase()}→${s}`).join(', ');
-  const diagnostics = `NCA=${nca.tagName.toLowerCase()} proxies=[${proxySummary}] mixed=${mixedProxies} subgrid=${subgridProxies} fullWidth=${fullWidthEls.length} template=${gridTemplate}`;
+  const diagnostics = `NCA=${nca.tagName.toLowerCase()} proxies=[${proxySummary}] mixed=${mixedProxies} subgrid=${subgridProxies} singleTrack=${singleTrackProxies} childAssign=${subgridChildAssignments} fullWidth=${fullWidthEls.length} template=${gridTemplate} planCols=${expectedColumns}`;
   return {
     css, selectorFallback, selectorFallbackNca, selectorFallbackProxy,
     selectorFallbackContents, selectorFallbackPerNode,
     nodesPlaced: handleData.length, nodesNotPlaceable,
-    intermediatesCollapsed, subgridProxies, gridTemplateColumns: gridTemplate,
+    intermediatesCollapsed, subgridProxies, singleTrackProxies,
+    subgridChildAssignments, gridTemplateColumns: gridTemplate, plan,
     intermediatesSkipped: 0, skippedReasons,
     mixedProxies, proxyCount: placedProxies.size, diagnostics,
   };

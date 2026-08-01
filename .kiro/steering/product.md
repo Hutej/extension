@@ -62,14 +62,15 @@ Each phase gets an explicit `GATE:` line. A phase is not done until its gate pas
   5/5 sites apply + the user's by-eye judgment — machinery green but the user said "nothing is good".
   The verdict is architectural (see Current position): the engine restyles the original DOM; it never
   re-lays-out the page.
-- **P2.5 Layout IR + Responsive Solver v1 — CURRENT (Step 10 DONE).** GATE (this phase): IR stability
-  gate (Step 1) + all 10 hard gates clean on the 3 validation sites + parity vs the original on those 3
+- **P2.5 Layout IR + Responsive Solver v1 — CURRENT (Step 11 IN PROGRESS).** GATE (this phase): IR stability
+  gate (Step 1) + all 11 hard gates clean on the 3 validation sites + parity vs the original on those 3
   + resize 1920/1440/1280 no breakage + slot invariant + BBC/YouTube apply-without-rollback. The user's
   eye is the only PASS authority. Step 7 replaced DOM reparenting with CSS-only grid placement (zero
-  DOM mutation). Step 10 replaced display:contents with CSS subgrid — contentIntact now TRUE on all
-  3 sites (was FALSE on all 3 in Step 9). MDN passes all 10 hard gates. Wikipedia + GitHub fail on
-  squeeze/bleeds/contrast (downstream issues, not subgrid-related). The hard-gate count is 10
-  everywhere (stale "6"/"7" references deleted).
+  DOM mutation). Step 10 replaced display:contents with CSS subgrid — contentIntact TRUE on all 3.
+  Step 11 stops track inheritance (subgrid only where earned), adds planHonoured (emit-time assertion),
+  demotes layoutReshaped to advisory, and fixes the void detector's inter-cluster blindness. Standing:
+  0/3 sites clean (MDN passes all 11 gates but renders as 1 visual column by eye — design quality is
+  the user's eye, not the gate's). The hard-gate count is 11 everywhere.
 - **P2.6 Stress sites BBC + YouTube — 5/5-applied beauty gate returns here.** GATE: 5/5 sites applied
   + by-eye beauty on BBC + YouTube under the exclusion registry.
 - **P3 Migration completion + BRUTAL DELETION.** Only AFTER the v2 flag is switched on and parity
@@ -90,15 +91,16 @@ Each phase gets an explicit `GATE:` line. A phase is not done until its gate pas
 ## Phase 2.7 — Truth & Safety
 
 Items from the investigation (`docs/investigation/`) that are P0/P1 correctness and safety fixes.
-These are NOT started in Step 10 — they are listed for a future step. Do NOT start them without
-explicit instruction.
 
 - **captureFailed flag** — ✅ DONE (S10.3a). Capture failure now hard-fails the pixel gate.
+- **planHonoured gate** — ✅ DONE (S11.3). The solver's emit-time plan (trackCount, slotToTrack, expectedColumns) is asserted against the rendered DOM at verify time. If the plan and the rendered result disagree, the run FAILS. `layoutReshaped` is demoted to advisory.
+- **Void detector inter-cluster blindness** — ✅ DONE (S11.5). `detectPageVoids` scans the full capture for large uniform regions not covered by content. Fixes GitHub's cream band scoring voids=0.
 - **DOM-op rollback on failure** — RC3/C2: failed transforms leave DOM mutated. Failure paths
   must call `txnLog.undoAll` before `removeStyleEverywhere`. (R2 in roadmap)
 - **Dead auth UI** — RC8/C4: popup saves `openai_api_key`, background reads `cloudflare_*`.
   Every real user fails `invalid_key`. (R3 in roadmap)
 - **Role-cache invalidation** — ✅ DONE (S10.3b). `clearRoleCache` called on SPA navigation.
+  S11.7: role stability 1.000 NOT re-measured post-fix (RC4 downgraded to PARTIAL).
 - **Truncation flag** — M1: `MAX_DEPTH`/`MAX_TIME` silently truncate perception. Report
   `truncated=true` and refuse rather than apply a partial redesign. (R13 in roadmap)
 - **Consent** — C3: PII egress to Cloudflare with no consent gate. Warn the user + offer
@@ -113,6 +115,12 @@ explicit instruction.
 - **Dead code** — `bestNonBroken` (imported, never called; S9.5 fix was to dead code,
   blast radius zero). `sanitizeMarkup` (never called). `openai_api_key` path (dead).
   `assignSlots` `excluded` param (dead). `mergeConstraints` validation (computed, ignored).
+
+### Standing rule (added S11.7)
+
+**Pixel gates assert physics only — readable, no overflow, no overlap, not blank, capture
+succeeded. Design quality is the planner's job and the user's eye. Whether the relayout
+happened is asserted at emit time from the solver's own plan, never inferred from pixels.**
 
 ### P2.5 temporary gate rebase (recorded so the docs don't contradict the standing rules)
 
@@ -419,60 +427,66 @@ The solver (Step 2) is NOT started. **Phase 5 (role-anchored stable handles) is 
 
 ## Current position (updated)
 
-**P2.5 — Step 10 DONE (subgrid kills display:contents, captureFailed gate, clearRoleCache).**
-Step 9's three red rows (contentIntact=false on all 3, squeeze, bleeds) traced to one defect:
-display:contents dissolving mixed-proxy boxes. Step 10 removes the mechanism.
+**P2.5 — Step 11 IN PROGRESS (stop track inheritance, assert the plan).**
+Step 10 fixed content loss (subgrid replaces display:contents). Step 11 fixes the successor
+defect: subgrid re-imposed the two tracks on every nesting depth → track inheritance.
 
-- [x] **S10.1** — Replaced `display:contents` with CSS subgrid in solve.ts. Mixed proxies now emit
-  `display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; min-width: 0`. The box
-  survives — background, border, padding, containing block, clipping, click targets all intact —
-  and children participate in the NCA's column tracks. Fallback: if subgrid unsupported, proxy is
-  a full-width grid item (no dissolution). Subgrid proxy counts: MDN 22, Wikipedia 44, GitHub 63.
-- [x] **S10.2** — Transformed screenshots captured at verify time (before rollback). Content
-  script stores the screenshot in chrome.storage.local; harness reads it and saves as
-  `after_<site>_transformed.png`. Existing post-marker shot renamed to `after_<site>_rolledback.png`.
-- [x] **S10.3a** — `captureFailed` flag added to `PixelVerifyResult`. `pixelVerify` detects 0-size
-  captures and sets `captureFailed=true`; `passed` requires `!captureFailed`. content.ts treats it
-  as a HARD gate (v2HardGates, regression guard p1Gates/p2Gates, failure list). No pixel number is
-  trustworthy without this.
-- [x] **S10.3b** — `clearRoleCache` called in `handleRouteChange` and `reapplyStored` in content.ts.
-  Roles refresh on SPA navigation and stored-design reapplication. Was exported with 0 callers.
-- [x] **S10.4** — Replay measurement (WM_FIXTURES=replay, 3 site-runs, 0 paid calls):
+- [x] **S11.1** — Subgrid only where EARNED: a proxy gets subgrid ONLY if it spans both a side
+  track AND a content track (two slot KINDS, not two slot IDs). Proxies spanning two content
+  slots go to a single track. Subgrid counts dropped: MDN 22→15, Wikipedia 44→28, GitHub 63→25.
+  singleTrackProxies: MDN 4, Wikipedia 8, GitHub 5-6.
+- [x] **S11.2** — No auto-placement inside subgrid: every child of a surviving subgrid proxy
+  gets explicit grid-column. childAssignments: MDN 109, Wikipedia 78, GitHub 62.
+- [x] **S11.3** — planHonoured HARD gate: solver emits `{ trackCount, slotToTrack, expectedColumns }`.
+  At verify time, `assertPlanHonoured` checks (1) distinct visual x-positions among non-full-width
+  proxies === expectedColumns, (2) each slot's computed grid-column-start matches the plan.
+- [x] **S11.4** — `layoutReshaped` demoted to advisory (logged, not gated). It went green on a
+  one-column MDN page — a width-delta proxy, not a structural truth. `usesRoom` stays a hard gate.
+- [x] **S11.5** — `detectPageVoids` added: scans the full capture for large uniform regions not
+  covered by content. Fixes the void detector's inter-cluster blindness (GitHub's cream band).
+  Mechanism: `detectVoids` only checked named `ClusterRect[]`; inter-cluster areas had no rect.
+- [x] **S11.6** — Replay measurement (WM_FIXTURES=replay, 3 site-runs, 0 paid calls):
 
-  | Gate (10 conditions) | MDN | Wikipedia | GitHub |
+  | Gate (11 conditions) | MDN | Wikipedia | GitHub |
   |------|-----|----------|--------|
   | notBlank | true | true | true |
-  | contentIntact | **true** | **true** | **true** |
+  | contentIntact | true | true | true |
   | contentVisible | true | true | true |
   | noOverflow | true | true | **false** |
   | noOverlap | true | true | true |
-  | layoutReshaped | true | true | true |
   | usesRoom | true | **false** | true |
+  | planHonoured | **true** | **false** | **false** |
   | pixel voids=0 | true (0) | true (0) | true (0) |
   | pixel invisible=0 | true (0) | true (0) | true (0) |
-  | squeeze=0 | true (0) | **false** (1) | **false** (3) |
+  | squeeze=0 | true (0) | **false** (1) | **false** (1) |
   | captureFailed | false | false | false |
 
-  contentIntact=TRUE on ALL 3 (was FALSE on all 3 in Step 9). MDN passes ALL 10 gates. Wikipedia
-  fails on usesRoom (content narrowed 972→648 on a wide page) + squeeze + contrastOk. GitHub
-  fails on noOverflow (text bleeds 0→12) + squeeze + contrastOk. grid-template-columns (all 3):
-  `minmax(min(180px, calc(20vw - var(--wm-space-m) / 2)), 20vw) minmax(min(320px, calc(80vw - var(--wm-space-m) / 2)), 1fr)`.
-  Column counts: MDN 8→6, Wikipedia 9→9, GitHub 5→7. scrollWidth: MDN 1265, Wikipedia 1280, GitHub 1265
-  (all ≤ innerWidth 1280). Wikipedia 9→9 = columns unchanged while layoutReshaped=true — the reshape
-  gate passes on contentWidthChangedRel=33% and regionWidthChanged=41%, NOT on column count. But
-  usesRoom=false catches the narrowing. enforcedReshape (layoutReshaped && usesRoom) correctly fails.
+  MDN passes ALL 11 gates (planHonoured=true: 2 distinct visual x-positions among proxies).
+  Wikipedia fails: usesRoom + squeeze + planHonoured (content collapsed to 1 visual column).
+  GitHub fails: noOverflow + squeeze + planHonoured (visual columns don't match plan).
+
+  Subgrid/singleTrack split: MDN 15/4, Wikipedia 28/8, GitHub 25/5-6. childAssignments: 109/78/62.
+  grid-template-columns (all 3): `minmax(min(180px, calc(20vw - var(--wm-space-m) / 2)), 20vw)
+  minmax(min(320px, calc(80vw - var(--wm-space-m) / 2)), 1fr)`.
+  Column counts: MDN 8→6, Wikipedia 9→9, GitHub 5→8. scrollWidth: MDN 1265, Wikipedia 1280,
+  GitHub 1265 (all ≤ innerWidth 1280).
 
   Vision subagent (@cf/moonshotai/kimi-k2.7-code) on transformed screenshots:
-  - MDN: 1 column, no broken text, no empty regions. Warm beige/cream redesign.
-  - Wikipedia: 2 columns in body, no broken text, no empty regions. Heavy red background with
-    thick borders — a dramatic recolor.
-  - GitHub: 1 column, no broken text, YES large empty region >1/4 viewport (cream band between
-    left nav and right search). Extreme vertical header whitespace.
-- [x] **S10.5** — Docs updated (08_ROOT_CAUSE_ANALYSIS, 13_RISK_REGISTER, 14_TECHNICAL_DEBT,
-  15_REFACTORING_ROADMAP, product.md). Stale "6 hard gates"/"7 hard gates" references deleted;
-  count is 10 everywhere.
+  - MDN: 1 visual column ("single full-width list of CSS properties"). "all" has 3 chars/line.
+    No empty region. — planHonoured passes (2 x-positions exist) but the user's eye sees 1 column.
+    **Design quality is the user's eye, not the gate's.**
+  - Wikipedia: 1 column, no short text. YES large empty red area between language dropdown and
+    footer. planHonoured=false (correctly fails).
+  - GitHub: 3 columns (folder/name, commit message, time). No short text. YES empty region
+    >1/4 viewport. planHonoured=false (correctly fails).
 
-  Runs used: 3/3. Fix cycles: 0/3. Paid calls: 0/0.
+  **Standing: 0/3 sites clean.** MDN passes all 11 gates but the user's eye sees 1 column.
+  Wikipedia and GitHub fail gates. No site is clean by the user's eye.
+
+  Runs used: 2/3. Fix cycles: 0/3. Paid calls: 0 (replay mode).
+- [x] **S11.7** — Docs updated (08, 13, 14, 15, product.md). Gate count = 11. RC9 successor
+  defect noted. RC4 downgraded to PARTIAL. H21 (void blindness) + H22 (layoutReshaped lying
+  gate) added to risk register. R21 (emit-time assertion) added to roadmap. Standing rule added.
 
 **Step 5 RESULT — FIX POSITIONED-LAYOUT COEXISTENCE, PASS ALL THREE DOC SITES:**
 

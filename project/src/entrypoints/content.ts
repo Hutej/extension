@@ -31,7 +31,7 @@ import { validateOps, type ValidatedOp } from '@/core/ops';
 import { extractLayoutIR } from '@/core/layout/ir';
 import { detectExclusions } from '@/core/layout/exclusions';
 import { assignSlots } from '@/core/layout/assign';
-import { solve, computeGridPlacementCss } from '@/core/layout/solve';
+import { solve, computeGridPlacementCss, type SolverPlan } from '@/core/layout/solve';
 
 interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?: string; usage?: unknown; model?: string; callMs?: number; }
 
@@ -80,8 +80,8 @@ export interface TransformOutcome {
   spec?: DesignSpec;
   verify?: VerifyResult;
   pixel?: { passed: boolean; voids: number; invisibleText: number; squeeze: number; captureFailed?: boolean };
-  /** S10.4: placement diagnostics for the report. */
-  placement?: { placed: number; proxies: number; subgridProxies: number; notPlaceable: number; gridTemplate: string; mixedProxies: number };
+  /** S11.3: placement diagnostics for the report. */
+  placement?: { placed: number; proxies: number; subgridProxies: number; singleTrackProxies: number; subgridChildAssignments: number; notPlaceable: number; gridTemplate: string; mixedProxies: number; plan?: SolverPlan; planHonoured?: boolean };
   /** Phase-1: the per-failure-class breakdown of SURVIVING invisible-text clusters
    *  (still invisible after the final paint). null when none survived. Each record
    *  names the root-cause class {no-handle, wrong-bg, cascade-loss, multi-bg} + the
@@ -224,6 +224,42 @@ async function captureAndPixelVerify(before?: PixelInput): Promise<{ result: Pix
   window.scrollTo(0, 0);
   const result = pixelVerify(captures, rectsPerCapture, before);
   return { result, ms: Math.round(performance.now() - tc) };
+}
+
+/** S11.3: assert the solver's emit-time plan against the rendered DOM — deterministic,
+ *  no pixels. Checks: (1) the number of distinct VISUAL column x-positions among
+ *  non-full-width placed proxies === plan.expectedColumns; (2) for each slot in the
+ *  plan, at least one proxy with that slot has the expected grid-column-start.
+ *  If the plan and the rendered result disagree, the run FAILS (planHonoured hard gate).
+ *  Using visual x-positions (not grid-column-start) for (1) catches the case where
+ *  the grid-column says "2" but the element renders at x=0 (track inheritance, or
+ *  auto-placement putting items in different rows so they look like 1 column). */
+function assertPlanHonoured(plan: SolverPlan): boolean {
+  const proxies = document.querySelectorAll<HTMLElement>('[data-wm-plan-slot]');
+  if (proxies.length === 0) return true;
+  // (1) measured distinct visual columns = distinct left-edge x-positions (bucketed
+  // to 40px) among non-full-width proxies (grid-column-end !== "-1").
+  const xBuckets = new Set<number>();
+  for (const el of proxies) {
+    const cs = getComputedStyle(el);
+    if (cs.gridColumnEnd === '-1') continue;  // skip full-width proxies
+    const rect = el.getBoundingClientRect();
+    if (rect.width === 0 || rect.height === 0) continue;
+    xBuckets.add(Math.round(rect.left / 40) * 40);
+  }
+  const measuredColumns = xBuckets.size || 1;
+  if (measuredColumns !== plan.expectedColumns) return false;
+  // (2) per-slot: each slot must have at least one proxy at the expected track.
+  for (const [slotId, expectedTrack] of Object.entries(plan.slotToTrack)) {
+    let found = false;
+    for (const el of proxies) {
+      if (el.getAttribute('data-wm-plan-slot') !== slotId) continue;
+      const start = parseInt(getComputedStyle(el).gridColumnStart, 10);
+      if (start === expectedTrack) { found = true; break; }
+    }
+    if (!found) return false;
+  }
+  return true;
 }
 
 /** Phase-1 instrument: classify each SURVIVING invisible-text cluster (still
@@ -522,8 +558,9 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   if (AI_CONFIG.layoutCompiler === 'v2' && !restyleOnly) {
     // S7.1: CSS-only relayout. No DOM mutation, nothing for txnLog to undo.
     // Undo = removeStyleEverywhere (the stylesheet carries the grid + display:contents).
-    // Clean up any stale data-wm-grid debug attributes from a prior transform.
+    // Clean up any stale data-wm-grid / data-wm-plan-slot debug attributes from a prior transform.
     document.querySelectorAll('[data-wm-grid]').forEach((el) => el.removeAttribute('data-wm-grid'));
+    document.querySelectorAll('[data-wm-plan-slot]').forEach((el) => el.removeAttribute('data-wm-plan-slot'));
     removeStyleEverywhere(activeShadowRoots);
 
     // S4.1: compute IR + slots BEFORE the Painter so the payload has slot info.
@@ -551,9 +588,10 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     // Solver (free): placement data + grid template. S7.1: CSS-only, no DOM mutation.
     const v2SolveResult = solve({ ir: v2IR, assignment: v2Assignment, excluded: v2ExcludedSet });
     const v2Placement = computeGridPlacementCss(v2SolveResult);
-    logDebug(`v2 solver: ${v2SolveResult.matchedTargets} matched, ${v2Placement.nodesPlaced} placed (proxies=${v2Placement.proxyCount}), ${v2Placement.nodesNotPlaceable.length} not placeable, ${v2Placement.intermediatesCollapsed} mixed-proxy (${v2Placement.subgridProxies} subgrid, mixed=${v2Placement.mixedProxies}), selectorFallback=${v2Placement.selectorFallback} (nca=${v2Placement.selectorFallbackNca} proxy=${v2Placement.selectorFallbackProxy} contents=${v2Placement.selectorFallbackContents} perNode=${v2Placement.selectorFallbackPerNode}), ${v2SolveResult.rulesEmitted} CSS rules`);
+    logDebug(`v2 solver: ${v2SolveResult.matchedTargets} matched, ${v2Placement.nodesPlaced} placed (proxies=${v2Placement.proxyCount}), ${v2Placement.nodesNotPlaceable.length} not placeable, ${v2Placement.intermediatesCollapsed} mixed-proxy (${v2Placement.subgridProxies} subgrid, ${v2Placement.singleTrackProxies} singleTrack, ${v2Placement.subgridChildAssignments} childAssign, mixed=${v2Placement.mixedProxies}), selectorFallback=${v2Placement.selectorFallback} (nca=${v2Placement.selectorFallbackNca} proxy=${v2Placement.selectorFallbackProxy} contents=${v2Placement.selectorFallbackContents} perNode=${v2Placement.selectorFallbackPerNode}), ${v2SolveResult.rulesEmitted} CSS rules`);
     logDebug(`v2 placement diag: ${v2Placement.diagnostics}`);
     logDebug(`v2 grid-template-columns: ${v2Placement.gridTemplateColumns}`);
+    logDebug(`v2 plan: ${JSON.stringify(v2Placement.plan)}`);
     if (v2Placement.skippedReasons.length) logDebug(`v2 subgrid skips: ${v2Placement.skippedReasons.slice(0, 10).join('; ')}`);
 
     // Compile aesthetic CSS from the Painter's spec.
@@ -642,15 +680,17 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
         // S8: repair regression guard — if paint2 broke a hard gate that paint1
         // passed, the repair made things worse. Revert to paint1 CSS + state.
         // The repair is supposed to help (fix contrast), not hurt (break overflow).
+        // S11.4: layoutReshaped removed from regression guard (demoted to advisory).
+        // planHonoured is structural (same CSS at paint1/paint2) — not in the guard.
         const p1Gates = v2Paint1Verify.checks.notBlank && v2Paint1Verify.checks.contentIntact &&
           v2Paint1Verify.checks.contentVisible && v2Paint1Verify.checks.noOverflow &&
-          v2Paint1Verify.checks.noOverlap && v2Paint1Verify.checks.layoutReshaped &&
+          v2Paint1Verify.checks.noOverlap &&
           v2Paint1Verify.checks.usesRoom && v2Paint1Pixel.voids.length === 0 &&
           v2Paint1Pixel.invisibleText.length === 0 && v2Paint1Pixel.squeeze.length === 0 &&
           !v2Paint1Pixel.captureFailed;
         const p2Gates = v2Verify.checks.notBlank && v2Verify.checks.contentIntact &&
           v2Verify.checks.contentVisible && v2Verify.checks.noOverflow &&
-          v2Verify.checks.noOverlap && v2Verify.checks.layoutReshaped &&
+          v2Verify.checks.noOverlap &&
           v2Verify.checks.usesRoom && v2Pixel.voids.length === 0 &&
           v2Pixel.invisibleText.length === 0 && v2Pixel.squeeze.length === 0 &&
           !v2Pixel.captureFailed;
@@ -682,28 +722,36 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
 
     // S4.3: HARD GATES (the final check, AFTER repair). These FAIL the run and
     // roll back: overflow, hidden content, horizontal scrolling, element overlap.
-    // S8.2: enforcedReshape (layoutReshaped && usesRoom) is now a HARD gate with
-    // rollback — a recolor/reskin can no longer report green. movedAlive is N/A
-    // for v2 (zero moves → vacuously true) so it is NOT in the hard gate expression.
-    // S9.4: squeeze is now a HARD gate — text crushed below MIN_CHARS_PER_LINE fails.
-    // S10.3a: captureFailed is a HARD gate — a broken capture can't report PASS.
+    // S11.3: planHonoured is a HARD gate — the solver's emit-time plan (trackCount,
+    // slotToTrack, expectedColumns) must match the rendered DOM. Catches the
+    // track-inheritance defect: if all content auto-places into track 1 despite
+    // the plan saying 2 columns, planHonoured fails.
+    // S11.4: layoutReshaped is DEMOTED to advisory (logged, not gated). It went
+    // green on a one-column MDN page — a width-delta proxy, not a structural truth.
+    // usesRoom stays a hard gate.
+    // movedAlive is N/A for v2 (zero moves → vacuously true) — NOT in the gate.
+    // S9.4: squeeze is a HARD gate. S10.3a: captureFailed is a HARD gate.
+    const v2PlanHonoured = assertPlanHonoured(v2Placement.plan);
+    logDebug(`v2 plan: trackCount=${v2Placement.plan.trackCount} expectedColumns=${v2Placement.plan.expectedColumns} slotToTrack=${JSON.stringify(v2Placement.plan.slotToTrack)} honoured=${v2PlanHonoured}`);
     const v2HardGates = v2Verify.checks.notBlank && v2Verify.checks.contentIntact &&
       v2Verify.checks.contentVisible && v2Verify.checks.noOverflow && v2Verify.checks.noOverlap &&
-      v2Verify.checks.layoutReshaped && v2Verify.checks.usesRoom &&
+      v2Verify.checks.usesRoom &&
       v2Pixel.voids.length === 0 && v2Pixel.invisibleText.length === 0 &&
-      v2Pixel.squeeze.length === 0 && !v2Pixel.captureFailed;
+      v2Pixel.squeeze.length === 0 && !v2Pixel.captureFailed &&
+      v2PlanHonoured;
     if (!v2HardGates) {
       const failures = [
-        ...Object.entries(v2Verify.checks).filter(([, v]) => !v).map(([k]) => k),
+        ...Object.entries(v2Verify.checks).filter(([k, v]) => !v && k !== 'layoutReshaped').map(([k]) => k),
         ...(v2Pixel.voids.length ? v2Pixel.voids.map((h) => 'void:' + h) : []),
         ...(v2Pixel.invisibleText.length ? v2Pixel.invisibleText.map((h) => 'invis:' + h) : []),
         ...(v2Pixel.squeeze.length ? v2Pixel.squeeze.map((h) => 'squeeze:' + h) : []),
         ...(v2Pixel.captureFailed ? ['captureFailed'] : []),
+        ...(!v2PlanHonoured ? ['planHonoured'] : []),
       ].join(', ');
       removeStyleEverywhere(activeShadowRoots);
       markFailed('v2 hard gate: ' + failures);
       logDebug(`v2 ROLLBACK — hard gate: ${failures}`);
-      return { ok: false, message: 'v2 hard gate: ' + failures, spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0, placement: { placed: v2Placement.nodesPlaced, proxies: v2Placement.proxyCount, subgridProxies: v2Placement.subgridProxies, notPlaceable: v2Placement.nodesNotPlaceable.length, gridTemplate: v2Placement.gridTemplateColumns, mixedProxies: v2Placement.mixedProxies } };
+      return { ok: false, message: 'v2 hard gate: ' + failures, spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0, placement: { placed: v2Placement.nodesPlaced, proxies: v2Placement.proxyCount, subgridProxies: v2Placement.subgridProxies, singleTrackProxies: v2Placement.singleTrackProxies, subgridChildAssignments: v2Placement.subgridChildAssignments, notPlaceable: v2Placement.nodesNotPlaceable.length, gridTemplate: v2Placement.gridTemplateColumns, mixedProxies: v2Placement.mixedProxies, plan: v2Placement.plan, planHonoured: v2PlanHonoured } };
     }
     // Persist + defend + mark applied.
     const v2Key = storageKey();
@@ -722,7 +770,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
 
     const v2TotalMs = Date.now() - t0;
     const v2ModelMs = roleCalls.reduce((s, c) => s + c.ms, 0);
-    logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] verify=${v2VerifyMsTotal}ms total=${v2TotalMs}ms paidCalls=${paidCalls()} placed=${v2Placement.nodesPlaced} subgrid=${v2Placement.subgridProxies} notPlaceable=${v2Placement.nodesNotPlaceable.length} selectorFallback=${v2Placement.selectorFallback} paints=${v2PaintCount}`);
+    logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] verify=${v2VerifyMsTotal}ms total=${v2TotalMs}ms paidCalls=${paidCalls()} placed=${v2Placement.nodesPlaced} subgrid=${v2Placement.subgridProxies} singleTrack=${v2Placement.singleTrackProxies} childAssign=${v2Placement.subgridChildAssignments} notPlaceable=${v2Placement.nodesNotPlaceable.length} selectorFallback=${v2Placement.selectorFallback} planCols=${v2Placement.plan.expectedColumns} planHonoured=${v2PlanHonoured} paints=${v2PaintCount}`);
 
     return {
       ok: true, spec: v2Spec, verify: v2Verify,
@@ -732,7 +780,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       modelCoverageFraction: v2Verify.modelCoverageFraction,
       paidCalls: paidCalls(), wallMs: v2TotalMs, paintCount: v2PaintCount,
       clusters: perception.clusters.length,
-      placement: { placed: v2Placement.nodesPlaced, proxies: v2Placement.proxyCount, subgridProxies: v2Placement.subgridProxies, notPlaceable: v2Placement.nodesNotPlaceable.length, gridTemplate: v2Placement.gridTemplateColumns, mixedProxies: v2Placement.mixedProxies },
+      placement: { placed: v2Placement.nodesPlaced, proxies: v2Placement.proxyCount, subgridProxies: v2Placement.subgridProxies, singleTrackProxies: v2Placement.singleTrackProxies, subgridChildAssignments: v2Placement.subgridChildAssignments, notPlaceable: v2Placement.nodesNotPlaceable.length, gridTemplate: v2Placement.gridTemplateColumns, mixedProxies: v2Placement.mixedProxies, plan: v2Placement.plan, planHonoured: v2PlanHonoured },
       usage: roleCalls.length ? { total: roleCalls.reduce((s, c) => s + (c.promptTokens ?? 0) + (c.completionTokens ?? 0), 0) } : undefined,
       ledger: {
         perceiveMs: perception.builtInMs, serializeChars: v2Serialized.length, serializeCharsBefore: lastSerializeBudget.before, roleCalls,
@@ -1248,8 +1296,9 @@ function undoOpsAndCss(): void {
   stopDynamicDefense();
   activeSpec = null; activeOps = []; activeStructuralCss = '';
   txnLog.undoAll(liveDom);
-  // S7.1: clean up data-wm-grid debug attributes from CSS-only placement.
+  // S7.1: clean up data-wm-grid / data-wm-plan-slot debug attributes from CSS-only placement.
   document.querySelectorAll('[data-wm-grid]').forEach((el) => el.removeAttribute('data-wm-grid'));
+  document.querySelectorAll('[data-wm-plan-slot]').forEach((el) => el.removeAttribute('data-wm-plan-slot'));
   removeStyleEverywhere(activeShadowRoots); removeEscapeUI();
   delete document.documentElement.dataset[APPLIED];
 }

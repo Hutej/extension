@@ -54,7 +54,8 @@
 - **Reproduction:** On an SPA, transform route A, navigate to route B (no reload), transform — observe route-A roles persist. Insert a sibling, re-perceive — observe handle churn.
 - **Recommended solution:** Call `clearRoleCache` in `handleRouteChange`/`reapplyStored`. Lengthen or hash the structural path without truncation; or anchor identity on a globally-stable attribute set.
 - **Resolution (S10.3b):** `clearRoleCache` is now called in `handleRouteChange` (line 1331) and `reapplyStored` (line 1163) in content.ts. Roles refresh on SPA navigation and stored-design reapplication.
-- **Confidence:** HIGH → RESOLVED.
+- **S11.7 update:** Downgraded to PARTIAL. `clearRoleCache` is wired, but "role stability 1.000" has NOT been re-measured since the fix. The claim in product.md P5 ("Role stability 1.000") predates this fix and has not been verified post-fix.
+- **Confidence:** HIGH → PARTIAL.
 
 ---
 
@@ -118,9 +119,10 @@
 - **Why it exists:** The CSS-only grid approach needs to flatten intermediates; `display:contents` was chosen without modeling its box-dissolution side effects.
 - **User impact:** Overlapping/repositioned absolute elements; unclickable padded areas; content spilling out of clipped containers; contentIntact gate false-positives on every mixed proxy.
 - **Reproduction:** Transform a page with a positioned relative container holding absolute children that spans >1 slot.
-- **Resolution (S10.1):** Replaced `display:contents` with CSS subgrid: `display: grid; grid-template-columns: subgrid; grid-column: 1 / -1; min-width: 0`. The box survives — background, border, padding, containing block, clipping and click targets all intact — and children participate in the NCA's column tracks. Fallback: if `CSS.supports('grid-template-columns', 'subgrid')` is false, the proxy is placed as a full-width grid item (`grid-column: 1 / -1`) without dissolving its box.
-- **Measured result (S10.4):** contentIntact=**true** on ALL 3 sites (MDN, Wikipedia, GitHub) — was false on all 3 in Step 9. Subgrid proxy counts: MDN 22, Wikipedia 44, GitHub 63. MDN passes ALL 10 hard gates.
-- **Confidence:** HIGH → RESOLVED.
+- **Resolution (S10.1):** Replaced `display:contents` with CSS subgrid. S11.1 refined: subgrid is now earned ONLY by proxies spanning both a side track AND a content track (two slot KINDS, not just two slot IDs). Proxies spanning two content slots go to a single track (no track inheritance). Subgrid proxy counts dropped: MDN 22→15, Wikipedia 44→28, GitHub 63→25. singleTrackProxies: MDN 4, Wikipedia 8, GitHub 5-6.
+- **Successor defect (S11): track inheritance.** The S10 subgrid fix replaced dissolution with inheritance — but `grid-template-columns: subgrid; grid-column: 1 / -1` on every mixed proxy re-imposed the page's two tracks on the proxy's own children at every nesting depth. Children auto-placed into track 1 (the side gutter) regardless of role. This caused: Wikipedia 972→648 (usesRoom false), GitHub's cream band and 12 bleeds, MDN collapsing to one column. S11.1 stops the inheritance by only giving subgrid to proxies that EARN it (span side + content). S11.2 requires explicit grid-column on every child of a surviving subgrid proxy. S11.3 adds planHonoured — a deterministic emit-time assertion that the rendered visual columns match the solver's plan.
+- **Measured result (S11.6):** contentIntact=true on ALL 3. planHonoured: MDN true (2 distinct visual x-positions), Wikipedia false (content collapsed to 1 visual column), GitHub false. subgridProxies: MDN 15, Wikipedia 28, GitHub 25. singleTrackProxies: MDN 4, Wikipedia 8, GitHub 5-6. childAssignments: MDN 109, Wikipedia 78, GitHub 62.
+- **Confidence:** HIGH → RESOLVED (S10.1 + S11.1 successor fix).
 
 ---
 

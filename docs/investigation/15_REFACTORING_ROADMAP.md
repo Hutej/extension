@@ -167,6 +167,16 @@
 - **Complexity:** Low.
 - **Dependencies:** none.
 
+## R21 — Emit-time plan assertion (S11.3)
+- **What:** The solver emits a plan object `{ trackCount, slotToTrack, expectedColumns }` alongside the CSS. At verify time, `assertPlanHonoured` checks the rendered DOM against it: (1) distinct visual x-positions among non-full-width placed proxies === expectedColumns; (2) each placed slot's computed grid-column-start matches slotToTrack. `planHonoured` is a HARD gate.
+- **Why:** H22 — `layoutReshaped` went green on a one-column MDN page (width deltas alone). The solver's own plan is a better source of truth than pixel-inferred reshape.
+- **Expected benefit:** A redesign that collapses content to one column despite the plan saying two FAILS — deterministically, no pixels.
+- ****Expected benefit:** Eliminates a class of false-green gates.
+- **Trade-offs:** the plan assertion is structural (grid-column + x-position), not visual quality. A narrow sidebar that the eye reads as "one column" but IS at a different x-position passes planHonoured. Design quality remains the user's eye.
+- **Complexity:** Medium — plan emission in solve.ts, assertion function in content.ts, hard gate wiring.
+- **Dependencies:** none.
+- **Status:** ✅ DONE (S11.3).
+
 ## Sequencing
 **P0 (do first):** R1, R2, R3, R4 ✅, R5 (correctness blockers, low complexity).
 **P1 (safety):** R6, R7, R8, R9, R10, R11.

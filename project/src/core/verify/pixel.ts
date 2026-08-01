@@ -81,6 +81,10 @@ export const DECORATIVE_EDGE_DENSITY_MAX = 0.12;
  *     of color flatness — a vivid gradient dead-zone reads as a void here.
  *
  * Returns the handles of clusters that render as voids.
+ *
+ * S11.5: detectPageVoids (below) catches large uniform regions BETWEEN clusters
+ * that have no ClusterRect — the GitHub cream band. detectVoids only checks named
+ * clusters; detectPageVoids scans the full capture.
  */
 export function detectVoids(capture: PixelInput, rects: ClusterRect[]): string[] {
   const out: string[] = [];
@@ -103,6 +107,40 @@ export function detectVoids(capture: PixelInput, rects: ClusterRect[]): string[]
     if (edgeDensity(capture, cr.rect) < DECORATIVE_EDGE_DENSITY_MAX) out.push(cr.handle);
   }
   return out;
+}
+
+/** S11.5: page-level void detection. Scans the full capture for large uniform
+ *  regions NOT covered by text/image-bearing clusters. detectVoids only checks
+ *  named cluster rects — a large empty band BETWEEN clusters (like GitHub's cream
+ *  gap) has no ClusterRect and is invisible. This function catches it: if > ¼ of
+ *  the viewport is flat and uncovered by content, it's a void. A large uniform area
+ *  containing no content is a void whether or not it is painted. Pure. */
+export function detectPageVoids(capture: PixelInput, rects: ClusterRect[]): string[] {
+  if (capture.width === 0 || capture.height === 0) return [];
+  // Content mask: union of text-bearing and image-bearing cluster rects.
+  const contentRects = rects.filter((cr) => cr.text.trim().length > 0 || cr.hasImage);
+  const overlapsContent = (x: number, y: number, w: number, h: number): boolean => {
+    for (const cr of contentRects) {
+      if (x < cr.rect.x + cr.rect.w && x + w > cr.rect.x &&
+          y < cr.rect.y + cr.rect.h && y + h > cr.rect.y) return true;
+    }
+    return false;
+  };
+  const TILE = 80;
+  let voidPixels = 0;
+  const totalPixels = capture.width * capture.height;
+  for (let y = 0; y < capture.height; y += TILE) {
+    for (let x = 0; x < capture.width; x += TILE) {
+      const w = Math.min(TILE, capture.width - x);
+      const h = Math.min(TILE, capture.height - y);
+      if (overlapsContent(x, y, w, h)) continue;
+      if (variance(capture, { x, y, w, h }) < 10) voidPixels += w * h;
+    }
+  }
+  // ponytail: 0.25 is the user's definition ("well over a quarter"), not a tunable
+  // threshold — do not change it.
+  if (voidPixels / totalPixels > 0.25) return ['__page_void__'];
+  return [];
 }
 
 /**
@@ -305,6 +343,8 @@ export function pixelVerify(captures: PixelInput[], rectsPerCapture: ClusterRect
       }
     }
     for (const h of detectInvisibleText(c, rects)) if (!invisible.includes(h)) invisible.push(h);
+    // S11.5: page-level voids — large uniform regions BETWEEN clusters.
+    for (const h of detectPageVoids(c, rects)) if (!voids.includes(h)) voids.push(h);
   }
   // Squeeze is geometry-only (rect width vs font size) — any capture's rects suffice.
   const squeezeRects = rectsPerCapture[0] ?? [];
@@ -318,7 +358,9 @@ export function pixelVerify(captures: PixelInput[], rectsPerCapture: ClusterRect
   const captureFailed = captures.some((c) => c.width === 0 || c.height === 0 || c.data.length === 0);
   const passed = !captureFailed && voids.length === 0 && invisible.length === 0 && squeeze.length === 0 && !recolor;
   const critiques = [
-    ...voids.map((h) => decorativeVoids.has(h)
+    ...voids.map((h) => h === '__page_void__'
+      ? `PAGE VOID — a large uniform region (> ¼ of the viewport) with no text or image content exists BETWEEN clusters. The redesign left a visible empty band.`
+      : decorativeVoids.has(h)
       ? `cluster ${h} is a DECORATIVE DEAD-ZONE — a large gradient/texture region with NO text or image content that drowned the page's content. CSS cannot collapse this; you MUST use a "remove" op on the decorative wrapper (or restyle it so the content column reclaims the space). Do NOT decorate it — remove it or let the content use the room.`
       : `cluster ${h} renders as a blank void — content was there but the surface is now uniform`),
     ...invisible.map((h) => `cluster ${h} renders invisible — its text has near-zero contrast against its effective background`),

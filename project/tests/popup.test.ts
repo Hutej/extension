@@ -941,11 +941,12 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
           console.log(`  checks: ${JSON.stringify(parsed.verify.checks)}`);
           console.log(`  coverage: ${result.coverageFraction.toFixed(3)} modelCov: ${result.modelCoverageFraction.toFixed(3)} change: ${result.changeScore.toFixed(3)}`);
         }
-        // S10.4: print placement info + grid-template-columns VERBATIM.
+        // S11.6: print placement info + grid-template-columns VERBATIM.
         if (parsed.placement) {
           const p = parsed.placement;
-          console.log(`  PLACEMENT placed=${p.placed} proxies=${p.proxies} subgrid=${p.subgridProxies} notPlaceable=${p.notPlaceable} mixed=${p.mixedProxies}`);
+          console.log(`  PLACEMENT placed=${p.placed} proxies=${p.proxies} subgrid=${p.subgridProxies} singleTrack=${p.singleTrackProxies ?? '?'} childAssign=${p.subgridChildAssignments ?? '?'} notPlaceable=${p.notPlaceable} mixed=${p.mixedProxies}`);
           console.log(`  grid-template-columns: ${p.gridTemplate}`);
+          if (p.plan) console.log(`  PLAN trackCount=${p.plan.trackCount} expectedColumns=${p.plan.expectedColumns} slotToTrack=${JSON.stringify(p.plan.slotToTrack)} honoured=${p.planHonoured}`);
         }
         // S10.4: print verify details (column count before → after, layoutReshaped info).
         if (parsed.verify?.details) {
@@ -1045,7 +1046,7 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
 
     // Log WebMorph console output for debugging failures.
     if (wmLogs.length) {
-      const relevant = wmLogs.filter((l) => l.includes('PAID') || l.includes('repair') || l.includes('FAILED') || l.includes('INCOMPLETE') || l.includes('dropLayout') || l.includes('rollback') || l.includes('keepBest') || l.includes('iter 0') || l.includes('collapsed') || l.includes('COLLAPSE') || l.includes('OVERFLOW') || l.includes('LEDGER') || l.includes('REFLOW') || l.includes('reflow') || l.includes('PHASE2') || l.includes('paint1') || l.includes('paint2') || l.includes('SHELL') || l.includes('POST-MOVE') || l.includes('POST-RAF') || l.includes('solver') || l.includes('placement') || l.includes('grid-template'));
+      const relevant = wmLogs.filter((l) => l.includes('PAID') || l.includes('repair') || l.includes('FAILED') || l.includes('INCOMPLETE') || l.includes('dropLayout') || l.includes('rollback') || l.includes('keepBest') || l.includes('iter 0') || l.includes('collapsed') || l.includes('COLLAPSE') || l.includes('OVERFLOW') || l.includes('LEDGER') || l.includes('REFLOW') || l.includes('reflow') || l.includes('PHASE2') || l.includes('paint1') || l.includes('paint2') || l.includes('SHELL') || l.includes('POST-MOVE') || l.includes('POST-RAF') || l.includes('solver') || l.includes('placement') || l.includes('grid-template') || l.includes('plan:'));
       if (relevant.length) console.log(`  logs: ${relevant.slice(0, 30).join(' | ')}`);
     }
 
