@@ -98,6 +98,22 @@ Each phase gets an explicit `GATE:` line. A phase is not done until its gate pas
   - [x] A9 — Documentation. `docs/LAW_0_BROWSER_OWNERSHIP.md` — the law, 5 rules, 9 named violations with
     fixes, DOM mutation policy, resize invariance. AGENTS.md + ARCHITECTURE.md updated.
   PENDING: by-eye verification on real sites (next prompt — prompt 2 of 6).
+- **BUILD SWEEP 1B — TRUST + 1A CARRY-OVERS (B1-B12) — BUILT, NOT VERIFIED BY EYE.**
+  Gate: typecheck+build+lint ONLY — no site runs, no paid calls (BUILD FIRST, VERIFY LATER, prompt 2 of 6).
+  All 12 items built and committed (c407077):
+  - [x] B1 — Cloudflare credential auth (Account ID + API Token, validated on save; openai_api_key path deleted)
+  - [x] B2 — Transactional transforms (handle-based undo, try/catch per undo, assertDomClean, rollbackFailed on all paths)
+  - [x] B3 — Honest telemetry (true HTTP count, DEBUG gated behind WM_DEBUG, optional ledger fields, perception.truncated flag)
+  - [x] B4 — Runaway guards (defense circuit-breaker MAX_DEFENSE_ATTEMPTS=10, global budgetExceeded check)
+  - [x] B5 — Consent + redaction (disclosure banner, opt-out checkbox, redactSensitiveData on all serialization paths)
+  - [x] B6 — Sanitizer holes (data: restricted to image/*, CSS escape decoding, validatePackOverrides schema check)
+  - [x] B7 — ESLint gate (flat config, no-unused-vars, no-unreachable, no-floating-promises, no-explicit-any)
+  - [x] B8 — Dead code (bestNonBroken, sanitizeMarkup, assignSlots.excluded, impossibleNodes, .slice(-6) hash)
+  - [x] B9 — DOM ops confirmed inert (no call site supplies a MutationReason; all ops refused by default — intended)
+  - [x] B10 — Law 0 on all paths (clampDisplayFont uses vw token not measurement px; fluidizeRawPxSizing deleted, replaced with assertNoRawPxSizing that throws)
+  - [x] B11 — Colour coverage (expander assigns pack text colour to addressed clusters with no explicit colour)
+  - [x] B12 — Side track ceiling (fit-content → var(--wm-side-max) token; min-width:0 on NCA container, --wm-content-min on content item — different elements, not contradictory)
+  PENDING: by-eye verification on real sites (next prompt — 1C: perception breadth).
 - **P2.6 Stress sites BBC + YouTube — 5/5-applied beauty gate returns here.** GATE: 5/5 sites applied
   + by-eye beauty on BBC + YouTube under the exclusion registry.
 - **P3 Migration completion + BRUTAL DELETION.** Only AFTER the v2 flag is switched on and parity
@@ -122,26 +138,30 @@ Items from the investigation (`docs/investigation/`) that are P0/P1 correctness 
 - **captureFailed flag** — ✅ DONE (S10.3a). Capture failure now hard-fails the pixel gate.
 - **planHonoured gate** — ✅ DONE (S11.3). The solver's emit-time plan (trackCount, slotToTrack, expectedColumns) is asserted against the rendered DOM at verify time. If the plan and the rendered result disagree, the run FAILS. `layoutReshaped` is demoted to advisory.
 - **Void detector inter-cluster blindness** — ✅ DONE (S11.5). `detectPageVoids` scans the full capture for large uniform regions not covered by content. Fixes GitHub's cream band scoring voids=0.
-- **DOM-op rollback on failure** — RC3/C2: failed transforms leave DOM mutated. Failure paths
-  must call `txnLog.undoAll` before `removeStyleEverywhere`. (R2 in roadmap)
-- **Dead auth UI** — RC8/C4: popup saves `openai_api_key`, background reads `cloudflare_*`.
-  Every real user fails `invalid_key`. (R3 in roadmap)
+- **DOM-op rollback on failure** — ✅ DONE (B2). Failure paths call `txnLog.undoAll` (handle-based
+  inverses, try/catch per undo, assertDomClean). `rollbackFailed` replaces all removeStyleEverywhere+markFailed paths.
+- **Dead auth UI** — ✅ DONE (B1). Popup reads/writes `cloudflare_account_id` + `cloudflare_api_token`,
+  validated on save. `openai_api_key` path deleted.
 - **Role-cache invalidation** — ✅ DONE (S10.3b). `clearRoleCache` called on SPA navigation.
   S11.7: role stability 1.000 NOT re-measured post-fix (RC4 downgraded to PARTIAL).
-- **Truncation flag** — M1: `MAX_DEPTH`/`MAX_TIME` silently truncate perception. Report
-  `truncated=true` and refuse rather than apply a partial redesign. (R13 in roadmap)
-- **Consent** — C3: PII egress to Cloudflare with no consent gate. Warn the user + offer
-  opt-out. (R6 in roadmap)
-- **Cost accounting** — RC7/H4: paid calls count roles, not HTTP requests. Retries re-bill
-  up to 5× hidden. Surface request count. (R7 in roadmap)
-- **Global abort** — H5: no global 120s abort. Runs hit ~145s. (R8 in roadmap)
-- **startDefense breaker** — H19: unbounded re-insert loop → CPU bomb. (R11 in roadmap)
-- **Sanitizer data: MIME** — H7: `data:image/svg+xml` allows onload. Restrict to
-  `data:image/*`. (R15 in roadmap)
-- **packOverrides validation** — H8: bare `as` cast → silent corruption. (R10 in roadmap)
-- **Dead code** — `bestNonBroken` (imported, never called; S9.5 fix was to dead code,
-  blast radius zero). `sanitizeMarkup` (never called). `openai_api_key` path (dead).
-  `assignSlots` `excluded` param (dead). `mergeConstraints` validation (computed, ignored).
+- **Truncation flag** — ✅ DONE (B3). `perception.truncated` flag added; propagated to TransformOutcome;
+  popup shows truncation warning.
+- **Consent** — ✅ DONE (B5). Disclosure banner shown before first transform; opt-out checkbox
+  disables model calls; `redactSensitiveData` strips form values, password-adjacent fields, credential-shaped
+  patterns before serialization. `<all_urls>` justified: the product reshapes ANY site — narrowing breaks
+  the product. Consent gate is the mitigation.
+- **Cost accounting** — ✅ DONE (B3). `httpRequests` counter in callModel; `paidCalls()` sums
+  HTTP requests (including retries); popup shows "N request(s)" not "N call(s)".
+- **Global abort** — ✅ DONE (B4). `budgetExceeded()` global check after v2 Painter call and
+  after v1 parallel design calls; clean partial-failure path (rollback, page untouched).
+- **startDefense breaker** — ✅ DONE (B4). `MAX_DEFENSE_ATTEMPTS=10` circuit breaker on
+  startDefense + shadow defense; `defenseAttempts` counter.
+- **Sanitizer data: MIME** — ✅ DONE (B6). `data:` URLs restricted to `image/*` only.
+  Also: CSS escape sequence decoding before `javascript:` check.
+- **packOverrides validation** — ✅ DONE (B6). `validatePackOverrides` real schema check
+  replaces bare `as` cast; rejects on failure.
+- **Dead code** — ✅ DONE (B8). `bestNonBroken`, `sanitizeMarkup`, `assignSlots.excluded`,
+  `mergeConstraints.impossibleNodes`, `.slice(-6)` handle hash — all deleted.
 
 ### Standing rule (added S11.7)
 
@@ -454,7 +474,14 @@ The solver (Step 2) is NOT started. **Phase 5 (role-anchored stable handles) is 
 
 ## Current position (updated)
 
-**BUILD SWEEP 1A — GIVE LAYOUT BACK TO THE BROWSER — BUILT, NOT VERIFIED BY EYE.**
+**BUILD SWEEP 1B — TRUST + 1A CARRY-OVERS — BUILT, NOT VERIFIED BY EYE.**
+All 12 items (B1–B12) built and committed (c407077). Gate: typecheck+build+lint only —
+0 errors in src/, build passes (194.49 kB), lint passes (0 errors). No site runs, no paid calls
+(BUILD FIRST, VERIFY LATER — prompt 2 of 6). Security work is now committed, not in a dirty working tree.
+342d433 does NOT typecheck on its own (experiments/prime-suspect.test.ts missing ClusterLayout fields
+added by 1A); the tsconfig now excludes tests/experiments from the typecheck.
+
+**Prior: BUILD SWEEP 1A — GIVE LAYOUT BACK TO THE BROWSER — BUILT, NOT VERIFIED BY EYE.**
 All 9 items (A1–A9) built and committed (342d433 + ff1a406). Gate: typecheck+build+lint only —
 0 errors in src/, build passes, lint passes. No site runs, no paid calls (BUILD FIRST, VERIFY
 LATER — prompt 1 of 6). The by-eye verification is the NEXT prompt. The measurement-derived values
