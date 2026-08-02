@@ -43,7 +43,7 @@ function perception(clusters: Cluster[]): Perception {
     reflowOpportunity: [],
     outline: [],
     colorModel: { palette: [], relationships: [], saturationRange: [0, 0], lightnessRange: [0, 0], geometry: { radii: [], borderWidths: [], hasShadow: false, shadowSpread: 0, spacingRhythm: 0 } },
-    density: { rhythmBaseline: 0, alignmentEdges: [], whitespaceGini: 0 },
+    density: { rhythmBaseline: 0, alignmentEdges: [], whitespaceGini: 0, regions: [], pageDensityClass: 'comfortable', rhythmVariance: 0, rhythmConsistent: true, modalPadding: '0px', paddingOutliers: [] },
     composition: { dominant: [], columnCount: 2, hasTopNav: false, hasRightRail: false, hasLeftRail: false, groupCount: 0, summary: '' },
   };
 }

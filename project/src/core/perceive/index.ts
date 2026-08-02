@@ -20,7 +20,7 @@ import {
 } from './semantic.ts';
 import { buildOutline, classifyComponentType, mapLandmarks, inventoryInteractive, type HeadingNode, type ComponentType, type LandmarkMap, type InteractiveInventory } from './semantics.ts';
 import { buildColorModel, resolveEffectiveBackground, buildElevationModel, analyzeBorderShape, classifySurfaceLanguage, type ColorModel, type BackgroundResolution, type ElevationModel, type BorderShapeProfile, type SurfaceLanguageProfile } from './surface.ts';
-import { measureDensityV2, measureAlignmentEdges, buildSpatialModel, type DensityProfile, type SpatialModel, type ExpandedDensityProfile } from './spatial.ts';
+import { measureDensityV2, measureAlignmentEdges, buildSpatialModel, type SpatialModel, type ExpandedDensityProfile } from './spatial.ts';
 import { analyzeText, buildTypeRamp, analyzeTypography, type TextProfile, type TypeRamp, type TypographyProfile } from './typography.ts';
 import { inventoryMedia, type MediaInventory, type MediaKind } from './media.ts';
 import { buildSafetyProfile, type SafetyProfile, type RegionSafety } from './dynamism.ts';
@@ -203,8 +203,8 @@ export interface Perception {
    *  (complementary/analogous/monochrome), saturation + lightness ranges, and
    *  surface geometry (radii, border widths, shadow, spacing rhythm). */
   colorModel: ColorModel;
-  /** C8 — page-level density, rhythm, and alignment. */
-  density: DensityProfile;
+  /** C8+D7 — page-level density, rhythm, alignment, and expanded density model. */
+  density: ExpandedDensityProfile;
   // ── D2-D10 page-level models (all optional, set by enrichment) ──
   /** D2 — spatial model: adjacency, columns, reading order, gutters, symmetry, focal point. */
   spatial?: SpatialModel | null;
@@ -1520,7 +1520,7 @@ function mergeClusters(clusters: Cluster[]): SerialEntry[] {
     const suppressed = !c.isNativeControl && c.role !== 'heading' && c.dominanceRank <= 0.3 &&
       !['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag) && !c.style.hasBgImage &&
       (c.samples.length === 0 && c.textProfile.readingLength === 0 &&
-        !c.hasSolidBg && c.style.border === 'none' && c.style.boxShadow !== 'none' === false &&
+        !c.hasSolidBg && c.style.border === 'none' && c.style.boxShadow === 'none' &&
         c.emptinessScore >= 0.9 ||
         (c.layout.isPassiveWrapper && !c.hasSolidBg && c.style.border === 'none' && c.style.boxShadow === 'none' && c.samples.length === 0));
     return { rep: c, members: [c.handle], count: c.count, suppressed, outliers: [] };
@@ -1608,10 +1608,11 @@ function formatColorModel(cm: ColorModel): string {
   return lines.join('\n');
 }
 
-/** C8 — format the density/rhythm/alignment profile. */
-function formatDensity(d: DensityProfile): string {
-  const lines = [`DENSITY: rhythm:${d.rhythmBaseline}px edges:[${d.alignmentEdges.join(',')}] whitespace-gini:${d.whitespaceGini.toFixed(2)}`];
-  return lines.join('');
+/** C8+D7 — format the density/rhythm/alignment + expanded density profile. */
+function formatDensity(d: ExpandedDensityProfile): string {
+  const base = `DENSITY: rhythm:${d.rhythmBaseline}px edges:[${d.alignmentEdges.join(',')}] whitespace-gini:${d.whitespaceGini.toFixed(2)}`;
+  const expansion = ` class:${d.pageDensityClass} rhythm-var:${d.rhythmVariance.toFixed(0)}${d.rhythmConsistent ? '[consistent]' : '[inconsistent]'} pad:${d.modalPadding}`;
+  return base + expansion;
 }
 
 // ── D2-D10 model formatters (page-level, emitted once) ─────────────
@@ -1626,7 +1627,8 @@ function formatSpatial(s: import('./spatial.ts').SpatialModel): string {
   const cols = s.columns.map((c) => `col${c.index}@${c.x}w${c.width}g${c.gutterLeft}`).join(' ');
   const focal = s.focalPoint ? ` focal:${s.focalPoint.handle}(${s.focalPoint.score.toFixed(2)})` : '';
   const sym = ` sym:${s.symmetry.balanceRatio.toFixed(2)}`;
-  return `SPATIAL: ${cols}${focal}${sym} gutters:h${s.gutters.modalHorizontal}v${s.gutters.modalVertical}px`;
+  const order = s.readingOrder.length > 10 ? '' : ` order:${s.readingOrder.slice(0, 10).join('>')}`;
+  return `SPATIAL: ${cols}${focal}${sym}${order} gutters:h${s.gutters.modalHorizontal}v${s.gutters.modalVertical}px`;
 }
 
 function formatSurfaceLanguage(sl: import('./surface.ts').SurfaceLanguageProfile): string {
@@ -1769,8 +1771,11 @@ function formatFullEntry(e: SerialEntry, ctx?: RegionContext): string {
   }
   // D3 — type rank in page hierarchy.
   if (c.typography?.rank) line += ` tr${c.typography.rank}`;
-  // D4 — background type (reference, not full resolution).
-  if (c.background) line += ` bg-${c.background.type}`;
+  // D4 — background type + effective (alpha-composited) color.
+  if (c.background) {
+    line += ` bg-${c.background.type}`;
+    if (c.background.type !== 'none' && c.background.effectiveColor) line += `:${c.background.effectiveColor}`;
+  }
   // D6 — shape classification (reference, not full border profile).
   if (c.borderShape?.shape && c.borderShape.shape !== 'rectangular') line += ` shape:${c.borderShape.shape}`;
   // D8 — media kind (reference to MEDIA header).
@@ -1831,6 +1836,10 @@ function formatFull(c: Cluster): string {
   // Op cues (advisory for the Architect).
   if (c.emptinessScore >= 0.6) parts.push(`empty${Math.round(c.emptinessScore * 10)}`);
   if (c.moveSafety !== 'safe') parts.push(c.moveSafety === 'forbidden' ? 'forbid-move' : 'risky-move');
+  // D11 — provenance: flag low-confidence inferences so the model distinguishes
+  // "this is a card" from "this is probably a card".
+  if (c.componentConfidence > 0 && c.componentConfidence < 0.7) parts.push(`?${c.componentType}`);
+  if (c.designRoleConfidence > 0 && c.designRoleConfidence < 0.5) parts.push(`?role:${c.designRole}`);
   let line = parts.join(' ');
   if (c.samples.length) line += ` e.g.${c.samples.slice(0, 2).map((s) => JSON.stringify(s.slice(0, 20))).join(',')}`;
   return line;
