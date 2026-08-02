@@ -18,10 +18,12 @@ import {
   classifyRole, rankDominance, detectGrouping, summarizeComposition,
   type ClusterSignals, type PageContext, type DesignRole, type CompositionSummary,
 } from './semantic.ts';
-import { buildOutline, classifyComponentType, type HeadingNode, type ComponentType } from './semantics.ts';
-import { buildColorModel, type ColorModel } from './surface.ts';
-import { measureDensity, measureAlignmentEdges, type DensityProfile } from './spatial.ts';
-import { analyzeText, type TextProfile } from './typography.ts';
+import { buildOutline, classifyComponentType, mapLandmarks, inventoryInteractive, type HeadingNode, type ComponentType, type LandmarkMap, type InteractiveInventory } from './semantics.ts';
+import { buildColorModel, resolveEffectiveBackground, buildElevationModel, analyzeBorderShape, classifySurfaceLanguage, type ColorModel, type BackgroundResolution, type ElevationModel, type BorderShapeProfile, type SurfaceLanguageProfile } from './surface.ts';
+import { measureDensityV2, measureAlignmentEdges, buildSpatialModel, type DensityProfile, type SpatialModel, type ExpandedDensityProfile } from './spatial.ts';
+import { analyzeText, buildTypeRamp, analyzeTypography, type TextProfile, type TypeRamp, type TypographyProfile } from './typography.ts';
+import { inventoryMedia, type MediaInventory, type MediaKind } from './media.ts';
+import { buildSafetyProfile, type SafetyProfile, type RegionSafety } from './dynamism.ts';
 import { deepQuerySelector, deepQuerySelectorAll } from './dom-utils.ts';
 
 const IGNORED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'BR', 'HR', 'WBR', 'LINK', 'META', 'TEMPLATE', 'SLOT', 'PATH', 'DEFS']);
@@ -132,10 +134,21 @@ export interface Cluster {
   /** C10 — text profile: reading length, kind (prose/label/heading/number/code),
    *  language direction, longest unbreakable token, DOM truncation state. */
   textProfile: TextProfile;
-  /** D11 — provenance: the signal that produced each inferred classification.
-   *  Maps field name → signal description (e.g. { componentType: 'tag=table+thead' }).
-   *  Measured fields have no provenance entry (they are direct measurements). */
+  /** D11 — provenance: the signal that produced each inferred classification. */
   provenance: Record<string, string>;
+  // ── D2-D10 enrichment fields (all optional, set by enrichment functions) ──
+  /** D3 — per-region typography profile (size, weight, family, line-height, rank). */
+  typography?: TypographyProfile | null;
+  /** D4 — alpha-composited effective background + transparent layer stack. */
+  background?: BackgroundResolution | null;
+  /** D6 — border widths/styles/colours, radii, shadows, shape classification. */
+  borderShape?: BorderShapeProfile | null;
+  /** D8 — media kind for media clusters (icon, photo, logo, etc.), null for non-media. */
+  mediaKind?: MediaKind | null;
+  /** D9 — landmark type if this cluster IS a landmark (main, nav, aside, etc.). */
+  landmark?: string | null;
+  /** D10 — per-region safety flags (animations, transitions, will-change, etc.). */
+  safety?: RegionSafety | null;
 }
 
 export interface LayoutSkeleton {
@@ -190,9 +203,25 @@ export interface Perception {
    *  (complementary/analogous/monochrome), saturation + lightness ranges, and
    *  surface geometry (radii, border widths, shadow, spacing rhythm). */
   colorModel: ColorModel;
-  /** C8 — page-level density, rhythm, and alignment: modal sibling gap,
-   *  repeating x-positions (alignment edges), and whitespace distribution. */
+  /** C8 — page-level density, rhythm, and alignment. */
   density: DensityProfile;
+  // ── D2-D10 page-level models (all optional, set by enrichment) ──
+  /** D2 — spatial model: adjacency, columns, reading order, gutters, symmetry, focal point. */
+  spatial?: SpatialModel | null;
+  /** D3 — the page's type ramp: distinct sizes, weights, families, ratios, scale consistency. */
+  typeRamp?: TypeRamp | null;
+  /** D4 — elevation model: z-index groups, stacking contexts, shadow depth tiers. */
+  elevation?: ElevationModel | null;
+  /** D6 — surface language classification + radius/border vocabulary. */
+  surfaceLanguage?: SurfaceLanguageProfile | null;
+  /** D8 — media inventory: all images, videos, SVGs, icons with intrinsic/rendered dims. */
+  media?: MediaInventory | null;
+  /** D9 — ARIA landmarks + HTML5 sectioning elements mapped to clusters. */
+  landmarks?: LandmarkMap | null;
+  /** D9 — interactive inventory: links, buttons, inputs, focusable order, aria-hidden. */
+  interactive?: InteractiveInventory | null;
+  /** D5+D10 — safety profile: fixed/sticky, scroll behavior, per-region safety flags. */
+  safety?: SafetyProfile | null;
 }
 
 export interface LayoutFingerprint {
@@ -370,17 +399,11 @@ export function perceive(): Perception {
     { w: vpW, h: window.innerHeight || 800 },
   );
 
-  // C4-C10 — perception enrichment: heading outline, component types, text
-  // profiles, colour model, density/rhythm/alignment. Each is additive — it
-  // enriches the existing Cluster / Perception without changing what's emitted
-  // today. The model was handed "two floors, white walls, blue door" and blamed
-  // for the design; these give it the information it needs to see the page.
+  // C4-C10 + D2-D10 — perception enrichment. Each is additive — enriches the
+  // existing Cluster/Perception without changing what's emitted today.
 
-  // C4 — build the document outline tree from h1-h6 and ARIA headings.
+  // C4 — document outline tree + governing headings.
   const outlineResult = buildOutline();
-  // Attach governing heading to each cluster: the nearest preceding heading in
-  // source order. A heading governs itself. Gives the model document hierarchy
-  // and section boundaries (what is primary vs supporting).
   let currentHeading: string | null = null;
   for (const c of [...clusters].sort((a, b) => a.sourceOrder - b.sourceOrder)) {
     if (/^h[1-6]$/.test(c.tag) || c.role === 'heading') {
@@ -391,25 +414,63 @@ export function perceive(): Perception {
     }
   }
 
-  // C7 — classify each cluster into a recognisable component type.
-  // C10 — analyze each cluster's text profile (reading length, kind, direction,
-  // longest unbreakable token, DOM truncation).
+  // Per-cluster enrichment: component type, text, typography, background, borders, media kind.
   for (const c of clusters) {
     const el = representativeFor(c);
     const comp = classifyComponentType(c, el);
     c.componentType = comp.type;
     c.componentConfidence = comp.confidence;
     c.textProfile = analyzeText(c, el);
+    c.typography = analyzeTypography(c, el);
+    c.background = resolveEffectiveBackground(c, el);
+    c.borderShape = analyzeBorderShape(c, el);
+    if (comp.type !== 'unknown') c.provenance.componentType = `${c.tag}+${comp.type}`;
+    if (comp.confidence < 0.7) c.provenance.componentTypeConfidence = `low:${comp.confidence.toFixed(2)}`;
   }
 
-  // C6 — build the colour model (palette in HSL, hue relationships, geometry).
+  // D3 — page type ramp (needs per-cluster typography profiles computed above).
+  const typeRamp = buildTypeRamp(clusters, (c) => c.typography?.lineHeight ?? 'normal');
+
+  // D6 — surface language (page-level).
+  const surfaceLanguage = classifySurfaceLanguage(clusters);
+
+  // C6 — colour model.
   const colorModel = buildColorModel({ clusters });
 
-  // C8 — measure density, rhythm, and alignment. These are INPUTS to the
-  // designer, not gates — the pixel verifier must never judge them after the fact.
+  // D4 — elevation model.
+  const elevation = buildElevationModel(clusters);
+
+  // D8 — media inventory + per-cluster media kind.
+  const media = inventoryMedia(clusters, { w: vpW, h: window.innerHeight || 800 });
+  const mediaByHandle = new Map(media.items.map((m) => [m.handle, m]));
+  for (const c of clusters) {
+    const mi = mediaByHandle.get(c.handle);
+    if (mi) { c.mediaKind = mi.kind; if (mi.distorted) c.provenance.mediaDistortion = `${mi.intrinsicAspect}→${mi.renderedAspect}`; }
+  }
+
+  // D9 — landmarks + interactive inventory.
+  const landmarks = mapLandmarks(clusters);
+  const interactive = inventoryInteractive(clusters);
+  for (const le of landmarks.landmarks) {
+    const c = clusters.find((c) => c.handle === le.handle);
+    if (c) { c.landmark = le.landmark; c.provenance.landmark = `${le.declaredBy}:${le.landmark}`; }
+  }
+
+  // D5+D10 — safety profile (fixed/sticky, scroll behavior, per-region flags).
+  const safety = buildSafetyProfile(clusters);
+  const safetyByHandle = new Map(safety.regions.map((r) => [r.handle, r]));
+  for (const c of clusters) {
+    const r = safetyByHandle.get(c.handle);
+    if (r) { c.safety = r; if (r.unsafe) c.provenance.safetyUnsafe = Object.entries(r).filter(([k, v]) => k !== 'handle' && k !== 'unsafe' && v).map(([k]) => k).join(','); }
+  }
+
+  // C8+D7 — density, rhythm, alignment (expanded). D2 deletes the re-query workaround.
   const alignmentEdges = measureAlignmentEdges(clusters, vpW);
-  const density = measureDensity(clusters, { w: vpW, h: window.innerHeight || 800 });
+  const density: ExpandedDensityProfile = measureDensityV2(clusters, { w: vpW, h: window.innerHeight || 800 });
   density.alignmentEdges = alignmentEdges;
+
+  // D2 — spatial model (adjacency, columns, reading order, gutters, symmetry, focal point).
+  const spatial = buildSpatialModel(clusters, { w: vpW, h: window.innerHeight || 800 });
 
   return {
     builtInMs: Math.round(performance.now() - t0),
@@ -423,11 +484,17 @@ export function perceive(): Perception {
     reflowOpportunity,
     composition,
     shadowRoots,
-    // C4-C10: the new perception fields.
     outline: outlineResult.tree,
     colorModel,
     density,
-    // B3: flag truncation so a partial redesign can't silently ship as success.
+    spatial,
+    typeRamp,
+    elevation,
+    surfaceLanguage,
+    media,
+    landmarks,
+    interactive,
+    safety,
     truncated: { walk: walkTruncated, serialize: false },
   };
 }
@@ -604,6 +671,9 @@ function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): 
       governingHeading: null, componentType: 'unknown', componentConfidence: 0,
       textProfile: { readingLength: 0, kind: 'none', dir: 'auto', longestToken: 0, truncated: false },
       provenance: {},
+      // D2-D10 enrichment fields — null until enrichment functions populate them.
+      typography: null, background: null, borderShape: null,
+      mediaKind: null, landmark: null, safety: null,
     });
   }
 

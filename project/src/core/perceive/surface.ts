@@ -2,7 +2,7 @@
  *  D6 (borders, shape, surface identity) + C6 (colour as HSL model). */
 
 import type { Cluster } from './index.ts';
-import { parseColor, colorfulness } from '../../shared/color.ts';
+import { parseColor, colorfulness, extractGradientStops } from '../../shared/color.ts';
 
 // ── C6 (carried from enrichment.ts): Colour as a model ──────────────
 
@@ -161,4 +161,358 @@ export function buildColorModel(p: { clusters: Cluster[] }): ColorModel {
   };
 }
 
-// ── D4+D6 functions will be added by subagent ─────────────────────
+// ── D4: Background, transparency, layering ─────────────────────────
+
+export interface BackgroundResolution {
+  effectiveColor: string;        // alpha-composited hex (#rrggbb)
+  type: 'solid' | 'gradient' | 'image' | 'none';
+  gradientStops?: string[];     // for gradients
+  gradientAngle?: number;
+  isContentImage: boolean;     // decorative vs content
+  backdropFilter: string;      // 'none' or the filter value
+  opacity: number;             // 0..1
+  blendMode: string;
+  transparentLayerCount: number;
+  transparentLayerTotalAlpha: number;
+}
+
+export interface StackingContext {
+  handle: string;
+  reason: string;  // 'position+z-index', 'opacity', 'transform', 'filter', 'will-change'
+  z: number | null;
+  children: string[]; // handles of clusters inside this context
+}
+
+export interface ElevationModel {
+  zIndexGroups: Map<number, string[]>;  // z-index → handles
+  stackingContexts: StackingContext[];
+  shadowTiers: Map<string, string[]>;   // 'small'|'medium'|'large' → handles
+  floatingRegions: string[];           // position != static
+}
+
+// ── D6: Borders, shape, surface identity ───────────────────────────
+
+export interface ShadowParse {
+  offsetX: number; offsetY: number; blur: number; spread: number;
+  color: string; inset: boolean;
+}
+
+export interface BorderShapeProfile {
+  borderWidths: { top: number; right: number; bottom: number; left: number };
+  borderStyles: { top: string; right: string; bottom: string; left: string };
+  borderColors: { top: string; right: string; bottom: string; left: string };
+  radii: { tl: number; tr: number; br: number; bl: number };
+  outline: string;
+  shadows: ShadowParse[];
+  shape: 'rectangular' | 'pill' | 'circular' | 'clipped';
+}
+
+export type SurfaceLanguage = 'flat' | 'outlined' | 'shadowed' | 'filled';
+
+export interface SurfaceLanguageProfile {
+  language: SurfaceLanguage;
+  radiusVocabulary: number[];
+  borderColorPalette: string[];
+}
+
+// ── helpers ────────────────────────────────────────────────────────
+
+type RGBA = [number, number, number, number];
+
+function rgbaToHex(c: RGBA): string {
+  const to = (v: number) => Math.max(0, Math.min(255, Math.round(v))).toString(16).padStart(2, '0');
+  return `#${to(c[0])}${to(c[1])}${to(c[2])}`;
+}
+
+/** Source-over alpha composite. Returns premultiplied-normalised RGBA. */
+function compositeOver(src: RGBA, dst: RGBA): RGBA {
+  const a = src[3] + dst[3] * (1 - src[3]);
+  if (a <= 0) return [0, 0, 0, 0];
+  return [
+    (src[0] * src[3] + dst[0] * dst[3] * (1 - src[3])) / a,
+    (src[1] * src[3] + dst[1] * dst[3] * (1 - src[3])) / a,
+    (src[2] * src[3] + dst[2] * dst[3] * (1 - src[3])) / a,
+    a,
+  ];
+}
+
+/** Split a CSS value on top-level commas (ignoring commas inside parens). */
+function splitTopLevel(value: string, sep: string): string[] {
+  const parts: string[] = [];
+  let depth = 0, cur = '';
+  for (const ch of value) {
+    if (ch === '(') depth++;
+    if (ch === ')') depth--;
+    if (ch === sep && depth === 0) { if (cur.trim()) parts.push(cur.trim()); cur = ''; }
+    else cur += ch;
+  }
+  if (cur.trim()) parts.push(cur.trim());
+  return parts;
+}
+
+/** Parse a CSS box-shadow (possibly multi-layer) into ShadowParse[]. */
+function parseBoxShadows(value: string): ShadowParse[] {
+  if (!value || value === 'none') return [];
+  const out: ShadowParse[] = [];
+  for (const layer of splitTopLevel(value, ',')) {
+    const inset = /\binset\b/i.test(layer);
+    const body = layer.replace(/\binset\b/i, '').trim();
+    // Colour is the trailing rgb()/rgba()/#hex/named token.
+    const colorMatch = body.match(/(rgba?\([^)]+\)|#[0-9a-f]{3,8})\s*$/i);
+    let color = 'rgba(0,0,0,0.2)';
+    let rest = body;
+    if (colorMatch && colorMatch.index != null) {
+      color = colorMatch[0].trim();
+      rest = body.slice(0, colorMatch.index).trim();
+    }
+    const nums = (rest.match(/-?[\d.]+/g) ?? []).map(Number);
+    out.push({
+      offsetX: nums[0] ?? 0, offsetY: nums[1] ?? 0,
+      blur: nums[2] ?? 0, spread: nums[3] ?? 0, color, inset,
+    });
+  }
+  return out;
+}
+
+/** Look up the live representative element for a cluster (light DOM; stamped attr). */
+function elementForCluster(cluster: Cluster): HTMLElement | null {
+  return document.querySelector<HTMLElement>(cluster.selector);
+}
+
+// ── D4 functions ───────────────────────────────────────────────────
+
+/** Resolve the effective background by walking up through transparency to an
+ *  opaque base, alpha-compositing each transparent layer. Law 0: the returned
+ *  colour is a decision input, never an emitted value. */
+export function resolveEffectiveBackground(cluster: Cluster, el: HTMLElement | null): BackgroundResolution {
+  const cs = el ? getComputedStyle(el) : null;
+  const bgImage = cs ? cs.backgroundImage : 'none';
+  const bg = cs ? cs.backgroundColor : cluster.style.background;
+
+  // Background type from the element's own painted background.
+  let type: BackgroundResolution['type'] = 'none';
+  let gradientStops: string[] | undefined;
+  let gradientAngle: number | undefined;
+  let isContentImage = false;
+  if (bgImage && bgImage !== 'none') {
+    if (/gradient/i.test(bgImage)) {
+      type = 'gradient';
+      gradientStops = extractGradientStops(bgImage).map(rgbaToHex);
+      const deg = bgImage.match(/([\d.]+)deg/);
+      if (deg) gradientAngle = parseFloat(deg[1]);
+      else if (/to\s+right/i.test(bgImage)) gradientAngle = 90;
+      else if (/to\s+bottom/i.test(bgImage)) gradientAngle = 180;
+      else if (/to\s+left/i.test(bgImage)) gradientAngle = 270;
+      else gradientAngle = 0;
+    } else if (/url\(/i.test(bgImage)) {
+      type = 'image';
+      isContentImage = true;
+    }
+  }
+  if (type === 'none' && parseColor(bg) && (parseColor(bg) as RGBA)[3] > 0) type = 'solid';
+
+  // Content image also includes <img> tags regardless of background.
+  if (!isContentImage && el != null && el.tagName === 'IMG') isContentImage = true;
+
+  // Alpha-composite up the parent chain until an opaque layer is found.
+  let composited: RGBA = parseColor(bg) ?? [0, 0, 0, 0];
+  let transparentLayerCount = 0;
+  let transparentStackOpacity = 1 - composited[3]; // 1 - Π(1-α) over transparent layers
+  let node = el?.parentElement ?? null;
+  while (composited[3] < 0.999 && node) {
+    const parentBg = parseColor(getComputedStyle(node).backgroundColor) ?? [0, 0, 0, 0];
+    if (parentBg[3] < 0.999) {
+      transparentLayerCount++;
+      transparentStackOpacity = 1 - (1 - transparentStackOpacity) * (1 - parentBg[3]);
+    }
+    composited = compositeOver(composited, parentBg);
+    node = node.parentElement;
+  }
+  // If still transparent at the top, composite over the page canvas (white fallback).
+  if (composited[3] < 0.999) composited = compositeOver(composited, [255, 255, 255, 1]);
+
+  const transparentLayerTotalAlpha = Math.min(1, transparentStackOpacity);
+
+  return {
+    effectiveColor: rgbaToHex(composited),
+    type,
+    gradientStops,
+    gradientAngle,
+    isContentImage,
+    backdropFilter: cs ? cs.backdropFilter : 'none',
+    opacity: cs ? parseFloat(cs.opacity) : 1,
+    blendMode: cs ? cs.mixBlendMode : 'normal',
+    transparentLayerCount,
+    transparentLayerTotalAlpha,
+  };
+}
+
+/** Build the page elevation model: z-index groups, stacking contexts, shadow
+ *  tiers, and floating regions. */
+export function buildElevationModel(clusters: Cluster[]): ElevationModel {
+  const zIndexGroups = new Map<number, string[]>();
+  const stackingContexts: StackingContext[] = [];
+  const shadowTiers = new Map<string, string[]>([['small', []], ['medium', []], ['large', []]]);
+  const floatingRegions: string[] = [];
+
+  const els = new Map<string, HTMLElement | null>();
+  for (const c of clusters) els.set(c.handle, elementForCluster(c));
+
+  for (const c of clusters) {
+    const el = els.get(c.handle) ?? null;
+    // Floating regions: position != static (from the layout fact already captured).
+    if (c.layout.position !== 'static') floatingRegions.push(c.handle);
+
+    if (el) {
+      const cs = getComputedStyle(el);
+      const zRaw = cs.zIndex;
+      if (zRaw !== 'auto') {
+        const z = parseInt(zRaw, 10);
+        if (!Number.isNaN(z)) {
+          const arr = zIndexGroups.get(z) ?? [];
+          arr.push(c.handle);
+          zIndexGroups.set(z, arr);
+        }
+      }
+
+      // Stacking context creators.
+      const position = cs.position;
+      const createsByZ = position !== 'static' && zRaw !== 'auto';
+      const opacity = parseFloat(cs.opacity);
+      const transform = cs.transform;
+      const filter = cs.filter;
+      const willChange = cs.willChange;
+      let reason: string | null = null;
+      let z: number | null = null;
+      if (createsByZ) { reason = 'position+z-index'; z = parseInt(zRaw, 10); }
+      else if (!Number.isNaN(opacity) && opacity < 1) reason = 'opacity';
+      else if (transform !== 'none') reason = 'transform';
+      else if (filter !== 'none') reason = 'filter';
+      else if (willChange !== 'auto' && willChange !== '') reason = 'will-change';
+      if (reason) {
+        const children: string[] = [];
+        for (const other of clusters) {
+          if (other.handle === c.handle) continue;
+          const oel = els.get(other.handle);
+          if (oel && el.contains(oel)) children.push(other.handle);
+        }
+        stackingContexts.push({ handle: c.handle, reason, z, children });
+      }
+    }
+
+    // Shadow tiers from the stored box-shadow (max blur drives the tier).
+    if (c.style.boxShadow !== 'none') {
+      const shadows = parseBoxShadows(c.style.boxShadow);
+      const maxBlur = shadows.reduce((m, s) => Math.max(m, s.blur), 0);
+      const tier = maxBlur < 4 ? 'small' : maxBlur <= 12 ? 'medium' : 'large';
+      shadowTiers.get(tier)!.push(c.handle);
+    }
+  }
+
+  return { zIndexGroups, stackingContexts, shadowTiers, floatingRegions };
+}
+
+// ── D6 functions ───────────────────────────────────────────────────
+
+/** Per-region border, radius, outline, shadow and shape classification. */
+export function analyzeBorderShape(cluster: Cluster, el: HTMLElement | null): BorderShapeProfile {
+  const cs = el ? getComputedStyle(el) : null;
+  const w = cluster.rect.w;
+  const h = cluster.rect.h;
+
+  const px = (v: string | undefined, fallback = 0): number => {
+    if (!v) return fallback;
+    if (v.endsWith('%')) return (parseFloat(v) / 100) * w; // ponytail: %→px via width; rare vertical-% corners
+    return parseFloat(v) || fallback;
+  };
+
+  if (!cs) {
+    return {
+      borderWidths: { top: 0, right: 0, bottom: 0, left: 0 },
+      borderStyles: { top: 'none', right: 'none', bottom: 'none', left: 'none' },
+      borderColors: { top: '', right: '', bottom: '', left: '' },
+      radii: { tl: 0, tr: 0, br: 0, bl: 0 },
+      outline: 'none',
+      shadows: [],
+      shape: 'rectangular',
+    };
+  }
+
+  const borderWidths = {
+    top: parseFloat(cs.borderTopWidth) || 0,
+    right: parseFloat(cs.borderRightWidth) || 0,
+    bottom: parseFloat(cs.borderBottomWidth) || 0,
+    left: parseFloat(cs.borderLeftWidth) || 0,
+  };
+  const borderStyles = {
+    top: cs.borderTopStyle, right: cs.borderRightStyle,
+    bottom: cs.borderBottomStyle, left: cs.borderLeftStyle,
+  };
+  const borderColors = {
+    top: cs.borderTopColor, right: cs.borderRightColor,
+    bottom: cs.borderBottomColor, left: cs.borderLeftColor,
+  };
+
+  // Per-corner radii; a corner value may be "8px" or "50% 50%".
+  const corner = (v: string): number => {
+    const first = v.split(/\s+/)[0] ?? '0';
+    return px(first);
+  };
+  const radii = {
+    tl: corner(cs.borderTopLeftRadius),
+    tr: corner(cs.borderTopRightRadius),
+    br: corner(cs.borderBottomRightRadius),
+    bl: corner(cs.borderBottomLeftRadius),
+  };
+
+  const shadows = parseBoxShadows(cs.boxShadow);
+
+  // Shape classification.
+  let shape: BorderShapeProfile['shape'] = 'rectangular';
+  if (cs.clipPath !== 'none') {
+    shape = 'clipped';
+  } else {
+    const minR = Math.min(radii.tl, radii.tr, radii.br, radii.bl);
+    const isCircleish = w > 0 && h > 0 && Math.abs(w - h) <= 2 && minR >= Math.min(w, h) / 2 - 1;
+    if (isCircleish) shape = 'circular';
+    else if (h > 0 && minR >= h / 2 - 1) shape = 'pill';
+  }
+
+  const outline = `${cs.outlineWidth} ${cs.outlineStyle} ${cs.outlineColor}`;
+
+  return { borderWidths, borderStyles, borderColors, radii, outline, shadows, shape };
+}
+
+/** Page-level surface language: radius vocabulary, border colour palette,
+ *  and a single classification a Painter needs before choosing a treatment. */
+export function classifySurfaceLanguage(clusters: Cluster[]): SurfaceLanguageProfile {
+  const radiusSet = new Set<number>();
+  const borderColorSet = new Set<string>();
+
+  let shadowCount = 0, borderCount = 0, solidCount = 0;
+  for (const c of clusters) {
+    const r = parseFloat(c.style.borderRadius);
+    if (r > 0) radiusSet.add(Math.round(r));
+    // Border colour: extract the colour from the shorthand "1px solid rgb(...)".
+    if (c.style.border !== 'none') {
+      borderCount++;
+      const m = c.style.border.match(/(rgba?\([^)]+\)|#[0-9a-f]{3,8})\s*$/i);
+      if (m) borderColorSet.add(m[1]);
+    }
+    if (c.style.boxShadow !== 'none') shadowCount++;
+    if (c.hasSolidBg) solidCount++;
+  }
+
+  const total = clusters.length || 1;
+  let language: SurfaceLanguage;
+  if (shadowCount > total * 0.3 && shadowCount >= borderCount) language = 'shadowed';
+  else if (borderCount > total * 0.3) language = 'outlined';
+  else if (solidCount > total * 0.5) language = 'filled';
+  else language = 'flat';
+
+  return {
+    language,
+    radiusVocabulary: [...radiusSet].sort((a, b) => a - b),
+    borderColorPalette: [...borderColorSet],
+  };
+}
