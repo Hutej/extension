@@ -21,12 +21,13 @@ function style(over: Partial<ClusterStyle> = {}): ClusterStyle {
 function cluster(over: Partial<Cluster>): Cluster {
   return {
     handle: 'c000000', selector: '[data-wm-c="c000000"]', count: 1, tag: 'div', role: null,
-    isNativeControl: false, isCheckboxRadio: false, hasSolidBg: true, rect: { w: 100, h: 100 },
+    isNativeControl: false, isCheckboxRadio: false, hasSolidBg: true, rect: { x: 0, y: 0, w: 100, h: 100, vx: 0, vy: 0, aboveFold: true },
     samples: [], prominence: 1, layout: layout(), widthFractionOfParent: 1,
     emptinessScore: 0, moveSafety: 'safe', sourceOrder: 0,
     designRole: 'ad-or-void', designRoleConfidence: 0.9, dominanceRank: 0, group: null,
     governingHeading: null, componentType: 'unknown', componentConfidence: 0,
     textProfile: { readingLength: 0, kind: 'none', dir: 'auto', longestToken: 0, truncated: false },
+    provenance: {},
     style: style(),
     ...over,
   };
@@ -51,10 +52,10 @@ function perception(clusters: Cluster[]): Perception {
 
 function testGuardLaws() {
   // remove on a near-empty, safe, short cluster → accepted.
-  const empty = cluster({ handle: 'c1', role: 'complementary', rect: { w: 300, h: 80 }, emptinessScore: 0.9 });
-  const main = cluster({ handle: 'c2', role: 'main', rect: { w: 800, h: 600 }, emptinessScore: 0.1, moveSafety: 'forbidden' });
-  const tall = cluster({ handle: 'c3', role: 'complementary', rect: { w: 300, h: 500 }, emptinessScore: 0.9 });
-  const form = cluster({ handle: 'c4', role: 'form', tag: 'form', rect: { w: 300, h: 80 }, emptinessScore: 0.9, moveSafety: 'risky' });
+  const empty = cluster({ handle: 'c1', role: 'complementary', rect: { x: 0, y: 0, w: 300, h: 80, vx: 0, vy: 0, aboveFold: true }, emptinessScore: 0.9 });
+  const main = cluster({ handle: 'c2', role: 'main', rect: { x: 0, y: 0, w: 800, h: 600, vx: 0, vy: 0, aboveFold: true }, emptinessScore: 0.1, moveSafety: 'forbidden' });
+  const tall = cluster({ handle: 'c3', role: 'complementary', rect: { x: 0, y: 0, w: 300, h: 500, vx: 0, vy: 0, aboveFold: true }, emptinessScore: 0.9 });
+  const form = cluster({ handle: 'c4', role: 'form', tag: 'form', rect: { x: 0, y: 0, w: 300, h: 80, vx: 0, vy: 0, aboveFold: true }, emptinessScore: 0.9, moveSafety: 'risky' });
   const p = perception([empty, main, tall, form]);
 
   const ops: DesignOp[] = [
@@ -80,7 +81,7 @@ function testGuardLaws() {
   assert.ok(r.ops.some((o) => o.kind === 'move' && o.target === 'c4' && o.consent === true), 'risky + consent accepted');
 
   // remove on a content-rich cluster → refused (not-empty), even if otherwise safe.
-  const rich = cluster({ handle: 'c5', role: 'complementary', rect: { w: 300, h: 80 }, emptinessScore: 0.2, samples: ['a long piece of real text content here'] });
+  const rich = cluster({ handle: 'c5', role: 'complementary', rect: { x: 0, y: 0, w: 300, h: 80, vx: 0, vy: 0, aboveFold: true }, emptinessScore: 0.2, samples: ['a long piece of real text content here'] });
   const r2 = validateOps([{ kind: 'remove', target: 'c5' }], perception([rich]));
   assert.ok(r2.refused.some((s) => s.includes('not-empty')), 'non-empty remove refused');
   assert.equal(r2.ops.length, 0, 'non-empty remove not accepted');
@@ -139,7 +140,7 @@ function testUndoInverse() {
   // Idempotency: a remove of an already-gone node is a no-op (executeOps handles this
   // live; here we just assert validateOps on a perception without the handle refuses
   // as no-such-handle, and a second remove of a present handle is the same op).
-  const p2 = perception([c2, c3].map((n) => cluster({ handle: n.handle!, role: n.tag === 'main' ? 'main' : 'contentinfo', rect: { w: 300, h: 80 }, emptinessScore: 0.9 })));
+  const p2 = perception([c2, c3].map((n) => cluster({ handle: n.handle!, role: n.tag === 'main' ? 'main' : 'contentinfo', rect: { x: 0, y: 0, w: 300, h: 80, vx: 0, vy: 0, aboveFold: true }, emptinessScore: 0.9 })));
   // c1 is gone from the perception → 'remove c1' is no-such-handle.
   const r = validateOps([{ kind: 'remove', target: 'c1' }], p2);
   assert.ok(r.refused.some((s) => s.includes('no-such-handle')), 're-derive remove of gone node = refused (no-op)');
@@ -151,7 +152,7 @@ function testUndoInverse() {
 function testEmptinessFloor() {
   assert.equal(REMOVE_EMPTINESS_FLOOR, 0.6, 'floor is 0.6');
   // A cluster at exactly the floor is accepted; below refused (covered in guard-laws).
-  const at = cluster({ handle: 'cx', role: 'complementary', rect: { w: 300, h: 80 }, emptinessScore: REMOVE_EMPTINESS_FLOOR });
+  const at = cluster({ handle: 'cx', role: 'complementary', rect: { x: 0, y: 0, w: 300, h: 80, vx: 0, vy: 0, aboveFold: true }, emptinessScore: REMOVE_EMPTINESS_FLOOR });
   const r = validateOps([{ kind: 'remove', target: 'cx' }], perception([at]));
   assert.equal(r.ops.length, 1, 'at-floor remove accepted');
   console.log('emptiness-floor OK — boundary accepted at 0.6');
@@ -163,9 +164,9 @@ function testPassiveWrapperRemovable() {
   // A passive wrapper (isPassiveWrapper=true) that is near-empty IS removable —
   // collapsing it reclaims the dead-margin band (the remove op's whole purpose).
   // An opaque wrapper (canvas-hider) is still refused.
-  const passiveEmpty = cluster({ handle: 'pw', role: null, rect: { w: 1200, h: 80 }, emptinessScore: 0.9, layout: layout({ isPassiveWrapper: true }) });
-  const opaqueEmpty = cluster({ handle: 'ow', role: null, rect: { w: 1200, h: 80 }, emptinessScore: 0.9, layout: layout({ isOpaqueWrapper: true }) });
-  const passiveContent = cluster({ handle: 'pc', role: null, rect: { w: 1200, h: 80 }, emptinessScore: 0.2, samples: ['real content text here'], layout: layout({ isPassiveWrapper: true }) });
+  const passiveEmpty = cluster({ handle: 'pw', role: null, rect: { x: 0, y: 0, w: 1200, h: 80, vx: 0, vy: 0, aboveFold: true }, emptinessScore: 0.9, layout: layout({ isPassiveWrapper: true }) });
+  const opaqueEmpty = cluster({ handle: 'ow', role: null, rect: { x: 0, y: 0, w: 1200, h: 80, vx: 0, vy: 0, aboveFold: true }, emptinessScore: 0.9, layout: layout({ isOpaqueWrapper: true }) });
+  const passiveContent = cluster({ handle: 'pc', role: null, rect: { x: 0, y: 0, w: 1200, h: 80, vx: 0, vy: 0, aboveFold: true }, emptinessScore: 0.2, samples: ['real content text here'], layout: layout({ isPassiveWrapper: true }) });
   const r = validateOps([
     { kind: 'remove', target: 'pw' },
     { kind: 'remove', target: 'ow' },

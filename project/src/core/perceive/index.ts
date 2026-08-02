@@ -18,11 +18,11 @@ import {
   classifyRole, rankDominance, detectGrouping, summarizeComposition,
   type ClusterSignals, type PageContext, type DesignRole, type CompositionSummary,
 } from './semantic.ts';
-import {
-  buildOutline, buildColorModel, classifyComponentType, measureDensity, measureAlignmentEdges, analyzeText,
-  type HeadingNode, type ColorModel, type ComponentType,
-  type TextProfile, type DensityProfile,
-} from './enrichment.ts';
+import { buildOutline, classifyComponentType, type HeadingNode, type ComponentType } from './semantics.ts';
+import { buildColorModel, type ColorModel } from './surface.ts';
+import { measureDensity, measureAlignmentEdges, type DensityProfile } from './spatial.ts';
+import { analyzeText, type TextProfile } from './typography.ts';
+import { deepQuerySelector, deepQuerySelectorAll } from './dom-utils.ts';
 
 const IGNORED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'BR', 'HR', 'WBR', 'LINK', 'META', 'TEMPLATE', 'SLOT', 'PATH', 'DEFS']);
 const ESCAPE_UI_ID = 'webmorph-escape-ui';
@@ -86,7 +86,7 @@ export interface Cluster {
   isNativeControl: boolean;
   isCheckboxRadio: boolean;
   hasSolidBg: boolean;
-  rect: { w: number; h: number };
+  rect: { x: number; y: number; w: number; h: number; vx: number; vy: number; aboveFold: boolean };
   samples: string[];
   style: ClusterStyle;
   layout: ClusterLayout;
@@ -132,6 +132,10 @@ export interface Cluster {
   /** C10 — text profile: reading length, kind (prose/label/heading/number/code),
    *  language direction, longest unbreakable token, DOM truncation state. */
   textProfile: TextProfile;
+  /** D11 — provenance: the signal that produced each inferred classification.
+   *  Maps field name → signal description (e.g. { componentType: 'tag=table+thead' }).
+   *  Measured fields have no provenance entry (they are direct measurements). */
+  provenance: Record<string, string>;
 }
 
 export interface LayoutSkeleton {
@@ -205,7 +209,7 @@ interface Candidate {
   el: HTMLElement;
   tag: string;
   role: string | null;
-  rect: { w: number; h: number };
+  rect: { x: number; y: number; w: number; h: number; vx: number; vy: number; aboveFold: boolean };
   area: number;
   style: ClusterStyle;
   sample: string;
@@ -281,6 +285,11 @@ export function perceive(): Perception {
     const rect = el.getBoundingClientRect();
     const w = Math.round(rect.width);
     const h = Math.round(rect.height);
+    const vx = Math.round(rect.x);
+    const vy = Math.round(rect.y);
+    const x = vx + Math.round(window.scrollX);
+    const y = vy + Math.round(window.scrollY);
+    const aboveFold = rect.bottom > 0 && rect.top < (window.innerHeight || 800);
     visited++;
 
     const descend = () => {
@@ -320,7 +329,7 @@ export function perceive(): Perception {
       const passive = !solidBg && border === 'none' && !hasShadow && !isInteractive && el.children.length >= 1;
       candidates.push({
         el, tag: tag.toLowerCase(), role,
-        rect: { w, h }, area: w * h, hasSolidBg: solidBg,
+        rect: { x, y, w, h, vx, vy, aboveFold }, area: w * h, hasSolidBg: solidBg,
         sample: getAccessibleName(el) || directText(el).slice(0, 48),
         flexDirection: cs.flexDirection, depth, passive, childCount: el.children.length,
         style: {
@@ -594,6 +603,7 @@ function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): 
       // C4/C7/C10 — set by enrichPerception after stamping. Defaults until then.
       governingHeading: null, componentType: 'unknown', componentConfidence: 0,
       textProfile: { readingLength: 0, kind: 'none', dir: 'auto', longestToken: 0, truncated: false },
+      provenance: {},
     });
   }
 
@@ -1203,47 +1213,6 @@ export function clearHandles(): void {
   deepQuerySelectorAll(`[${CLUSTER_ATTR}]`).forEach((el) => el.removeAttribute(CLUSTER_ATTR));
 }
 
-/** C9 — deep querySelector that traverses shadow boundaries. Perception walks
- *  into shadow roots but the read-back (representativeFor, findScrollables,
- *  captureLayoutFingerprint) used plain querySelector, so composed-tree elements
- *  were lost between the two. Every site built this decade has shadow content. */
-export function deepQuerySelector<T extends Element = HTMLElement>(selector: string): T | null {
-  // Try the light DOM first (the common case).
-  const el = document.querySelector<T>(selector);
-  if (el) return el;
-  // Traverse shadow roots for composed-tree elements.
-  const walk = (root: Element | ShadowRoot | Document): T | null => {
-    for (const child of Array.from(root.querySelectorAll('*'))) {
-      if (child.matches?.(selector)) return child as T;
-      if (child instanceof HTMLElement && child.shadowRoot) {
-        const found = walk(child.shadowRoot);
-        if (found) return found;
-      }
-    }
-    return null;
-  };
-  return walk(document);
-}
-
-/** C9 — deep querySelectorAll that traverses shadow boundaries. */
-export function deepQuerySelectorAll<T extends Element = HTMLElement>(selector: string): T[] {
-  const results: T[] = [];
-  const seen = new Set<Element>();
-  // Light DOM
-  for (const el of Array.from(document.querySelectorAll<T>(selector))) {
-    results.push(el); seen.add(el);
-  }
-  // Shadow DOM
-  const walk = (root: Element | ShadowRoot | Document): void => {
-    for (const child of Array.from(root.querySelectorAll('*'))) {
-      if (child.matches?.(selector) && !seen.has(child)) { results.push(child as T); seen.add(child); }
-      if (child instanceof HTMLElement && child.shadowRoot) walk(child.shadowRoot);
-    }
-  };
-  walk(document);
-  return results;
-}
-
 /**
  * S3.4 — Perception settle condition. Replaces the fixed settleMs stopwatch
  * with a MutationObserver-based quiet window: proceed when no layout-affecting
@@ -1607,18 +1576,20 @@ export function serializeV2Painter(p: Perception, assignment: { handleToSlot: Ma
 
 function formatFull(c: Cluster): string {
   const L = c.layout;
-  // C11 — the new format: designRole + componentType lead, followed by identity,
-  // geometry, paint, and the new C4/C10 signals. Dropped fields the model never
-  // acted on: display, border (full string), fontWeight, padding,
-  // widthFractionOfParent, isPassiveWrapper, isOpaqueWrapper, gap.
+  // D1 — restored fields: display (formatting context, Law 0 rule 2), padding,
+  // gap, fontWeight. Added: position (x,y in document coords). If the budget
+  // is tight, cut sample text before cutting structure.
   const parts: string[] = [
     `${c.designRole}${c.group ? '@' + c.group : ''} dom${Math.round(c.dominanceRank * 10)}`,
     c.componentType !== 'unknown' ? `${c.componentType}:${c.componentConfidence.toFixed(1)}` : '',
     `${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
-    `${c.rect.w}x${c.rect.h} ${Math.round(L.widthRatio * 100)}%w`,
+    `@${c.rect.x},${c.rect.y} ${c.rect.w}x${c.rect.h} ${Math.round(L.widthRatio * 100)}%w${c.rect.aboveFold ? '' : ' [below-fold]'}`,
+    L.display,
     `bg:${short(c.style.background)}`, `text:${short(c.style.color)}`,
-    `font:${c.style.fontSize}`,
+    `font:${c.style.fontSize}/${c.style.fontWeight}`,
   ].filter(Boolean);
+  if (c.style.padding !== '0px') parts.push(`pad:${c.style.padding}`);
+  if (L.siblingGapPx != null && L.siblingGapPx > 0) parts.push(`gap:${L.siblingGapPx}px`);
   if (c.isNativeControl) parts.push('[native]');
   if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) {
     parts.push('[image]');
@@ -1642,10 +1613,10 @@ function formatFull(c: Cluster): string {
 }
 
 function formatCompact(c: Cluster): string {
-  // C11 — compact line: role + componentType + identity + geometry + key signals.
+  // D1 — restored: position + display in compact too (structure before samples).
   const parts: string[] = [
     `${c.designRole}${c.componentType !== 'unknown' ? ':' + c.componentType : ''} ${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
-    `${c.rect.w}x${c.rect.h} ${Math.round(c.layout.widthRatio * 100)}%w`,
+    `@${c.rect.x},${c.rect.y} ${c.rect.w}x${c.rect.h} ${Math.round(c.layout.widthRatio * 100)}%w ${c.layout.display}`,
   ];
   if (c.hasSolidBg) parts.push(`bg:${short(c.style.background)}`);
   if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) {

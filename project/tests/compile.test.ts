@@ -25,12 +25,13 @@ function layout(over: Partial<ClusterLayout> = {}): ClusterLayout {
 function cluster(over: Partial<Cluster>): Cluster {
   return {
     handle: 'c000000', selector: '[data-wm-c="c000000"]', count: 1, tag: 'div', role: null,
-    isNativeControl: false, isCheckboxRadio: false, hasSolidBg: true, rect: { w: 100, h: 100 },
+    isNativeControl: false, isCheckboxRadio: false, hasSolidBg: true, rect: { x: 0, y: 0, w: 100, h: 100, vx: 0, vy: 0, aboveFold: true },
     samples: [], prominence: 1, layout: layout(), widthFractionOfParent: 1,
     emptinessScore: 0, moveSafety: 'safe', sourceOrder: 0,
     designRole: 'ad-or-void', designRoleConfidence: 0.9, dominanceRank: 0, group: null,
     governingHeading: null, componentType: 'unknown', componentConfidence: 0,
     textProfile: { readingLength: 0, kind: 'none', dir: 'auto', longestToken: 0, truncated: false },
+    provenance: {},
     style: {
       background: 'rgb(255,255,255)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px',
       boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block',
@@ -179,7 +180,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   const sidebar = cluster({
     handle: 'cside0', selector: '[data-wm-c="cside0"]',
     tag: 'aside', role: 'complementary',
-    rect: { w: 200, h: 300 },                // small — not page-scale
+    rect: { x: 0, y: 0, w: 200, h: 300, vx: 0, vy: 0, aboveFold: true },                // small — not page-scale
     layout: layout({ widthRatio: 0.15, isPassiveWrapper: false, isOpaqueWrapper: false }),
   });
   const p = perception([sidebar]);
@@ -191,7 +192,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
 // Compiler: refuses hide on a main/article (primary content)
 {
-  const main = cluster({ handle: 'cmain1', selector: '[data-wm-c="cmain1"]', role: 'main', rect: { w: 800, h: 600 }, layout: layout({ widthRatio: 0.65 }) });
+  const main = cluster({ handle: 'cmain1', selector: '[data-wm-c="cmain1"]', role: 'main', rect: { x: 0, y: 0, w: 800, h: 600, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.65 }) });
   const p = perception([main]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cmain1', hide: true }] }, p);
   assert.ok(!/display\s*:\s*none/.test(r.css), 'hide: primary content (main) refused');
@@ -202,7 +203,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 {
   const bigWrapper = cluster({
     handle: 'cwide1', selector: '[data-wm-c="cwide1"]',
-    rect: { w: 1200, h: 600 },               // tall + very wide
+    rect: { x: 0, y: 0, w: 1200, h: 600, vx: 0, vy: 0, aboveFold: true },               // tall + very wide
     layout: layout({ widthRatio: 0.93, isPassiveWrapper: false }),
   });
   const p = perception([bigWrapper]);
@@ -222,7 +223,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
 // Compiler: dropHides option strips all hide rules (used by repair when content blanked)
 {
-  const sidebar = cluster({ handle: 'csd2', selector: '[data-wm-c="csd2"]', role: 'complementary', rect: { w: 200, h: 300 }, layout: layout({ widthRatio: 0.15 }) });
+  const sidebar = cluster({ handle: 'csd2', selector: '[data-wm-c="csd2"]', role: 'complementary', rect: { x: 0, y: 0, w: 200, h: 300, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.15 }) });
   const p = perception([sidebar]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'csd2', hide: true }] }, p, { dropHides: true });
   assert.ok(!/display\s*:\s*none/.test(r.css), 'dropHides: suppresses all hide rules');
@@ -231,7 +232,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 // Compiler: hide and style/layout rules are mutually exclusive on the same target
 // (the hide path skips paint/layout — "hidden — paint/layout on this rule is moot")
 {
-  const sidebar = cluster({ handle: 'csd3', selector: '[data-wm-c="csd3"]', role: 'complementary', rect: { w: 200, h: 300 }, layout: layout({ widthRatio: 0.15 }) });
+  const sidebar = cluster({ handle: 'csd3', selector: '[data-wm-c="csd3"]', role: 'complementary', rect: { x: 0, y: 0, w: 200, h: 300, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.15 }) });
   const p = perception([sidebar]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'csd3', hide: true, styles: { background: '#ff0000' } }] }, p);
   // background should NOT appear — hide is accepted, style block is skipped
@@ -269,8 +270,8 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 {
   // A prominent single hero band (deliberate accent) + a huge repeated list whose
   // rows each paint the same red (the failure). Areas: hero 1200x120; rows 900x40 x 30.
-  const hero = cluster({ handle: 'chero', selector: '[data-wm-c="chero"]', count: 1, rect: { w: 1200, h: 120 }, prominence: 5, layout: layout({ widthRatio: 0.94 }) });
-  const rows = cluster({ handle: 'crows', selector: '[data-wm-c="crows"]', count: 30, rect: { w: 900, h: 40 }, prominence: 3, layout: layout({ widthRatio: 0.7 }) });
+  const hero = cluster({ handle: 'chero', selector: '[data-wm-c="chero"]', count: 1, rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, prominence: 5, layout: layout({ widthRatio: 0.94 }) });
+  const rows = cluster({ handle: 'crows', selector: '[data-wm-c="crows"]', count: 30, rect: { x: 0, y: 0, w: 900, h: 40, vx: 0, vy: 0, aboveFold: true }, prominence: 3, layout: layout({ widthRatio: 0.7 }) });
   const p = perception([hero, rows]);
   const spec: DesignSpec = {
     reasoning: '',
@@ -320,8 +321,8 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 // in BOTH the layout and styles bags — so oversized type can't bleed out of a
 // narrow card, however the model set it.
 {
-  const narrow = cluster({ handle: 'cnar', selector: '[data-wm-c="cnar"]', rect: { w: 200, h: 80 } });
-  const wide = cluster({ handle: 'cwid', selector: '[data-wm-c="cwid"]', rect: { w: 1000, h: 80 } });
+  const narrow = cluster({ handle: 'cnar', selector: '[data-wm-c="cnar"]', rect: { x: 0, y: 0, w: 200, h: 80, vx: 0, vy: 0, aboveFold: true } });
+  const wide = cluster({ handle: 'cwid', selector: '[data-wm-c="cwid"]', rect: { x: 0, y: 0, w: 1000, h: 80, vx: 0, vy: 0, aboveFold: true } });
   const p = perception([narrow, wide]);
 
   // 4rem (64px) on a 200px block -> clamped to fit its container (ceil 200*0.15=30px).
@@ -487,8 +488,8 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 // trimAccent in vivid mode strips repeated accents (absolute law) but keeps all
 // non-repeated accents (no area budget). Restrained mode keeps the area budget.
 {
-  const hero = cluster({ handle: 'chero', selector: '[data-wm-c="chero"]', count: 1, rect: { w: 1200, h: 120 }, prominence: 5, layout: layout({ widthRatio: 0.94 }) });
-  const rows = cluster({ handle: 'crows', selector: '[data-wm-c="crows"]', count: 30, rect: { w: 900, h: 40 }, prominence: 3, layout: layout({ widthRatio: 0.7 }) });
+  const hero = cluster({ handle: 'chero', selector: '[data-wm-c="chero"]', count: 1, rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, prominence: 5, layout: layout({ widthRatio: 0.94 }) });
+  const rows = cluster({ handle: 'crows', selector: '[data-wm-c="crows"]', count: 30, rect: { x: 0, y: 0, w: 900, h: 40, vx: 0, vy: 0, aboveFold: true }, prominence: 3, layout: layout({ widthRatio: 0.7 }) });
   const p = perception([hero, rows]);
   const spec: DesignSpec = {
     reasoning: '', paletteMode: 'vivid',
@@ -551,7 +552,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
 // ─────────────────────────────── Fix 3: columnCount clamp in compiler ───────────────────────────────
 {
-  const narrow = cluster({ handle: 'cnar', selector: '[data-wm-c="cnar"]', rect: { w: 150, h: 80 } });
+  const narrow = cluster({ handle: 'cnar', selector: '[data-wm-c="cnar"]', rect: { x: 0, y: 0, w: 150, h: 80, vx: 0, vy: 0, aboveFold: true } });
   const p = perception([narrow]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cnar', layout: { columnCount: '2' } }] }, p);
   // 150px / 120 = 1 → clamped to 1
@@ -561,7 +562,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
 // ─────────────────────────────── Fix 3: grid normalization in compiler ───────────────────────────────
 {
-  const grid = cluster({ handle: 'cgrd', selector: '[data-wm-c="cgrd"]', rect: { w: 600, h: 400 }, layout: layout({ isContainer: true }) });
+  const grid = cluster({ handle: 'cgrd', selector: '[data-wm-c="cgrd"]', rect: { x: 0, y: 0, w: 600, h: 400, vx: 0, vy: 0, aboveFold: true }, layout: layout({ isContainer: true }) });
   const p = perception([grid]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cgrd', layout: { gridTemplateColumns: '1fr 2fr' } }] }, p);
   assert.ok(r.css.includes('minmax(0, 1fr)'), 'compile: grid 1fr → minmax(0, 1fr)');
@@ -571,8 +572,8 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
 // ─────────────────────────────── Fix 1+2: composition rules ───────────────────────────────
 {
-  const main = cluster({ handle: 'cmain', selector: '[data-wm-c="cmain"]', role: 'main', rect: { w: 620, h: 2400 }, layout: layout({ isContainer: true, widthRatio: 0.48 }) });
-  const sidebar = cluster({ handle: 'cside', selector: '[data-wm-c="cside"]', role: 'complementary', rect: { w: 300, h: 2400 }, layout: layout({ widthRatio: 0.23 }) });
+  const main = cluster({ handle: 'cmain', selector: '[data-wm-c="cmain"]', role: 'main', rect: { x: 0, y: 0, w: 620, h: 2400, vx: 0, vy: 0, aboveFold: true }, layout: layout({ isContainer: true, widthRatio: 0.48 }) });
+  const sidebar = cluster({ handle: 'cside', selector: '[data-wm-c="cside"]', role: 'complementary', rect: { x: 0, y: 0, w: 300, h: 2400, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.23 }) });
   const p = perception([main, sidebar]);
 
   // validateSpec parses composition
@@ -610,10 +611,10 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   // A white-bg region NOT addressed by any rule, on a dark canvas → base-coated
   const header = cluster({
     handle: 'chdr', selector: '[data-wm-c="chdr"]', role: 'banner',
-    rect: { w: 1280, h: 64 }, layout: layout({ widthRatio: 1.0 }),
+    rect: { x: 0, y: 0, w: 1280, h: 64, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 1.0 }),
     style: { background: 'rgb(255,255,255)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: false },
   });
-  const main = cluster({ handle: 'cmain', selector: '[data-wm-c="cmain"]', role: 'main', rect: { w: 800, h: 600 }, layout: layout({ widthRatio: 0.62 }) });
+  const main = cluster({ handle: 'cmain', selector: '[data-wm-c="cmain"]', role: 'main', rect: { x: 0, y: 0, w: 800, h: 600, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.62 }) });
   const p = perception([header, main], 'rgb(255,255,255)', [
     { role: 'banner', handle: 'chdr', widthRatio: 1.0, order: 0, rect: { w: 1280, h: 64 } },
     { role: 'main', handle: 'cmain', widthRatio: 0.62, order: 1, rect: { w: 800, h: 600 } },
@@ -635,7 +636,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   // Luminance-compatible region → NOT base-coated (cream region on cream canvas)
   const creamHeader = cluster({
     handle: 'chdr2', selector: '[data-wm-c="chdr2"]', role: 'banner',
-    rect: { w: 1280, h: 64 }, layout: layout({ widthRatio: 1.0 }),
+    rect: { x: 0, y: 0, w: 1280, h: 64, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 1.0 }),
     style: { background: 'rgb(250,245,235)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: false },
   });
   const p2 = perception([creamHeader, main], 'rgb(250,245,235)', [
@@ -698,10 +699,10 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
   // base-coat skips image clusters (a thumbnail is not a "clashing strip" to repaint)
   const thumb2 = cluster({
-    handle: 'cthumb2', selector: '[data-wm-c="cthumb2"]', rect: { w: 320, h: 180 }, layout: layout({ widthRatio: 0.25 }),
+    handle: 'cthumb2', selector: '[data-wm-c="cthumb2"]', rect: { x: 0, y: 0, w: 320, h: 180, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.25 }),
     style: { background: 'rgb(255,255,255)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '14px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: true },
   });
-  const main = cluster({ handle: 'cmain2', selector: '[data-wm-c="cmain2"]', role: 'main', rect: { w: 800, h: 600 }, layout: layout({ widthRatio: 0.62 }) });
+  const main = cluster({ handle: 'cmain2', selector: '[data-wm-c="cmain2"]', role: 'main', rect: { x: 0, y: 0, w: 800, h: 600, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.62 }) });
   const pBase = perception([thumb2, main], 'rgb(255,255,255)');
   const rBase = compileSpec(
     { reasoning: '', canvas: { background: '#0a0a0a', color: '#f5f5f5' },
@@ -902,8 +903,8 @@ console.log('gradient.test OK — gradient stops extracted + readable text picke
 {
   // A wide child (fraction 0.9 of a 1000px parent): a 400px maxWidth -> 40% of
   // parent, but the room floor (0.92 * 0.9 = 82.8%) raises it to 83%.
-  const parent = cluster({ handle: 'cpar', selector: '[data-wm-c="cpar"]', rect: { w: 1000, h: 600 }, widthFractionOfParent: 1 });
-  const child = cluster({ handle: 'cchild', selector: '[data-wm-c="cchild"]', rect: { w: 900, h: 400 }, widthFractionOfParent: 0.9, layout: layout({ parentHandle: 'cpar' }) });
+  const parent = cluster({ handle: 'cpar', selector: '[data-wm-c="cpar"]', rect: { x: 0, y: 0, w: 1000, h: 600, vx: 0, vy: 0, aboveFold: true }, widthFractionOfParent: 1 });
+  const child = cluster({ handle: 'cchild', selector: '[data-wm-c="cchild"]', rect: { x: 0, y: 0, w: 900, h: 400, vx: 0, vy: 0, aboveFold: true }, widthFractionOfParent: 0.9, layout: layout({ parentHandle: 'cpar' }) });
   const p = perception([parent, child]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cchild', layout: { maxWidth: '400px' } }] }, p);
   // 400/1000 = 40%; floor 0.92*0.9*100 = 82.8 -> 83% (room law raises the wide child).
@@ -911,7 +912,7 @@ console.log('gradient.test OK — gradient stops extracted + readable text picke
   assert.ok(!/max-width: 400px/.test(r.css), 'geometry: no frozen px maxWidth (zoom-hostile)');
 
   // A narrow child (fraction 0.2): the model value is kept (no room floor).
-  const sidebar = cluster({ handle: 'cside', selector: '[data-wm-c="cside"]', rect: { w: 200, h: 600 }, widthFractionOfParent: 0.2, layout: layout({ parentHandle: 'cpar' }) });
+  const sidebar = cluster({ handle: 'cside', selector: '[data-wm-c="cside"]', rect: { x: 0, y: 0, w: 200, h: 600, vx: 0, vy: 0, aboveFold: true }, widthFractionOfParent: 0.2, layout: layout({ parentHandle: 'cpar' }) });
   const p2 = perception([parent, sidebar]);
   const r2 = compileSpec({ reasoning: '', rules: [{ target: 'cside', layout: { maxWidth: '200px' } }] }, p2);
   // 200/1000 = 20% (narrow child, fraction < 0.7 -> no room floor, kept as 20%).
@@ -926,7 +927,7 @@ console.log('geometry.test OK — cluster widths converted to zoom-proof % (room
 {
   // A content-less, image-less cluster the model frames with big padding + border.
   const emptyBox = cluster({
-    handle: 'cvoid', selector: '[data-wm-c="cvoid"]', rect: { w: 1200, h: 120 }, samples: [],
+    handle: 'cvoid', selector: '[data-wm-c="cvoid"]', rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, samples: [],
     layout: layout({ widthRatio: 0.94 }),
     style: { background: 'rgb(255,255,255)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: false },
   });
@@ -940,7 +941,7 @@ console.log('geometry.test OK — cluster widths converted to zoom-proof % (room
   assert.ok(r.droppedProps.some((d) => d.includes('voidGrowth')), 'void: growth refusal logged');
 
   // A text-BEARING cluster keeps its framing (it has content to show).
-  const textBox = cluster({ handle: 'ctxt2', selector: '[data-wm-c="ctxt2"]', rect: { w: 1200, h: 120 }, samples: ['Hello world content here'] });
+  const textBox = cluster({ handle: 'ctxt2', selector: '[data-wm-c="ctxt2"]', rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, samples: ['Hello world content here'] });
   const p2 = perception([textBox]);
   const r2 = compileSpec({ reasoning: '', canvas: { background: '#0a0a0a', color: '#f5f5f5' },
     rules: [{ target: 'ctxt2', styles: { padding: '40px', border: '4px solid #fff' } }] }, p2);

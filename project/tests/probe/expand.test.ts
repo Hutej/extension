@@ -23,12 +23,13 @@ function cl(handle: string, role: DesignRole, conf: number, opts: Partial<Cluste
   return {
     handle, selector: `[data-wm-c="${handle}"]`, count: 1, tag: 'div', role: null,
     isNativeControl: false, isCheckboxRadio: false, hasSolidBg: false,
-    rect: { w: 800, h: 200 }, samples: [], style: { background: '', color: '', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0', display: 'block', hasBgImage: false },
+    rect: { x: 0, y: 0, w: 800, h: 200, vx: 0, vy: 0, aboveFold: true }, samples: [], style: { background: '', color: '', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0', display: 'block', hasBgImage: false },
     layout: { display: 'block', flow: 'column', widthRatio: 0.6, isContainer: false, ownedByFlexGrid: false, constraintOwnerHandle: null, parentHandle: null, isPassiveWrapper: false, isOpaqueWrapper: false, depth: 1, position: 'static', flexWrap: false, alignment: 'start', widthSizing: 'auto', centered: false },
     prominence: 1, widthFractionOfParent: 1, emptinessScore: 0, moveSafety: 'safe', sourceOrder: 0,
     designRole: role, designRoleConfidence: conf, dominanceRank: 0.5, group: null,
     governingHeading: null, componentType: 'unknown', componentConfidence: 0,
     textProfile: { readingLength: 0, kind: 'none', dir: 'auto', longestToken: 0, truncated: false },
+    provenance: {},
     ...opts,
   };
 }
