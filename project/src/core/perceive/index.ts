@@ -1418,6 +1418,23 @@ export function serializePerception(p: Perception): string {
   header.push(formatDesignTokens(extractDesignTokens(p)));
   header.push(formatPacks());
 
+  // D2-D10 — page-level models, emitted once. Regions reference these by
+  // index/rank rather than restating values (D12: "type rank 3, surface tier 2,
+  // column 1" not every value it inherits).
+  if (p.typeRamp) header.push(formatTypeRamp(p.typeRamp));
+  if (p.spatial) header.push(formatSpatial(p.spatial));
+  if (p.surfaceLanguage) header.push(formatSurfaceLanguage(p.surfaceLanguage));
+  if (p.elevation) header.push(formatElevation(p.elevation));
+  if (p.media) header.push(formatMediaSummary(p.media));
+  if (p.landmarks) header.push(formatLandmarks(p.landmarks));
+  if (p.interactive) header.push(formatInteractiveSummary(p.interactive));
+  if (p.safety) header.push(formatSafetySummary(p.safety));
+
+  // Build reference maps for per-region references to page-level models.
+  const columnByHandle = new Map<string, number>();
+  if (p.spatial) for (const col of p.spatial.columns) for (const h of col.handles) columnByHandle.set(h, col.index);
+  const focalHandle = p.spatial?.focalPoint?.handle ?? null;
+
   // C5/D1 — semantic compression: merge instead of amputate. Collapse repeated
   // sibling structures, suppress pure-layout containers from serialization (but
   // keep them in the graph). Target ~50 regions that describe the WHOLE page.
@@ -1438,13 +1455,14 @@ export function serializePerception(p: Perception): string {
 
   // Build entry list from the tree walk.
   interface TreeEntry { entry: SerialEntry; isFull: boolean; line: string; depth: number; }
+  const ctx: RegionContext = { columnByHandle, focalHandle };
   const treeEntries: TreeEntry[] = [];
   const walk = (handle: string | null, depth: number): void => {
     const children = childrenOf.get(handle);
     if (!children) return;
     for (const e of children) {
       const isFull = tier1.has(e.rep.handle);
-      const line = isFull ? formatFullEntry(e) : formatCompactEntry(e);
+      const line = isFull ? formatFullEntry(e, ctx) : formatCompactEntry(e, ctx);
       treeEntries.push({ entry: e, isFull, line, depth });
       walk(e.rep.handle, depth + 1);
     }
@@ -1466,7 +1484,7 @@ export function serializePerception(p: Perception): string {
     for (const te of treeEntries) {
       if (te.isFull && !tier1.has(te.entry.rep.handle) && result.length > SERIALIZE_BUDGET) {
         te.isFull = false;
-        te.line = formatCompactEntry(te.entry);
+        te.line = formatCompactEntry(te.entry, ctx);
       }
       rebuilt.push('  '.repeat(Math.min(te.depth, 6)) + te.line);
     }
@@ -1596,6 +1614,56 @@ function formatDensity(d: DensityProfile): string {
   return lines.join('');
 }
 
+// ── D2-D10 model formatters (page-level, emitted once) ─────────────
+
+function formatTypeRamp(tr: import('./typography.ts').TypeRamp): string {
+  const steps = tr.steps.map((s) => `${s.size}px/${s.weight}(${s.frequency})`).join(' → ');
+  const ratio = tr.meanRatio ? ` ratio:${tr.meanRatio.toFixed(2)}` : '';
+  return `TYPE RAMP: ${steps}${ratio}${tr.consistentScale ? ' [consistent]' : ' [inconsistent]'} families:[${tr.families.join(',')}]`;
+}
+
+function formatSpatial(s: import('./spatial.ts').SpatialModel): string {
+  const cols = s.columns.map((c) => `col${c.index}@${c.x}w${c.width}g${c.gutterLeft}`).join(' ');
+  const focal = s.focalPoint ? ` focal:${s.focalPoint.handle}(${s.focalPoint.score.toFixed(2)})` : '';
+  const sym = ` sym:${s.symmetry.balanceRatio.toFixed(2)}`;
+  return `SPATIAL: ${cols}${focal}${sym} gutters:h${s.gutters.modalHorizontal}v${s.gutters.modalVertical}px`;
+}
+
+function formatSurfaceLanguage(sl: import('./surface.ts').SurfaceLanguageProfile): string {
+  return `SURFACE: ${sl.language} radii:[${sl.radiusVocabulary.join(',')}] border:[${sl.borderColorPalette.slice(0, 3).join(',')}]`;
+}
+
+function formatElevation(e: import('./surface.ts').ElevationModel): string {
+  const z = [...e.zIndexGroups.entries()].map(([z, hs]) => `z${z}:${hs.length}`).join(' ');
+  const tiers = [...e.shadowTiers.keys()].join('/');
+  const floating = e.floatingRegions.length;
+  return `ELEVATION: ${z || 'none'} shadow-tiers:[${tiers}] floating:${floating} contexts:${e.stackingContexts.length}`;
+}
+
+function formatMediaSummary(m: import('./media.ts').MediaInventory): string {
+  const kinds = m.items.reduce((acc, i) => { acc[i.kind] = (acc[i.kind] ?? 0) + 1; return acc; }, {} as Record<string, number>);
+  const kindStr = Object.entries(kinds).map(([k, n]) => `${k}:${n}`).join(' ');
+  return `MEDIA: ${kindStr} area:${m.totalMediaArea}px² distorted:${m.distortionCount} lazy:${m.lazyCount}`;
+}
+
+function formatLandmarks(l: import('./semantics.ts').LandmarkMap): string {
+  const items = l.landmarks.map((le) => `${le.landmark}:${le.handle}(${le.declaredBy})`).join(' ');
+  return `LANDMARKS: ${items || 'none'}`;
+}
+
+function formatInteractiveSummary(i: import('./semantics.ts').InteractiveInventory): string {
+  const links = i.regions.reduce((s, r) => s + r.linkCount, 0);
+  const buttons = i.regions.reduce((s, r) => s + r.buttonCount, 0);
+  const inputs = i.regions.reduce((s, r) => s + r.inputCount, 0);
+  const hidden = i.ariaHiddenRegions.length;
+  return `INTERACTIVE: links:${links} buttons:${buttons} inputs:${inputs} focusable:${i.focusableOrder.length} aria-hidden:${hidden}`;
+}
+
+function formatSafetySummary(s: import('./dynamism.ts').SafetyProfile): string {
+  const fixedSticky = s.fixedSticky.map((f) => `${f.position}:${f.handle}@${f.stickEdge ?? '?'}+${f.offset}`).join(' ');
+  return `SAFETY: unsafe:${s.unsafeCount} fixed-sticky:[${fixedSticky || 'none'}] scroll-snap:${s.scrollBehavior.scrollContainers.filter((c) => c.snapType !== 'none').length} scroll-driven:${s.scrollBehavior.scrollDrivenLikely} nav:${s.scrollBehavior.primaryNav ?? 'none'}`;
+}
+
 /**
  * Phase 2 — Painter-specific perception. The Painter decides the SURFACE (pack +
  * overrides + canvas + per-role aesthetics), not the layout, so it does not need
@@ -1672,11 +1740,18 @@ export function serializeV2Painter(p: Perception, assignment: { handleToSlot: Ma
   return [...header, 'ROLE+SLOT INVENTORY:', ...lines.map((l) => '  ' + l)].join('\n');
 }
 
-/** D1 — format a SerialEntry as a full line, including merge info. */
-function formatFullEntry(e: SerialEntry): string {
-  let line = formatFull(e.rep);
-  if (e.count !== e.rep.count) {
-    line = line.replace(`x${e.rep.count}`, `x${e.count}`);
+/** D12 — context for per-region references to page-level models. */
+interface RegionContext {
+  columnByHandle: Map<string, number>;
+  focalHandle: string | null;
+}
+
+/** D1 — format a SerialEntry as a full line, including merge info + D2-D10 refs. */
+function formatFullEntry(e: SerialEntry, ctx?: RegionContext): string {
+  const c = e.rep;
+  let line = formatFull(c);
+  if (e.count !== c.count) {
+    line = line.replace(`x${c.count}`, `x${e.count}`);
   }
   // D1 — member handles: merged groups carry the full handle list.
   if (e.members.length > 1) {
@@ -1686,16 +1761,40 @@ function formatFullEntry(e: SerialEntry): string {
   if (e.outliers.length > 0) {
     line += ` ≠${e.outliers.map((o) => `${o.handle}(${o.reason})`).join(';')}`;
   }
+  // D12 — references to page-level models (compact, not restated):
+  if (ctx) {
+    const col = ctx.columnByHandle.get(c.handle);
+    if (col != null) line += ` col${col}`;
+    if (ctx.focalHandle === c.handle) line += ' [focal]';
+  }
+  // D3 — type rank in page hierarchy.
+  if (c.typography?.rank) line += ` tr${c.typography.rank}`;
+  // D4 — background type (reference, not full resolution).
+  if (c.background) line += ` bg-${c.background.type}`;
+  // D6 — shape classification (reference, not full border profile).
+  if (c.borderShape?.shape && c.borderShape.shape !== 'rectangular') line += ` shape:${c.borderShape.shape}`;
+  // D8 — media kind (reference to MEDIA header).
+  if (c.mediaKind) line += ` media:${c.mediaKind}`;
+  // D9 — landmark (reference to LANDMARKS header).
+  if (c.landmark) line += ` lm:${c.landmark}`;
+  // D10 — safety flag (reference to SAFETY header).
+  if (c.safety?.unsafe) line += ' [unsafe]';
   return line;
 }
 
 /** D1 — format a SerialEntry as a compact line. */
-function formatCompactEntry(e: SerialEntry): string {
+function formatCompactEntry(e: SerialEntry, ctx?: RegionContext): string {
   let line = formatCompact(e.rep);
   if (e.count !== e.rep.count) {
     line = line.replace(`x${e.rep.count}`, `x${e.count}`);
   }
   if (e.outliers.length > 0) line += ` ≠${e.outliers.length}`;
+  if (ctx) {
+    const col = ctx.columnByHandle.get(e.rep.handle);
+    if (col != null) line += ` col${col}`;
+    if (ctx.focalHandle === e.rep.handle) line += ' [focal]';
+  }
+  if (e.rep.safety?.unsafe) line += ' [unsafe]';
   return line;
 }
 
