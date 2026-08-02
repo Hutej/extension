@@ -169,12 +169,11 @@ export const SIZING_KEYS = new Set(['width', 'minWidth', 'flex', 'flexGrow', 'fl
 
 /**
  * Viewport-safe type. A fontSize whose px-equivalent exceeds this is "display
- * type" and gets wrapped in clamp(1rem, <val>, VIEWPORT_FONT_CEIL_VW·vw) so it
- * scales down on narrow viewports instead of blowing out. Body text (below the
- * threshold) passes through untouched. Pure math — no aesthetic logic.
+ * type" and gets wrapped in clamp() so it scales down on narrow viewports
+ * instead of blowing out. Body text (below the threshold) passes through
+ * untouched. Pure math — no aesthetic logic.
  */
 export const LARGE_FONT_PX = 40;
-export const VIEWPORT_FONT_CEIL_VW = 10; // fallback ceiling (~10% viewport) when the container width is unknown
 /**
  * Container-relative type ceiling. Display type must fit its OWN block, not just
  * the viewport: a 4rem heading fits a 1000px column but bleeds out of a 200px
@@ -183,13 +182,19 @@ export const VIEWPORT_FONT_CEIL_VW = 10; // fallback ceiling (~10% viewport) whe
  * wide blocks. Pure geometry, no aesthetic logic.
  */
 export const FONT_CONTAINER_RATIO = 0.15;
+/** Rem-based display font ceiling — the fallback when container width is unknown.
+ *  5rem = 80px at default root size. Scales with the user's font-size preference
+ *  (accessibility), not with viewport width (which counted the scrollbar and
+ *  ignored container context — the bug that banned vw here). */
+export const DISPLAY_FONT_CEIL_REM = 5;
 
 /**
- * Make display type viewport-safe. Body text (< LARGE_FONT_PX) passes through
- * untouched. Large type is clamped so it can never overflow: the ceiling is a
- * viewport token (vw) — never a measurement-derived px. The containerWidthPx
- * measurement informs the DECISION (should we clamp?) but never the OUTPUT —
- * Law 0: measurements may inform decisions, never become output.
+ * Make display type safe. Body text (< LARGE_FONT_PX) passes through
+ * untouched. Large type is clamped so it can never overflow: when the
+ * containerWidthPx measurement is available it informs the DECISION (should we
+ * clamp?) but never the OUTPUT — Law 0: measurements may inform decisions,
+ * never become output. The ceiling is rem-based (scales with root font-size,
+ * not viewport width), or container-relative when the measurement is available.
  */
 export function clampDisplayFont(val: string, containerWidthPx?: number): string {
   const px = fontLengthToPx(val);
@@ -197,8 +202,13 @@ export function clampDisplayFont(val: string, containerWidthPx?: number): string
   if (containerWidthPx && containerWidthPx > 0) {
     const ceil = Math.round(containerWidthPx * FONT_CONTAINER_RATIO);
     if (px <= ceil) return val;                       // already fits — measurement is decision-only
+    // Container-relative ceiling in rem: convert the container-derived px ceiling
+    // to rem (÷ root size). This is a rem-based clamp, not a measurement output —
+    // the measurement informed the decision (px > ceil), the output is rem.
+    const ceilRem = Math.max(1, ceil / 16);
+    return `clamp(1rem, ${val}, ${ceilRem}rem)`;
   }
-  return `clamp(1rem, ${val}, ${VIEWPORT_FONT_CEIL_VW}vw)`; // token ceiling (vw, not measurement px)
+  return `clamp(1rem, ${val}, ${DISPLAY_FONT_CEIL_REM}rem)`; // rem ceiling (not vw — Law 0 rule 5)
 }
 
 /** Length -> px, or null for viewport-relative/computed lengths (vw/%/clamp/calc/min -> leave alone). */
@@ -429,7 +439,7 @@ function splitTracks(val: string): string[] {
  * min(X,100vh) by construction; a raw px here means a path leaked. THROWS —
  * does not rewrite. The old fluidizeRawPxSizing rewriter was proof that raw
  * pixels were still reaching emission; the source is now fixed (structure path
- * wraps by construction, clampDisplayFont uses vw tokens), so the guard is a
+ * wraps by construction, clampDisplayFont uses rem tokens), so the guard is a
  * rejection, not a bandage. `vw`/`vh`/`%`/`fr`/`auto`/`min()`/`clamp()`/`calc()`
  * are already fluid — not matched.
  */

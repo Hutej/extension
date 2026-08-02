@@ -136,7 +136,6 @@ async function runPerceive(page: Page, bundle: string): Promise<PerceptionShape>
   // run's [data-wm-c] attrs don't bias the next (perceive() calls clearHandles
   // itself, but be explicit — a probe must not depend on that for clean data).
   return await page.evaluate(async (src: string): Promise<PerceptionShape> => {
-    // eslint-disable-next-line @typescript-types/no-implied-eval
     new Function(src)();   // defines window.__wmPerceive + window.__wmClearHandles
     const perceive = (window as unknown as { __wmPerceive: () => unknown }).__wmPerceive;
     const clearHandles = (window as unknown as { __wmClearHandles: () => void }).__wmClearHandles;
@@ -445,7 +444,7 @@ async function measureSite(page: Page, bundle: string, site: { name: string; url
     await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await page.waitForTimeout(settle);
     const r = await mutationRemove(page, bundle);
-    const beforeSet = handleSet(r.before);
+    const _beforeSet = handleSet(r.before);
     const afterSet = handleSet(r.after);
     // A remove is "survived" if either the removed handle vanished OR a repeated
     // cluster's count dropped (a member removed from a family). A progressive-load

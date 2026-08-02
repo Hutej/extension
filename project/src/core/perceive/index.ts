@@ -18,6 +18,11 @@ import {
   classifyRole, rankDominance, detectGrouping, summarizeComposition,
   type ClusterSignals, type PageContext, type DesignRole, type CompositionSummary,
 } from './semantic.ts';
+import {
+  buildOutline, buildColorModel, classifyComponentType, measureDensity, measureAlignmentEdges, analyzeText,
+  type HeadingNode, type ColorModel, type ComponentType,
+  type TextProfile, type DensityProfile,
+} from './enrichment.ts';
 
 const IGNORED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'BR', 'HR', 'WBR', 'LINK', 'META', 'TEMPLATE', 'SLOT', 'PATH', 'DEFS']);
 const ESCAPE_UI_ID = 'webmorph-escape-ui';
@@ -114,6 +119,19 @@ export interface Cluster {
    *  one unit — a row of cards, a stack of nav links). null if the cluster is not in a
    *  detected group. A designer signal the old serialization omitted: grouping. */
   group: string | null;
+  /** C4 — the handle of the heading that governs this cluster's region, or null
+   *  if no heading governs it. Gives the model document hierarchy and section
+   *  boundaries (what is primary vs supporting, where a TOC comes from). */
+  governingHeading: string | null;
+  /** C7 — recognisable component type (card, list, table, form, hero, nav bar,
+   *  side rail, etc.) beyond the 15 design roles. A card and a table are both
+   *  "content" by role but need completely different treatment. */
+  componentType: ComponentType;
+  /** C7 — classifier confidence in the component type (0..1). */
+  componentConfidence: number;
+  /** C10 — text profile: reading length, kind (prose/label/heading/number/code),
+   *  language direction, longest unbreakable token, DOM truncation state. */
+  textProfile: TextProfile;
 }
 
 export interface LayoutSkeleton {
@@ -160,6 +178,17 @@ export interface Perception {
   /** B3: whether perception was truncated — a partial perception can ship a
    *  partial redesign as a success. Flag it so the caller can surface it. */
   truncated?: { walk: boolean; serialize: boolean };
+  /** C4 — the document outline tree built from h1-h6 and ARIA headings. Gives
+   *  the model document hierarchy, section boundaries, and what is primary vs
+   *  supporting. The single highest-leverage addition either developer named. */
+  outline: HeadingNode[];
+  /** C6 — the page's colour model: palette in HSL with alpha, hue relationships
+   *  (complementary/analogous/monochrome), saturation + lightness ranges, and
+   *  surface geometry (radii, border widths, shadow, spacing rhythm). */
+  colorModel: ColorModel;
+  /** C8 — page-level density, rhythm, and alignment: modal sibling gap,
+   *  repeating x-positions (alignment edges), and whitespace distribution. */
+  density: DensityProfile;
 }
 
 export interface LayoutFingerprint {
@@ -332,6 +361,47 @@ export function perceive(): Perception {
     { w: vpW, h: window.innerHeight || 800 },
   );
 
+  // C4-C10 — perception enrichment: heading outline, component types, text
+  // profiles, colour model, density/rhythm/alignment. Each is additive — it
+  // enriches the existing Cluster / Perception without changing what's emitted
+  // today. The model was handed "two floors, white walls, blue door" and blamed
+  // for the design; these give it the information it needs to see the page.
+
+  // C4 — build the document outline tree from h1-h6 and ARIA headings.
+  const outlineResult = buildOutline();
+  // Attach governing heading to each cluster: the nearest preceding heading in
+  // source order. A heading governs itself. Gives the model document hierarchy
+  // and section boundaries (what is primary vs supporting).
+  let currentHeading: string | null = null;
+  for (const c of [...clusters].sort((a, b) => a.sourceOrder - b.sourceOrder)) {
+    if (/^h[1-6]$/.test(c.tag) || c.role === 'heading') {
+      currentHeading = c.handle;
+      c.governingHeading = c.handle;
+    } else {
+      c.governingHeading = currentHeading;
+    }
+  }
+
+  // C7 — classify each cluster into a recognisable component type.
+  // C10 — analyze each cluster's text profile (reading length, kind, direction,
+  // longest unbreakable token, DOM truncation).
+  for (const c of clusters) {
+    const el = representativeFor(c);
+    const comp = classifyComponentType(c, el);
+    c.componentType = comp.type;
+    c.componentConfidence = comp.confidence;
+    c.textProfile = analyzeText(c, el);
+  }
+
+  // C6 — build the colour model (palette in HSL, hue relationships, geometry).
+  const colorModel = buildColorModel({ clusters });
+
+  // C8 — measure density, rhythm, and alignment. These are INPUTS to the
+  // designer, not gates — the pixel verifier must never judge them after the fact.
+  const alignmentEdges = measureAlignmentEdges(clusters, vpW);
+  const density = measureDensity(clusters, { w: vpW, h: window.innerHeight || 800 });
+  density.alignmentEdges = alignmentEdges;
+
   return {
     builtInMs: Math.round(performance.now() - t0),
     nodeCount: visited,
@@ -344,6 +414,10 @@ export function perceive(): Perception {
     reflowOpportunity,
     composition,
     shadowRoots,
+    // C4-C10: the new perception fields.
+    outline: outlineResult.tree,
+    colorModel,
+    density,
     // B3: flag truncation so a partial redesign can't silently ship as success.
     truncated: { walk: walkTruncated, serialize: false },
   };
@@ -381,7 +455,7 @@ function findScrollables(clusters: Cluster[]): { handle: string; axis: 'x' | 'y'
   const seen = new Set<string>();
   for (const cl of clusters) {
     if (seen.has(cl.handle)) continue;
-    const el = document.querySelector(cl.selector) as HTMLElement | null;
+    const el = deepQuerySelector<HTMLElement>(cl.selector);
     if (!el) continue;
     const r = el.getBoundingClientRect();
     if (r.width < 100 || r.height < 100) continue;       // skip tiny overflow clips
@@ -517,6 +591,9 @@ function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): 
       // Phase 1 design-role fields — set by enrichSemantic after stamping (needs the
       // live representative's signals). Defaults until then.
       designRole: 'ad-or-void', designRoleConfidence: 0, dominanceRank: 0, group: null,
+      // C4/C7/C10 — set by enrichPerception after stamping. Defaults until then.
+      governingHeading: null, componentType: 'unknown', componentConfidence: 0,
+      textProfile: { readingLength: 0, kind: 'none', dir: 'auto', longestToken: 0, truncated: false },
     });
   }
 
@@ -698,8 +775,10 @@ function enrichSafety(cluster: Cluster, rep: Candidate): void {
  *  One representative per handle (the first stamped member). The signals are
  *  generic and site-agnostic; the pure classifier lives in ./semantic.ts. */
 function representativeFor(cluster: Cluster): HTMLElement | null {
-  const el = document.querySelector<HTMLElement>(cluster.selector);
-  return el;
+  // C9: deepQuerySelector traverses shadow boundaries — composed-tree elements
+  // were lost between the walk (which enters shadow roots) and the read-back
+  // (which used plain querySelector).
+  return deepQuerySelector<HTMLElement>(cluster.selector);
 }
 
 /** Gather the deterministic, generic signals for one cluster from its live
@@ -902,7 +981,7 @@ function buildSkeleton(clusters: Cluster[], vpW: number): LayoutSkeleton {
   const cols = new Set<number>();
   for (const c of clusters) {
     if (c.layout.widthRatio >= 0.2 && c.layout.widthRatio <= 0.75) {
-      const el = document.querySelector(c.selector) as HTMLElement | null;
+      const el = deepQuerySelector<HTMLElement>(c.selector);
       if (el) cols.add(Math.round(el.getBoundingClientRect().x / 40));
     }
   }
@@ -931,7 +1010,7 @@ export function captureLayoutFingerprint(): LayoutFingerprint {
   // Without this, multi-element clusters (count > 1) waste slots and push
   // below-fold handles past the cap, hiding their collapse from verify.
   const seenHandles = new Set<string>();
-  const allEls = Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`));
+  const allEls = deepQuerySelectorAll(`[${CLUSTER_ATTR}]`);
   for (const el of allEls) {
     if (regions.length >= 200) break;
     const h = el.getAttribute(CLUSTER_ATTR) || '';
@@ -954,7 +1033,7 @@ export function captureLayoutFingerprint(): LayoutFingerprint {
     if (fs) sizes.add(Math.round(fs));
   }
   const cols = new Set<number>();
-  for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
+  for (const el of deepQuerySelectorAll(`[${CLUSTER_ATTR}]`)) {
     const r = el.getBoundingClientRect();
     const ratio = r.width / (window.innerWidth || 1280);
     if (ratio >= 0.2 && ratio <= 0.75) cols.add(Math.round(r.x / 40));
@@ -971,7 +1050,7 @@ export function captureLayoutFingerprint(): LayoutFingerprint {
 function findContentWidthFromStamped(): number | null {
   const vpW = window.innerWidth || 1280;
   let best = 0;
-  for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
+  for (const el of deepQuerySelectorAll(`[${CLUSTER_ATTR}]`)) {
     const r = el.getBoundingClientRect();
     const ratio = r.width / vpW;
     if (ratio >= 0.9 || ratio < 0.15) continue;
@@ -982,7 +1061,7 @@ function findContentWidthFromStamped(): number | null {
     }
   }
   if (!best) {
-    for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
+    for (const el of deepQuerySelectorAll(`[${CLUSTER_ATTR}]`)) {
       const r = el.getBoundingClientRect();
       const ratio = r.width / vpW;
       if (ratio >= 0.9 || ratio < 0.2) continue;
@@ -994,7 +1073,7 @@ function findContentWidthFromStamped(): number | null {
 
 function countTextBleeds(): number {
   let n = 0;
-  for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
+  for (const el of deepQuerySelectorAll(`[${CLUSTER_ATTR}]`)) {
     if (!(el instanceof HTMLElement) || el.hasAttribute('data-webmorph-ui') || el.clientWidth === 0) continue;
     const cs = getComputedStyle(el);
     if (cs.overflowX !== 'visible') continue;
@@ -1009,7 +1088,7 @@ function computeOverlapCount(): number {
   const vpW = window.innerWidth || 1280;
   const seen = new Set<string>();
   const regions: { el: Element; r: DOMRect }[] = [];
-  for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
+  for (const el of deepQuerySelectorAll(`[${CLUSTER_ATTR}]`)) {
     const h = el.getAttribute(CLUSTER_ATTR)!;
     if (seen.has(h)) continue;
     seen.add(h);
@@ -1097,7 +1176,7 @@ function resolveVarMap(vars: { name: string; value: string }[]): Record<string, 
 
 export function findPrimaryContentNode(): Element | null {
   // Fast path: look for main/article regions among stamped clusters.
-  for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
+  for (const el of deepQuerySelectorAll(`[${CLUSTER_ATTR}]`)) {
     const role = el.getAttribute('role');
     const tag = el.tagName.toLowerCase();
     if (role === 'main' || tag === 'main' || role === 'article' || tag === 'article') {
@@ -1109,7 +1188,7 @@ export function findPrimaryContentNode(): Element | null {
   let best: Element | null = null;
   let bestLen = 200;
   const vpArea = (window.innerWidth || 1280) * (window.innerHeight || 800);
-  for (const el of Array.from(document.querySelectorAll(`[${CLUSTER_ATTR}]`))) {
+  for (const el of deepQuerySelectorAll(`[${CLUSTER_ATTR}]`)) {
     if (el.hasAttribute('data-webmorph-ui')) continue;
     const textLen = (el.textContent || '').replace(/\s+/g, ' ').trim().length;
     if (textLen < bestLen) continue;
@@ -1121,7 +1200,48 @@ export function findPrimaryContentNode(): Element | null {
 }
 
 export function clearHandles(): void {
-  document.querySelectorAll(`[${CLUSTER_ATTR}]`).forEach((el) => el.removeAttribute(CLUSTER_ATTR));
+  deepQuerySelectorAll(`[${CLUSTER_ATTR}]`).forEach((el) => el.removeAttribute(CLUSTER_ATTR));
+}
+
+/** C9 — deep querySelector that traverses shadow boundaries. Perception walks
+ *  into shadow roots but the read-back (representativeFor, findScrollables,
+ *  captureLayoutFingerprint) used plain querySelector, so composed-tree elements
+ *  were lost between the two. Every site built this decade has shadow content. */
+export function deepQuerySelector<T extends Element = HTMLElement>(selector: string): T | null {
+  // Try the light DOM first (the common case).
+  const el = document.querySelector<T>(selector);
+  if (el) return el;
+  // Traverse shadow roots for composed-tree elements.
+  const walk = (root: Element | ShadowRoot | Document): T | null => {
+    for (const child of Array.from(root.querySelectorAll('*'))) {
+      if (child.matches?.(selector)) return child as T;
+      if (child instanceof HTMLElement && child.shadowRoot) {
+        const found = walk(child.shadowRoot);
+        if (found) return found;
+      }
+    }
+    return null;
+  };
+  return walk(document);
+}
+
+/** C9 — deep querySelectorAll that traverses shadow boundaries. */
+export function deepQuerySelectorAll<T extends Element = HTMLElement>(selector: string): T[] {
+  const results: T[] = [];
+  const seen = new Set<Element>();
+  // Light DOM
+  for (const el of Array.from(document.querySelectorAll<T>(selector))) {
+    results.push(el); seen.add(el);
+  }
+  // Shadow DOM
+  const walk = (root: Element | ShadowRoot | Document): void => {
+    for (const child of Array.from(root.querySelectorAll('*'))) {
+      if (child.matches?.(selector) && !seen.has(child)) { results.push(child as T); seen.add(child); }
+      if (child instanceof HTMLElement && child.shadowRoot) walk(child.shadowRoot);
+    }
+  };
+  walk(document);
+  return results;
 }
 
 /**
@@ -1228,11 +1348,20 @@ export function serializePerception(p: Perception): string {
   const header: string[] = [];
   header.push(`PAGE ${p.viewport.w}x${p.viewport.h} site:${p.site.host} "${p.site.title}" bg:${short(p.canvas.bg)} text:${short(p.canvas.color)} font:${p.canvas.fontFamily} ${p.canvas.fontSize}`);
   header.push(`COLS ${p.skeleton.columnCount} CONTENT ${p.skeleton.contentMaxWidthPx ?? '?'}px`);
-  // Phase 1 — the COMPOSITION summary: the page's macro shape, UP FRONT, before any
-  // node. The model sees what the page IS (article-body dominant + top nav + right
-  // rail) before it reads a single rectangle. This is the senior-dev fix: the model
-  // was rediscovering the page's meaning each run; now the page's meaning is stated.
+  // Phase 1 — the COMPOSITION summary: the page's macro shape, UP FRONT.
   header.push(`COMPOSITION ${p.composition.summary}`);
+
+  // C4 — document outline tree: gives the model document hierarchy and section
+  // boundaries (what is primary vs supporting, where a TOC comes from).
+  if (p.outline?.length) header.push(formatOutline(p.outline));
+
+  // C6 — colour as a model: palette in HSL with alpha, hue relationships,
+  // saturation/lightness ranges, and surface geometry for the Painter.
+  if (p.colorModel) header.push(formatColorModel(p.colorModel));
+
+  // C8 — density, rhythm, alignment: inputs to the designer, not gates.
+  if (p.density) header.push(formatDensity(p.density));
+
   if (p.skeleton.regions.length) {
     header.push('REGIONS ' + p.skeleton.regions.map((r) => `${r.handle}=${r.role}(${Math.round(r.widthRatio * 100)}%w,${r.rect.w}x${r.rect.h})`).join(' '));
   }
@@ -1246,31 +1375,27 @@ export function serializePerception(p: Perception): string {
     header.push('REFLOW ' + p.reflowOpportunity.map((r) => `${r.kind}:${r.handle}`).join(' '));
   }
 
-  // Design tokens: a compact scale summary (type scale + palette) prepended to the
-  // serialized perception. The model sees the page's systematic scale up front and
-  // the per-cluster lines drop the redundant font-family (it's in the header + tokens).
+  // Design tokens + packs (unchanged).
   header.push(formatDesignTokens(extractDesignTokens(p)));
-  // Phase 2 — the design-language PACKS library. The model picks a pack by id,
-  // references its tokens, and emits per-role intents the expander resolves
-  // against the pack. Every pack field is model-overridable via packOverrides.
   header.push(formatPacks());
 
-  // Two-tier: top N by prominence get full detail; rest get compact one-liners.
-  const byProminence = [...p.clusters].sort((a, b) => b.prominence - a.prominence);
+  // C5 — semantic compression: merge instead of amputate. Collapse repeated
+  // sibling structures, fold trivial wrappers, drop pure-layout containers.
+  // Target ~50 regions that describe the WHOLE page, not 80 that describe part.
+  const merged = mergeClusters(p.clusters);
+  const byProminence = [...merged].sort((a, b) => b.prominence - a.prominence);
   const tier1 = new Set(byProminence.slice(0, TIER1_FULL_DETAIL_COUNT).map((c) => c.handle));
-  // Top-prominence clusters are never dropped (always keep the most important content).
-  const topHandles = new Set(byProminence.slice(0, Math.min(5, byProminence.length)).map((c) => c.handle));
 
   // Build parent → children map for tree serialization.
   const childrenOf = new Map<string | null, Cluster[]>();
-  for (const c of p.clusters) {
+  for (const c of merged) {
     const parent = c.layout.parentHandle;
     const arr = childrenOf.get(parent);
     if (arr) arr.push(c); else childrenOf.set(parent, [c]);
   }
   for (const arr of childrenOf.values()) arr.sort((a, b) => b.prominence - a.prominence);
 
-  // Build entry list from the tree walk — structured so we can demote/drop on budget.
+  // Build entry list from the tree walk.
   interface Entry { cluster: Cluster; isFull: boolean; line: string; depth: number; dropped: boolean; }
   const entries: Entry[] = [];
   const walk = (handle: string | null, depth: number): void => {
@@ -1284,47 +1409,124 @@ export function serializePerception(p: Perception): string {
   };
   walk(null, 0);
 
-  const assemble = (): string => {
-    const tree: string[] = ['TREE:'];
+  const tree: string[] = ['TREE:'];
+  for (const e of entries) {
+    if (e.dropped) continue;
+    tree.push('  '.repeat(Math.min(e.depth, 6)) + e.line);
+  }
+  const result = [...header, ...tree].join('\n');
+  lastSerializeBudget = { before: result.length, after: result.length };
+
+  // C5: the budget is held by merging, not amputation. If still over budget after
+  // merging (a genuinely enormous page), demote least-prominent to compact. No
+  // dropping — every visible region stays in the inventory.
+  if (result.length > SERIALIZE_BUDGET) {
+    let rebuilt = tree.slice(0, 1);
     for (const e of entries) {
-      if (e.dropped) continue;
-      tree.push('  '.repeat(Math.min(e.depth, 6)) + e.line);
+      if (e.isFull && !tier1.has(e.cluster.handle) && result.length > SERIALIZE_BUDGET) {
+        e.isFull = false;
+        e.line = formatCompact(e.cluster);
+      }
+      if (!e.dropped) rebuilt.push('  '.repeat(Math.min(e.depth, 6)) + e.line);
     }
-    return [...header, ...tree].join('\n');
-  };
-
-  let result = assemble();
-  const before = result.length;
-  lastSerializeBudget = { before, after: before };
-
-  // Serialization budget: if over SERIALIZE_BUDGET, demote least-prominent full
-  // entries to compact (formatFull→formatCompact shrinks the string), then drop
-  // least-prominent compact entries (by prominence ascending). Top-prominence
-  // clusters are always kept. A large media-heavy page (~13K chars) → ≤ the budget.
-  if (before > SERIALIZE_BUDGET) {
-    // Phase 1: demote full entries to compact (least-prominent first).
-    const fullEntries = entries
-      .filter((e) => e.isFull && !topHandles.has(e.cluster.handle))
-      .sort((a, b) => a.cluster.prominence - b.cluster.prominence);
-    for (const e of fullEntries) {
-      if (result.length <= SERIALIZE_BUDGET) break;
-      e.isFull = false;
-      e.line = formatCompact(e.cluster);
-      result = assemble();
-    }
-    // Phase 2: drop compact entries (least-prominent first).
-    const compactEntries = entries
-      .filter((e) => !e.isFull && !topHandles.has(e.cluster.handle))
-      .sort((a, b) => a.cluster.prominence - b.cluster.prominence);
-    for (const e of compactEntries) {
-      if (result.length <= SERIALIZE_BUDGET) break;
-      e.dropped = true;
-      result = assemble();
-    }
-    lastSerializeBudget = { before, after: result.length };
+    const compactResult = [...header, ...rebuilt].join('\n');
+    lastSerializeBudget = { before: result.length, after: compactResult.length };
+    return compactResult;
   }
 
   return result;
+}
+
+/** C5 — semantic compression: merge repeated sibling structures into one
+ *  representative plus a count, fold trivial wrappers into their meaningful child,
+ *  and drop pure-layout containers that carry no content and no distinguishing
+ *  style. 200 regions → ~50 that describe the whole page. */
+function mergeClusters(clusters: Cluster[]): Cluster[] {
+  // 1. Drop pure-layout containers: no content, no distinguishing style.
+  const kept = clusters.filter((c) => {
+    // Always keep interactive, media, headings, and high-dominance clusters.
+    if (c.isNativeControl || c.role === 'heading' || c.dominanceRank > 0.3) return true;
+    if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) return true;
+    if (c.style.hasBgImage) return true;
+    // Drop: no text, no samples, no solid bg, no border, no shadow, high emptiness.
+    const hasContent = c.samples.length > 0 || c.textProfile.readingLength > 0;
+    const hasStyle = c.hasSolidBg || c.style.border !== 'none' || c.style.boxShadow !== 'none';
+    if (!hasContent && !hasStyle && c.emptinessScore >= 0.9) return false;
+    // Fold trivial passive wrappers (they carry no meaning; their children are
+    // emitted separately). Keep them only if they have distinguishing style.
+    if (c.layout.isPassiveWrapper && !hasStyle && c.samples.length === 0) return false;
+    return true;
+  });
+
+  // 2. Collapse repeated sibling structures: clusters sharing a parent, same
+  // design role, same component type, and similar width → one representative
+  // with a merged count.
+  const byParent = new Map<string | null, Cluster[]>();
+  for (const c of kept) {
+    const arr = byParent.get(c.layout.parentHandle);
+    if (arr) arr.push(c); else byParent.set(c.layout.parentHandle, [c]);
+  }
+  const merged: Cluster[] = [];
+  const usedMerged = new Set<string>();
+  for (const [, sibs] of byParent) {
+    // Group by (designRole, componentType, widthBucket)
+    const groups = new Map<string, Cluster[]>();
+    for (const s of sibs) {
+      const widthBucket = Math.round(s.rect.w / 40) * 40;
+      const key = `${s.designRole}|${s.componentType}|${widthBucket}`;
+      const arr = groups.get(key);
+      if (arr) arr.push(s); else groups.set(key, [s]);
+    }
+    for (const [, group] of groups) {
+      if (group.length >= 2) {
+        // Merge: keep the most prominent as representative, sum counts.
+        const rep = [...group].sort((a, b) => b.prominence - a.prominence)[0];
+        rep.count = group.reduce((s, c) => s + c.count, 0);
+        merged.push(rep);
+        for (const c of group) if (c !== rep) usedMerged.add(c.handle);
+      } else {
+        merged.push(group[0]);
+      }
+    }
+  }
+  // Keep any clusters not in the merged set (orphans from the parent grouping).
+  for (const c of kept) if (!merged.includes(c) && !usedMerged.has(c.handle)) merged.push(c);
+  return merged;
+}
+
+/** C4 — format the heading outline tree as an indented list. */
+function formatOutline(nodes: HeadingNode[]): string {
+  const lines: string[] = ['OUTLINE:'];
+  const walk = (ns: HeadingNode[], depth: number): void => {
+    for (const n of ns) {
+      const tag = `h${n.level}`;
+      const handle = n.handle ? ` [${n.handle}]` : '';
+      lines.push(`${'  '.repeat(depth)}${tag} ${JSON.stringify(n.text.slice(0, 60))}${handle}`);
+      walk(n.children, depth + 1);
+    }
+  };
+  walk(nodes, 1);
+  return lines.join('\n');
+}
+
+/** C6 — format the colour model compactly. */
+function formatColorModel(cm: ColorModel): string {
+  const lines: string[] = ['COLOR MODEL:'];
+  const paletteStr = cm.palette.map((e) =>
+    `${e.role}:${e.hex}(h${e.hsl[0]},s${e.hsl[1]},l${e.hsl[2]}${e.hsl[3] < 1 ? ',a' + e.hsl[3] : ''}${e.isBrand ? ',brand' : ''})`
+  ).join(' ');
+  lines.push(`  palette: ${paletteStr}`);
+  if (cm.relationships.length) lines.push(`  relationships: ${cm.relationships.join(', ')}`);
+  lines.push(`  sat:${cm.saturationRange[0]}-${cm.saturationRange[1]} light:${cm.lightnessRange[0]}-${cm.lightnessRange[1]}`);
+  const g = cm.geometry;
+  lines.push(`  geometry: radii[${g.radii.join(',')}] border[${g.borderWidths.join(',')}] shadow:${g.hasShadow ? g.shadowSpread + 'px' : 'none'} rhythm:${g.spacingRhythm}px`);
+  return lines.join('\n');
+}
+
+/** C8 — format the density/rhythm/alignment profile. */
+function formatDensity(d: DensityProfile): string {
+  const lines = [`DENSITY: rhythm:${d.rhythmBaseline}px edges:[${d.alignmentEdges.join(',')}] whitespace-gini:${d.whitespaceGini.toFixed(2)}`];
+  return lines.join('');
 }
 
 /**
@@ -1354,7 +1556,7 @@ export function serializePainterPerception(p: Perception): string {
   // grouped by role so a role intent's fan-out is visible at a glance.
   const ordered = [...p.clusters].sort((a, b) => b.prominence - a.prominence);
   const lines = ordered.map((c) => {
-    const parts = [`${c.designRole}${c.group ? '@' + c.group : ''} ${c.handle} x${c.count} <${c.tag}>`];
+    const parts = [`${c.designRole}${c.componentType !== 'unknown' ? ':' + c.componentType : ''}${c.group ? '@' + c.group : ''} ${c.handle} x${c.count} <${c.tag}>`];
     if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) {
       parts.push('[image]');
       if (c.style.naturalAspect) parts.push(`aspect:${c.style.naturalAspect}`);
@@ -1389,7 +1591,7 @@ export function serializeV2Painter(p: Perception, assignment: { handleToSlot: Ma
   const ordered = [...p.clusters].sort((a, b) => b.prominence - a.prominence);
   const lines = ordered.map((c) => {
     const slot = assignment.handleToSlot.get(c.handle) ?? 'overflow';
-    const parts = [`${c.designRole}${c.group ? '@' + c.group : ''} slot:${slot} dom${Math.round(c.dominanceRank * 10)} ${c.handle} x${c.count} <${c.tag}>`];
+    const parts = [`${c.designRole}${c.componentType !== 'unknown' ? ':' + c.componentType : ''}${c.group ? '@' + c.group : ''} slot:${slot} dom${Math.round(c.dominanceRank * 10)} ${c.handle} x${c.count} <${c.tag}>`];
     if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) {
       parts.push('[image]');
       if (c.style.naturalAspect) parts.push(`aspect:${c.style.naturalAspect}`);
@@ -1405,34 +1607,33 @@ export function serializeV2Painter(p: Perception, assignment: { handleToSlot: Ma
 
 function formatFull(c: Cluster): string {
   const L = c.layout;
-  // Phase 1 — the DESIGN ROLE leads the line (the PRIMARY representation). The
-  // handle + geometry + colors follow as ATTRIBUTES. The ARIA role stays as a
-  // secondary signal (in <tag>); the design role is the contract. Group + dominance
-  // are designer signals the old serialization omitted. Inverted from the old
-  // `${handle} <tag> role` lead — the model reasons about WHAT (a nav-primary) not
-  // WHICH (handle c1a2b3).
+  // C11 — the new format: designRole + componentType lead, followed by identity,
+  // geometry, paint, and the new C4/C10 signals. Dropped fields the model never
+  // acted on: display, border (full string), fontWeight, padding,
+  // widthFractionOfParent, isPassiveWrapper, isOpaqueWrapper, gap.
   const parts: string[] = [
     `${c.designRole}${c.group ? '@' + c.group : ''} dom${Math.round(c.dominanceRank * 10)}`,
+    c.componentType !== 'unknown' ? `${c.componentType}:${c.componentConfidence.toFixed(1)}` : '',
     `${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
-    `${c.rect.w}x${c.rect.h} ${Math.round(L.widthRatio * 100)}%w ${Math.round(c.widthFractionOfParent * 100)}%ofP`,
-    `${L.display}${L.isContainer ? '/container' : ''}`,
+    `${c.rect.w}x${c.rect.h} ${Math.round(L.widthRatio * 100)}%w`,
     `bg:${short(c.style.background)}`, `text:${short(c.style.color)}`,
-  ];
-  if (c.style.border !== 'none') parts.push(`border:${short(c.style.border)}`);
-  if (c.style.borderRadius !== '0px') parts.push(`r:${c.style.borderRadius}`);
-  // Font family is in the PAGE header + DESIGN TOKENS; per-cluster keeps just size/weight.
-  parts.push(`font:${c.style.fontSize}/${c.style.fontWeight}`);
+    `font:${c.style.fontSize}`,
+  ].filter(Boolean);
   if (c.isNativeControl) parts.push('[native]');
   if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) {
     parts.push('[image]');
     if (c.style.naturalAspect) parts.push(`aspect:${c.style.naturalAspect}`);
   }
-  if (L.isPassiveWrapper) parts.push('[passive]');
-  if (L.isOpaqueWrapper) parts.push('[opaque]');
-  if (L.siblingGapPx != null && L.siblingGapPx > 0) parts.push(`gap:${L.siblingGapPx}px`);
-  // Structural op cues (advisory for the Architect). Compact: only when the
-  // signal is actionable — a near-empty cluster (remove candidate) or a non-safe
-  // move target. Keeps the serialize budget on large pages.
+  // C4 — governing heading (the section this cluster belongs to).
+  if (c.governingHeading) parts.push(`heading:${c.governingHeading}`);
+  // C10 — text profile: kind + longest unbreakable token (decides track narrowing).
+  if (c.textProfile.kind !== 'none') {
+    const tp = `text:${c.textProfile.kind}`;
+    parts.push(c.textProfile.longestToken > 15 ? `${tp} maxtok:${c.textProfile.longestToken}` : tp);
+    if (c.textProfile.truncated) parts.push('[truncated]');
+    if (c.textProfile.dir === 'rtl') parts.push('rtl');
+  }
+  // Op cues (advisory for the Architect).
   if (c.emptinessScore >= 0.6) parts.push(`empty${Math.round(c.emptinessScore * 10)}`);
   if (c.moveSafety !== 'safe') parts.push(c.moveSafety === 'forbidden' ? 'forbid-move' : 'risky-move');
   let line = parts.join(' ');
@@ -1441,10 +1642,9 @@ function formatFull(c: Cluster): string {
 }
 
 function formatCompact(c: Cluster): string {
-  // Phase 1 — the DESIGN ROLE leads even the compact line. The handle + geometry
-  // follow; the design role is the backbone the model reads at a glance.
-  const parts = [
-    `${c.designRole} ${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
+  // C11 — compact line: role + componentType + identity + geometry + key signals.
+  const parts: string[] = [
+    `${c.designRole}${c.componentType !== 'unknown' ? ':' + c.componentType : ''} ${c.handle} x${c.count} <${c.tag}>${c.role ? ' ' + c.role : ''}`,
     `${c.rect.w}x${c.rect.h} ${Math.round(c.layout.widthRatio * 100)}%w`,
   ];
   if (c.hasSolidBg) parts.push(`bg:${short(c.style.background)}`);
@@ -1452,7 +1652,7 @@ function formatCompact(c: Cluster): string {
     parts.push('[image]');
     if (c.style.naturalAspect) parts.push(`aspect:${c.style.naturalAspect}`);
   }
-  // Near-empty cue in compact too (so demoted clusters still flag the op).
+  if (c.textProfile.kind !== 'none' && c.textProfile.longestToken > 15) parts.push(`maxtok:${c.textProfile.longestToken}`);
   if (c.emptinessScore >= 0.6) parts.push(`empty${Math.round(c.emptinessScore * 10)}`);
   return parts.join(' ');
 }

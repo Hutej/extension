@@ -33,12 +33,19 @@ import { detectExclusions } from '@/core/layout/exclusions';
 import { assignSlots } from '@/core/layout/assign';
 import { solve, computeGridPlacementCss, type SolverPlan } from '@/core/layout/solve';
 
-/** B5: Redact sensitive data from a string before sending it to the model.
- *  Collects form input values, password-adjacent text, and credential-shaped
- *  strings, then replaces them with [REDACTED] in the serialized perception. */
+/** B5/C3: Redact sensitive data from a string before sending it to the model.
+ *  Collects form input values and credential-shaped strings, then replaces them
+ *  with [REDACTED] in the serialized perception.
+ *
+ *  C3 safety: redaction is restricted to TEXT CONTENT and FORM VALUES only.
+ *  It must never touch handles, selectors, class names, CSS variable names or
+ *  any structural field — a redacted selector produces a silent no-op transform.
+ *  The old ≥40-char rule matched any long alphanumeric string (handles, CSS var
+ *  names, selector paths are all alphanumeric and can be ≥40 chars); it now
+ *  requires entropy characteristics (mixed case + digits), not just length. */
 function redactSensitiveData(text: string): string {
   let redacted = text;
-  // 1. Collect form input values from the live DOM.
+  // 1. Collect form input values from the live DOM — these are actual user data.
   const sensitiveValues: string[] = [];
   for (const el of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('input, textarea, select')) {
     const val = (el as HTMLInputElement).value;
@@ -48,14 +55,22 @@ function redactSensitiveData(text: string): string {
       if (val && val.length > 1) sensitiveValues.push(val);
     }
   }
-  // 2. Credential-shaped strings: API keys, tokens, bearer tokens.
+  // 2. Credential-shaped strings — require entropy, not just length.
+  // The old /\b[a-zA-Z0-9]{40,}\b/g matched any 40+ char alphanumeric token —
+  // handles (c + 6 base36), CSS var names, and selector paths are all
+  // alphanumeric and can hit 40 chars. Require specific credential shapes:
+  // known prefixes (sk-, v1., bearer) OR high-entropy (mixed case + digits,
+  // ≥32 chars — a real API key/token, not a selector or class name which
+  // tend to be single-case or hyphen-separated).
   const credPatterns = [
     /\bsk-[a-zA-Z0-9]{20,}\b/g,           // OpenAI-style keys
     /\bv1\.\d+-[a-zA-Z0-9]{20,}\b/g,       // Cloudflare-style tokens
-    /\b[a-zA-Z0-9]{40,}\b/g,                // Long hex/base64 (potential tokens)
     /\bbearer\s+[a-zA-Z0-9._-]+/gi,         // Bearer tokens
+    // High-entropy: ≥32 chars with both upper+lower+digit (a real token,
+    // not a structural field which is typically single-case or hyphenated)
+    /\b(?=.*[a-z])(?=.*[A-Z])(?=.*\d)[a-zA-Z0-9]{32,}\b/g,
   ];
-  // 3. Redact each sensitive value from the text.
+  // 3. Redact form values — actual user text/form content, never structural.
   for (const val of sensitiveValues) {
     if (val.length > 3 && redacted.includes(val)) {
       redacted = redacted.split(val).join('[REDACTED]');

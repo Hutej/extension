@@ -44,8 +44,6 @@ import { currentConstraints } from './ir.ts';
 import type { SlotAssignment } from './assign.ts';
 import type { SlotDef } from './languages/documentation.ts';
 import { DOCUMENTATION_SLOTS } from './languages/documentation.ts';
-import type { Length } from './length.ts';
-import { authorConstraint, token, intrinsic, assertNoMeasurementLengths } from './length.ts';
 import { assertNoRawPxSizing } from '../laws/index.ts';
 
 // ── Fluid token set (from ARCHITECTURE.md, applied at semantic text levels only) ──
@@ -776,27 +774,11 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   const selectorFallback = selectorFallbackNca + selectorFallbackProxy + selectorFallbackContents + selectorFallbackPerNode;
   const css = blocks.join('\n\n');
 
-  // A1: Law 0 assertion pass — reject any measurement-provenance length that
-  // reached the final CSS. Every emitted length in this function is either
-  // authorConstraint (slot minWidth), token (var(--wm-*)), or intrinsic
-  // (auto, fit-content, fr). A measurement here would be a Law 0 violation.
-  const emittedLengths = new Map<string, Length[]>();
-  emittedLengths.set('grid-template-columns', [
-    authorConstraint(sideMin, 'px'),
-    authorConstraint(contentMin, 'px'),
-    token(0, 'px'),  // var(--wm-side-max) — a named token, not a measurement
-    intrinsic('auto'),  // fr unit → minmax(0, 1fr) → intrinsic
-  ]);
-  emittedLengths.set('gap', [token(0, 'rem')]);
-  emittedLengths.set('container-type', [intrinsic('auto')]);
-  const law0Assertion = assertNoMeasurementLengths(emittedLengths);
-  if (!law0Assertion.passed) {
-    throw new Error(`Law 0 violation (measurement length in emission): ${law0Assertion.violations.join('; ')}`);
-  }
-
-  // B10: real CSS-level Law 0 assertion — reject any raw px in a sizing property
-  // in the emitted CSS. The mock above documents provenance intent; this catches
-  // actual leaks from every emission path in this function.
+  // B10 + C2: Law 0 assertion — reject any raw px in a sizing property in the
+  // emitted CSS. This is the single real gate; the old assertNoMeasurementLengths
+  // mock (a hand-built provenance map that checked itself) was deleted — it was
+  // documentation, not enforcement. assertNoRawPxSizing on the actual CSS catches
+  // real leaks from every emission path.
   assertNoRawPxSizing(css);
 
   // S11.3: build the emit-time plan — what the CSS INTENDS, asserted at verify time.

@@ -48,35 +48,3 @@ export function measurement(value: number, unit: LengthUnit): Length {
 }
 
 // ── Serialization ────────────────────────────────────────────────────
-
-/** Serialize a Length to a CSS string. Intrinsic keywords emit bare. */
-export function serialize(l: Length): string {
-  switch (l.unit) {
-    case 'auto': case 'min-content': case 'max-content': case 'fit-content': case 'none':
-      return l.unit;
-    default:
-      return `${l.value}${l.unit}`;
-  }
-}
-
-// ── Assertion (the load-bearing gate) ───────────────────────────────
-
-export interface AssertResult {
-  passed: boolean;
-  violations: string[];
-}
-
-/** Compiler-level assertion pass: reject any measurement-provenance length
- *  that reached the final declaration set. This is the gate that makes Law 0
- *  mechanically impossible to violate. */
-export function assertNoMeasurementLengths(decls: Map<string, Length[]>): AssertResult {
-  const violations: string[] = [];
-  for (const [selector, lengths] of decls) {
-    for (const l of lengths) {
-      if (l.provenance === 'measurement') {
-        violations.push(`${selector}: ${l.value}${l.unit} (measurement — must not be emitted)`);
-      }
-    }
-  }
-  return { passed: violations.length === 0, violations };
-}

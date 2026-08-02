@@ -390,7 +390,7 @@ function compare(baseline: IRShape, perturbed: IRShape, name: string): PerturbRe
 
 // ── Perturbations ──
 
-async function baselineAndAt(page: Page, bundle: string, url: string, settleMs: number): Promise<IRShape> {
+async function baselineAndAt(page: Page, bundle: string, url: string, _settleMs: number): Promise<IRShape> {
   await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45000 });
   await page.setViewportSize({ width: BASE_W, height: BASE_H });
   // S3.4 — inject the bundle so waitForSettle is available, then use the
@@ -829,7 +829,7 @@ async function main(): Promise<void> {
         : { css: '', nodesPlaced: 0, nodesNotPlaceable: [], intermediatesCollapsed: 0, intermediatesSkipped: 0, selectorFallback: 0, skippedReasons: [] };
       // Count slot distribution
       const slotDist: Record<string, number> = {};
-      for (const [h, s] of assignment.handleToSlot) slotDist[s] = (slotDist[s] ?? 0) + 1;
+      for (const [_h, s] of assignment.handleToSlot) slotDist[s] = (slotDist[s] ?? 0) + 1;
       return { css: placementResult.css, rulesEmitted: result.rulesEmitted, matchedTargets: result.matchedTargets,
         impossibleNodes: result.impossibleNodes, droppedOptionals: result.droppedOptionals,
         nodeCount: ir.nodes.length, nodesPlaced: placementResult.nodesPlaced,

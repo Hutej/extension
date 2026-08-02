@@ -267,4 +267,20 @@ OpenAI-compatible endpoint is the live path.
 - `overflow-wrap: anywhere` collapses min-content and breaks every word. Targeted `break-word` repair
   only, never preventive `anywhere`.
 - A px ceiling is zoom-hostile; convert to a viewport-relative percentage.
+
+## P2.5 temporary gate rebase (moved from product.md — a decision, not a change record)
+
+The standing rule is "applied ≥4/5" on the full grid. P2.5 narrows this deliberately:
+
+- P2.5 by-eye gate = **MDN, Wikipedia, GitHub docs (3 sites)** — architecture validation, not stress.
+- **BBC + YouTube in P2.5 must only APPLY WITHOUT ROLLBACK** under the exclusion registry. Their
+  appearance is NOT judged this phase — that is the P2.6 gate.
+- The full **5/5-sites-applied beauty gate RETURNS as the Phase 2.6 gate.**
+- Rationale, verbatim: *"Don't touch BBC or YouTube first. Those are stress tests, not architecture validation."*
+
+## Standing rule: pixel gates assert physics only (moved from product.md)
+
+Pixel gates assert physics only — readable, no overflow, no overlap, not blank, capture
+succeeded. Design quality is the planner's job and the user's eye. Whether the relayout
+happened is asserted at emit time from the solver's own plan, never inferred from pixels.
 - Cheating a gate is the only way to fail a step. An honest blocked report is a success.
