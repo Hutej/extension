@@ -32,8 +32,6 @@ export interface CompileOptions {
   contrastTargetBgs?: Record<string, string>; // effective bg each flagged handle's text sits on (from verify's parent-chain walk)
   pixelInvisibleTargets?: string[]; // pixel-invisible clusters: force a readable bg+text PAIR (not just text) — guards hasBgImage
   wordBreakTargets?: string[]; // targeted bleed repair: overflow-wrap on ONLY these bleeding clusters
-  clipOverflowTargets?: string[]; // targeted bleed repair: overflow-x:clip on clusters where word-break didn't fix the bleed
-  squeezeTargets?: string[];  // targeted squeeze repair: drop columnCount + relax width on ONLY these squeezed clusters
   collapseTargets?: string[]; // targeted collapse repair: drop layout on ONLY these collapsed regions (preserves the rest of the design)
   paletteMode?: 'restrained' | 'vivid'; // declared palette intent — vivid lifts the area cap
 }
@@ -264,7 +262,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
         decls.push(...r.decls);
       }
       if (rule.layout && !opts.collapseTargets?.includes(rule.target)) {
-        const clampThis = opts.dropSizing || (opts.clampTargets?.includes(rule.target) ?? false) || (opts.squeezeTargets?.includes(rule.target) ?? false);
+        const clampThis = opts.dropSizing || (opts.clampTargets?.includes(rule.target) ?? false);
         // A4: percentify DELETED. Converting a desired pixel width into a
         // percentage of the captured viewport is the exact failure Law 0
         // describes. The structure path's min(X, 100%) wrapping provides
