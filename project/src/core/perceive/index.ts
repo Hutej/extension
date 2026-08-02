@@ -1348,40 +1348,42 @@ export function serializePerception(p: Perception): string {
   header.push(formatDesignTokens(extractDesignTokens(p)));
   header.push(formatPacks());
 
-  // C5 — semantic compression: merge instead of amputate. Collapse repeated
-  // sibling structures, fold trivial wrappers, drop pure-layout containers.
-  // Target ~50 regions that describe the WHOLE page, not 80 that describe part.
+  // C5/D1 — semantic compression: merge instead of amputate. Collapse repeated
+  // sibling structures, suppress pure-layout containers from serialization (but
+  // keep them in the graph). Target ~50 regions that describe the WHOLE page.
   const merged = mergeClusters(p.clusters);
-  const byProminence = [...merged].sort((a, b) => b.prominence - a.prominence);
-  const tier1 = new Set(byProminence.slice(0, TIER1_FULL_DETAIL_COUNT).map((c) => c.handle));
+  const visible = merged.filter((e) => !e.suppressed);
+  const byProminence = [...visible].sort((a, b) => b.rep.prominence - a.rep.prominence);
+  const tier1 = new Set(byProminence.slice(0, TIER1_FULL_DETAIL_COUNT).map((e) => e.rep.handle));
 
-  // Build parent → children map for tree serialization.
-  const childrenOf = new Map<string | null, Cluster[]>();
-  for (const c of merged) {
-    const parent = c.layout.parentHandle;
+  // Build parent → children map for tree serialization (using rep handles).
+  const childrenOf = new Map<string | null, SerialEntry[]>();
+  for (const e of merged) {
+    if (e.suppressed) continue;
+    const parent = e.rep.layout.parentHandle;
     const arr = childrenOf.get(parent);
-    if (arr) arr.push(c); else childrenOf.set(parent, [c]);
+    if (arr) arr.push(e); else childrenOf.set(parent, [e]);
   }
-  for (const arr of childrenOf.values()) arr.sort((a, b) => b.prominence - a.prominence);
+  for (const arr of childrenOf.values()) arr.sort((a, b) => b.rep.prominence - a.rep.prominence);
 
   // Build entry list from the tree walk.
-  interface Entry { cluster: Cluster; isFull: boolean; line: string; depth: number; dropped: boolean; }
-  const entries: Entry[] = [];
+  interface TreeEntry { entry: SerialEntry; isFull: boolean; line: string; depth: number; }
+  const treeEntries: TreeEntry[] = [];
   const walk = (handle: string | null, depth: number): void => {
     const children = childrenOf.get(handle);
     if (!children) return;
-    for (const c of children) {
-      const isFull = tier1.has(c.handle);
-      entries.push({ cluster: c, isFull, line: isFull ? formatFull(c) : formatCompact(c), depth, dropped: false });
-      walk(c.handle, depth + 1);
+    for (const e of children) {
+      const isFull = tier1.has(e.rep.handle);
+      const line = isFull ? formatFullEntry(e) : formatCompactEntry(e);
+      treeEntries.push({ entry: e, isFull, line, depth });
+      walk(e.rep.handle, depth + 1);
     }
   };
   walk(null, 0);
 
   const tree: string[] = ['TREE:'];
-  for (const e of entries) {
-    if (e.dropped) continue;
-    tree.push('  '.repeat(Math.min(e.depth, 6)) + e.line);
+  for (const te of treeEntries) {
+    tree.push('  '.repeat(Math.min(te.depth, 6)) + te.line);
   }
   const result = [...header, ...tree].join('\n');
   lastSerializeBudget = { before: result.length, after: result.length };
@@ -1390,15 +1392,15 @@ export function serializePerception(p: Perception): string {
   // merging (a genuinely enormous page), demote least-prominent to compact. No
   // dropping — every visible region stays in the inventory.
   if (result.length > SERIALIZE_BUDGET) {
-    let rebuilt = tree.slice(0, 1);
-    for (const e of entries) {
-      if (e.isFull && !tier1.has(e.cluster.handle) && result.length > SERIALIZE_BUDGET) {
-        e.isFull = false;
-        e.line = formatCompact(e.cluster);
+    const rebuilt = ['TREE:'];
+    for (const te of treeEntries) {
+      if (te.isFull && !tier1.has(te.entry.rep.handle) && result.length > SERIALIZE_BUDGET) {
+        te.isFull = false;
+        te.line = formatCompactEntry(te.entry);
       }
-      if (!e.dropped) rebuilt.push('  '.repeat(Math.min(e.depth, 6)) + e.line);
+      rebuilt.push('  '.repeat(Math.min(te.depth, 6)) + te.line);
     }
-    const compactResult = [...header, ...rebuilt].join('\n');
+    const compactResult = [...header, ...rebuilt.join('\n')].join('\n');
     lastSerializeBudget = { before: result.length, after: compactResult.length };
     return compactResult;
   }
@@ -1406,60 +1408,86 @@ export function serializePerception(p: Perception): string {
   return result;
 }
 
-/** C5 — semantic compression: merge repeated sibling structures into one
- *  representative plus a count, fold trivial wrappers into their meaningful child,
- *  and drop pure-layout containers that carry no content and no distinguishing
- *  style. 200 regions → ~50 that describe the whole page. */
-function mergeClusters(clusters: Cluster[]): Cluster[] {
-  // 1. Drop pure-layout containers: no content, no distinguishing style.
-  const kept = clusters.filter((c) => {
-    // Always keep interactive, media, headings, and high-dominance clusters.
-    if (c.isNativeControl || c.role === 'heading' || c.dominanceRank > 0.3) return true;
-    if (['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag)) return true;
-    if (c.style.hasBgImage) return true;
-    // Drop: no text, no samples, no solid bg, no border, no shadow, high emptiness.
-    const hasContent = c.samples.length > 0 || c.textProfile.readingLength > 0;
-    const hasStyle = c.hasSolidBg || c.style.border !== 'none' || c.style.boxShadow !== 'none';
-    if (!hasContent && !hasStyle && c.emptinessScore >= 0.9) return false;
-    // Fold trivial passive wrappers (they carry no meaning; their children are
-    // emitted separately). Keep them only if they have distinguishing style.
-    if (c.layout.isPassiveWrapper && !hasStyle && c.samples.length === 0) return false;
-    return true;
+/** D1 — serialization entry: a view over the perception graph that does NOT
+ *  mutate it. Merged groups carry the full member handle list. Suppressed
+ *  containers (pure-layout, trivial wrappers) remain in the graph — the solver's
+ *  NCA is often exactly such a container — they're just not serialized as lines. */
+interface SerialEntry {
+  rep: Cluster;           // the representative cluster (NOT mutated)
+  members: string[];      // handles of all member clusters in this group
+  count: number;          // summed count (rep.count + merged siblings' counts)
+  suppressed: boolean;    // in graph but not serialized (pure-layout container)
+  outliers: { handle: string; reason: string }[]; // members that differ meaningfully
+}
+
+/** C5/D1 — semantic compression: merge repeated sibling structures into one
+ *  representative plus a count, suppress pure-layout containers from
+ *  serialization (but keep them in the graph), and emit outliers separately.
+ *  Produces a SERIALIZATION VIEW — the perception graph is never mutated. */
+function mergeClusters(clusters: Cluster[]): SerialEntry[] {
+  // 1. Classify each cluster as kept or suppressed.
+  // Suppressed = pure-layout container (no content, no distinguishing style).
+  // Suppressed clusters REMAIN in the graph — they're just not serialized.
+  const entries: SerialEntry[] = clusters.map((c) => {
+    const suppressed = !c.isNativeControl && c.role !== 'heading' && c.dominanceRank <= 0.3 &&
+      !['img', 'picture', 'video', 'svg', 'figure'].includes(c.tag) && !c.style.hasBgImage &&
+      (c.samples.length === 0 && c.textProfile.readingLength === 0 &&
+        !c.hasSolidBg && c.style.border === 'none' && c.style.boxShadow !== 'none' === false &&
+        c.emptinessScore >= 0.9 ||
+        (c.layout.isPassiveWrapper && !c.hasSolidBg && c.style.border === 'none' && c.style.boxShadow === 'none' && c.samples.length === 0));
+    return { rep: c, members: [c.handle], count: c.count, suppressed, outliers: [] };
   });
 
   // 2. Collapse repeated sibling structures: clusters sharing a parent, same
   // design role, same component type, and similar width → one representative
-  // with a merged count.
-  const byParent = new Map<string | null, Cluster[]>();
-  for (const c of kept) {
-    const arr = byParent.get(c.layout.parentHandle);
-    if (arr) arr.push(c); else byParent.set(c.layout.parentHandle, [c]);
+  // with a merged count. The representative is NOT mutated — count lives on
+  // the SerialEntry, not on the Cluster.
+  const byParent = new Map<string | null, SerialEntry[]>();
+  for (const e of entries) {
+    if (e.suppressed) continue;
+    const arr = byParent.get(e.rep.layout.parentHandle);
+    if (arr) arr.push(e); else byParent.set(e.rep.layout.parentHandle, [e]);
   }
-  const merged: Cluster[] = [];
+  const merged: SerialEntry[] = [];
   const usedMerged = new Set<string>();
   for (const [, sibs] of byParent) {
-    // Group by (designRole, componentType, widthBucket)
-    const groups = new Map<string, Cluster[]>();
+    const groups = new Map<string, SerialEntry[]>();
     for (const s of sibs) {
-      const widthBucket = Math.round(s.rect.w / 40) * 40;
-      const key = `${s.designRole}|${s.componentType}|${widthBucket}`;
+      const widthBucket = Math.round(s.rep.rect.w / 40) * 40;
+      const key = `${s.rep.designRole}|${s.rep.componentType}|${widthBucket}`;
       const arr = groups.get(key);
       if (arr) arr.push(s); else groups.set(key, [s]);
     }
     for (const [, group] of groups) {
       if (group.length >= 2) {
-        // Merge: keep the most prominent as representative, sum counts.
-        const rep = [...group].sort((a, b) => b.prominence - a.prominence)[0];
-        rep.count = group.reduce((s, c) => s + c.count, 0);
+        const rep = [...group].sort((a, b) => b.rep.prominence - a.rep.prominence)[0];
+        rep.count = group.reduce((s, e) => s + e.count, 0);
+        rep.members = group.map((e) => e.rep.handle);
+
+        // D1 — merge variance: if a member differs meaningfully from the rep,
+        // flag it as an outlier (emitted separately, not flattened).
+        for (const e of group) {
+          if (e === rep) continue;
+          const reasons: string[] = [];
+          if (e.rep.hasSolidBg !== rep.rep.hasSolidBg) reasons.push('bg');
+          if (Math.abs(e.rep.rect.h - rep.rep.rect.h) > Math.max(rep.rep.rect.h * 0.3, 30)) reasons.push('height');
+          if (e.rep.componentType !== rep.rep.componentType && e.rep.componentType !== 'unknown') reasons.push('type');
+          if (e.rep.designRole !== rep.rep.designRole) reasons.push('role');
+          if (reasons.length > 0) rep.outliers.push({ handle: e.rep.handle, reason: reasons.join('+') });
+        }
+
         merged.push(rep);
-        for (const c of group) if (c !== rep) usedMerged.add(c.handle);
+        for (const e of group) if (e !== rep) usedMerged.add(e.rep.handle);
       } else {
         merged.push(group[0]);
       }
     }
   }
-  // Keep any clusters not in the merged set (orphans from the parent grouping).
-  for (const c of kept) if (!merged.includes(c) && !usedMerged.has(c.handle)) merged.push(c);
+  // Keep suppressed entries and any orphans.
+  for (const e of entries) {
+    if (e.suppressed) merged.push(e);
+    else if (!usedMerged.has(e.rep.handle) && !merged.includes(e)) merged.push(e);
+  }
   return merged;
 }
 
@@ -1572,6 +1600,33 @@ export function serializeV2Painter(p: Perception, assignment: { handleToSlot: Ma
     return line;
   });
   return [...header, 'ROLE+SLOT INVENTORY:', ...lines.map((l) => '  ' + l)].join('\n');
+}
+
+/** D1 — format a SerialEntry as a full line, including merge info. */
+function formatFullEntry(e: SerialEntry): string {
+  let line = formatFull(e.rep);
+  if (e.count !== e.rep.count) {
+    line = line.replace(`x${e.rep.count}`, `x${e.count}`);
+  }
+  // D1 — member handles: merged groups carry the full handle list.
+  if (e.members.length > 1) {
+    line += ` members:[${e.members.join(',')}]`;
+  }
+  // D1 — merge variance: emit outliers with their reason, not flattened.
+  if (e.outliers.length > 0) {
+    line += ` ≠${e.outliers.map((o) => `${o.handle}(${o.reason})`).join(';')}`;
+  }
+  return line;
+}
+
+/** D1 — format a SerialEntry as a compact line. */
+function formatCompactEntry(e: SerialEntry): string {
+  let line = formatCompact(e.rep);
+  if (e.count !== e.rep.count) {
+    line = line.replace(`x${e.rep.count}`, `x${e.count}`);
+  }
+  if (e.outliers.length > 0) line += ` ≠${e.outliers.length}`;
+  return line;
 }
 
 function formatFull(c: Cluster): string {
