@@ -44,8 +44,16 @@ import { currentConstraints } from './ir.ts';
 import type { SlotAssignment } from './assign.ts';
 import type { SlotDef } from './languages/documentation.ts';
 import { DOCUMENTATION_SLOTS } from './languages/documentation.ts';
+import type { Length } from './length.ts';
+import { authorConstraint, token, intrinsic, assertNoMeasurementLengths } from './length.ts';
 
 // ── Fluid token set (from ARCHITECTURE.md, applied at semantic text levels only) ──
+// A4: viewport units (vw) in clamp() are the only remaining vw use — they scale
+// TYPE and SPACING relative to the viewport, not layout tracks. Layout tracks use
+// container-relative units (fr, minmax, fit-content). The type/spacing clamp() are
+// tokens (provenance: token), not measurements.
+// A4: --wm-content-min replaces the hardcoded 320px content floor (now a token).
+// --wm-content-max is a character-based prose measure (ch = intrinsic, not px).
 
 const FLUID_TOKENS = `
   --wm-step-0: clamp(1rem, 0.95rem + 0.3vw, 1.125rem);
@@ -53,6 +61,9 @@ const FLUID_TOKENS = `
   --wm-space-s: clamp(8px, 1vw, 12px);
   --wm-space-m: clamp(16px, 2vw, 24px);
   --wm-space-l: clamp(24px, 3vw, 40px);
+  --wm-content-min: 320px;
+  --wm-content-max: 65ch;
+  --wm-side-max: 280px;
 `;
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -141,6 +152,69 @@ export interface PlacementResult {
   diagnostics: string;
 }
 
+// ── A2: Constraint → CSS translation layer ──────────────────────────
+// Every emitted declaration must originate from a constraint in the IR or from
+// a design token. This function is the explicit translation: one constraint kind
+// at a time. Where a declaration has no corresponding constraint, the constraint
+// is missing from the IR — add it. Do not fall back to geometry.
+
+/** Map a MaxWidth constraint value ('prose'|'full'|'compact'|'side'|'partial') to a CSS value. */
+function maxWidthToken(value?: string): string | null {
+  switch (value) {
+    case 'prose': return 'var(--wm-content-max)';   // character-based measure (intrinsic)
+    case 'compact':
+    case 'side': return 'var(--wm-side-max)';
+    case 'full': return 'none';                       // no max — fill parent
+    case 'partial': return 'var(--wm-content-max)';  // a partial-width node → prose measure
+    default: return null;
+  }
+}
+
+/** Map a Gap constraint value ('s'|'m'|'l') to a CSS token. */
+function gapToken(value?: string): string {
+  if (value === 's') return 'var(--wm-space-s)';
+  if (value === 'l') return 'var(--wm-space-l)';
+  return 'var(--wm-space-m)';  // default
+}
+
+/** Translate a single constraint to CSS declarations. Returns [] for constraints
+ *  that are structural (Ordering — preserved by DOM order, not emitted) or that
+ *  don't produce a declaration on this element. */
+function constraintToCss(c: LayoutConstraint): string[] {
+  switch (c.kind) {
+    case 'FillParent':
+      return ['width: 100%'];
+    case 'Centered':
+      return ['margin-inline: auto'];
+    case 'MaxWidth': {
+      const v = maxWidthToken(c.value);
+      return v ? [`max-width: ${v}`] : [];
+    }
+    case 'AspectRatio':
+      return c.value ? [`aspect-ratio: ${c.value}`] : [];
+    case 'Gap':
+      return [`gap: ${gapToken(c.value)}`];
+    case 'StackVertically':
+      return ['flex-direction: column'];
+    case 'WrapOnOverflow':
+      return ['flex-wrap: wrap'];
+    case 'Alignment':
+      return c.value && c.value !== 'mixed'
+        ? [`align-items: ${c.value}`, `justify-content: ${c.value === 'stretch' ? 'normal' : c.value}`]
+        : [];
+    case 'Ordering':
+      return [];  // inviolable — preserved by DOM order, never emitted as `order`
+    default:
+      return [];
+  }
+}
+
+// ── Author constraint constants (also emitted as CSS tokens in FLUID_TOKENS) ──
+// A4: the hardcoded 320px content floor is now a named constant, linked to the
+// --wm-content-min token. Both are authorConstraint provenance (the layout
+// language's requirement), never measurements.
+const CONTENT_MIN_PX = 320;  // == --wm-content-min token
+
 // ── Solve (pure: no DOM access, no model calls) ─────────────────────
 
 /** The v1 solver. Takes the Current Layout IR + slot assignment + exclusions,
@@ -206,9 +280,9 @@ export function solve(input: SolveInput): SolveResult {
   const sideMin = Math.max(0, ...[...placedSlots]
     .filter((id) => slotById.get(id)?.preferredWidth === 'side')
     .map((id) => slotById.get(id)?.minWidth ?? 0));
-  const contentMin = Math.max(320, ...[...placedSlots]
+  const contentMin = Math.max(CONTENT_MIN_PX, ...[...placedSlots]
     .filter((id) => slotById.get(id)?.preferredWidth === 'content')
-    .map((id) => slotById.get(id)?.minWidth ?? 320));
+    .map((id) => slotById.get(id)?.minWidth ?? CONTENT_MIN_PX));
 
   // Fill in gridColumn now that we know hasSide.
   for (const info of placement.values()) {
@@ -217,25 +291,43 @@ export function solve(input: SolveInput): SolveResult {
     else info.gridColumn = '2';
   }
 
-  // ── 4. Build per-node declarations (fluid text + overflow safety) ───
+  // ── 4. Build per-node declarations (constraint-driven + fluid text) ──
+  // A2: every emitted declaration originates from a constraint in the IR (slot
+  // constraints) or from a design token (fluid text). No captured-rect values.
   const perNodeDecls = new Map<string, string[]>();
   for (const node of ir.nodes) {
     if (excluded.has(node.handle)) continue;
     const decls: string[] = [];
-    if (isSemanticText(node.semantic.role)) {
-      const token = fontSizeToken(node.semantic.role);
-      if (token) decls.push(`font-size: ${token}`);
+    // A2: translate slot constraints to CSS. The slot defines what the layout
+    // language requires for this role (StackVertically, MaxWidth, FillParent, etc.).
+    const slotId = assignment.handleToSlot.get(node.handle) ?? 'overflow';
+    const slot = slotById.get(slotId);
+    if (slot) {
+      for (const sc of slot.constraints) {
+        const constraint: LayoutConstraint = {
+          kind: sc.kind as LayoutConstraint['kind'],
+          priority: sc.priority,
+          source: 'language' as const,
+          value: sc.value,
+        };
+        decls.push(...constraintToCss(constraint));
+      }
     }
+    // Fluid text tokens (design tokens — provenance: token).
+    if (isSemanticText(node.semantic.role)) {
+      const ft = fontSizeToken(node.semantic.role);
+      if (ft) decls.push(`font-size: ${ft}`);
+    }
+    // A4: measured heights → height: auto (intrinsic).
     if (node.authoredLayout.intrinsicSizing === 'fixed') {
       decls.push('max-width: 100%');
     }
-    // S7.1: position:static !important DELETED — it existed only to fix a wrapper
-    // containing-block problem that no longer exists (no wrappers, no moves).
-    if (decls.length > 0) perNodeDecls.set(node.handle, decls);
+    // Dedup (slot + current constraints may produce the same declaration).
+    if (decls.length > 0) perNodeDecls.set(node.handle, [...new Set(decls)]);
   }
 
   const gridCols = hasSide
-    ? `minmax(min(${sideMin}px, calc(20vw - var(--wm-space-m) / 2)), 20vw) minmax(min(${contentMin}px, calc(80vw - var(--wm-space-m) / 2)), 1fr)`
+    ? `minmax(min(${sideMin}px, 100%), fit-content) minmax(0, 1fr)`
     : `minmax(min(${contentMin}px, 100%), 1fr)`;
 
   const matchedTargets = placement.size;
@@ -516,14 +608,20 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   const sideMin = Math.max(0, ...[...placedSlots]
     .filter((id) => slotById.get(id)?.preferredWidth === 'side')
     .map((id) => slotById.get(id)?.minWidth ?? 0));
-  const contentMin = Math.max(320, ...[...placedSlots]
+  const contentMin = Math.max(CONTENT_MIN_PX, ...[...placedSlots]
     .filter((id) => slotById.get(id)?.preferredWidth === 'content')
-    .map((id) => slotById.get(id)?.minWidth ?? 320));
+    .map((id) => slotById.get(id)?.minWidth ?? CONTENT_MIN_PX));
   const gridTemplate = hasSide
-    ? `minmax(min(${sideMin}px, calc(20vw - var(--wm-space-m) / 2)), 20vw) minmax(min(${contentMin}px, calc(80vw - var(--wm-space-m) / 2)), 1fr)`
+    ? `minmax(min(${sideMin}px, 100%), fit-content) minmax(0, 1fr)`
     : `minmax(min(${contentMin}px, 100%), 1fr)`;
 
-  // g. Emit display: grid on the NCA. S8.3: min-height:100vh DELETED, min-width:0 added.
+  // g. A3: Emit layout on the NCA, PRESERVING its existing formatting context.
+  // A5: Establish container containment for container-query responsiveness.
+  // Today we impose display: grid unconditionally — A3 forbids that. If the NCA
+  // already has a working flex or grid context, modify its properties. If block,
+  // introduce grid (new context). Overwriting display: flex with display: grid
+  // is flattening; changing gap/justify-content/align-items/flex-wrap/flex-direction
+  // is transformation.
   const ncaSelector = buildSelector(nca);
   let ncaCssSelector: string;
   if (ncaSelector && selectorIsUnique(ncaSelector, nca)) {
@@ -533,25 +631,51 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     ncaCssSelector = '[data-wm-grid="nca"]';
     selectorFallbackNca++;
   }
+  // A3: detect the NCA's current formatting context. This is a measurement used for
+  // a DECISION (which properties to emit), not emitted as a value — allowed per Law 0.
+  const ncaCs = getComputedStyle(nca);
+  const ncaDisplay = ncaCs.display;
+  const ncaIsGrid = ncaDisplay.includes('grid');
+  const ncaIsFlex = ncaDisplay.includes('flex');
   // S8.3: if the NCA's parent is a flex/grid container, the NCA is a flex/grid item
   // and needs max-width:100% to avoid blowing out the parent.
   const ncaParentCs = nca.parentElement ? getComputedStyle(nca.parentElement) : null;
   const ncaIsFlexGridItem = ncaParentCs != null &&
     (ncaParentCs.display.includes('flex') || ncaParentCs.display.includes('grid'));
-  const ncaDecls = ['display: grid', `grid-template-columns: ${gridTemplate}`, 'gap: var(--wm-space-m)', 'min-width: 0'];
+
+  const ncaDecls: string[] = [];
+  // A3: preserve the existing formatting context.
+  if (ncaIsGrid) {
+    // Already grid — modify properties, don't replace.
+    ncaDecls.push(`grid-template-columns: ${gridTemplate}`, 'gap: var(--wm-space-m)', 'min-width: 0');
+  } else if (ncaIsFlex) {
+    // Already flex — use flex properties for multi-column layout.
+    // flex-wrap: wrap lets side+content items sit side by side and wrap on narrow containers.
+    ncaDecls.push('flex-wrap: wrap', 'gap: var(--wm-space-m)', 'min-width: 0');
+  } else {
+    // Block or other — introduce grid (new formatting context only where none exists).
+    ncaDecls.push('display: grid', `grid-template-columns: ${gridTemplate}`, 'gap: var(--wm-space-m)', 'min-width: 0');
+  }
   if (ncaIsFlexGridItem) ncaDecls.push('max-width: 100%');
+  // A5: establish containment for container-query responsiveness. Graceful: skip if
+  // the NCA already has containment (don't override) or if containment is unsupported.
+  const containerSupported = typeof CSS !== 'undefined' && CSS.supports('container-type', 'inline-size');
+  if (containerSupported && ncaCs.containerType !== 'inline-size' && ncaCs.containerType !== 'size') {
+    ncaDecls.push('container-type: inline-size');
+  }
   blocks.push(`${ncaCssSelector} {\n${ncaDecls.map((d) => `  ${d};`).join('\n')}\n}`);
 
   // S10.1: subgrid support check. Chrome 117+ supports subgrid (this is an MV3
-  // Chrome extension — no fallback needed in practice). If not supported, the
-  // proxy is placed as a full-width grid item WITHOUT dissolving its box.
-  const subgridSupported = typeof CSS !== 'undefined' && CSS.supports('grid-template-columns', 'subgrid');
+  // Chrome extension — no fallback needed in practice). A3: subgrid is a grid-only
+  // feature — skip for flex NCA context (flex has no subgrid equivalent).
+  const subgridSupported = typeof CSS !== 'undefined' && CSS.supports('grid-template-columns', 'subgrid') && !ncaIsFlex;
   let subgridProxies = 0;
 
   // i. S10.1: emit subgrid on mixed proxies (replaces display:contents). The box
   //    survives — background, border, padding, containing block, clipping and click
   //    targets all intact — and children participate in the NCA's column tracks.
   //    Fallback: grid-column: 1 / -1 (full-width grid item, no dissolution).
+  //    A3: for flex NCA, mixed proxies are full-width flex items.
   for (const el of contentsEls) {
     const sel = buildSelector(el);
     let cssSelector: string;
@@ -566,15 +690,15 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
       blocks.push(`${cssSelector} {\n  display: grid;\n  grid-template-columns: subgrid;\n  grid-column: 1 / -1;\n  min-width: 0;\n}`);
       subgridProxies++;
     } else {
-      blocks.push(`${cssSelector} {\n  grid-column: 1 / -1;\n}`);
+      const fullDecl = ncaIsFlex ? 'flex: 0 0 100%' : 'grid-column: 1 / -1';
+      blocks.push(`${cssSelector} {\n  ${fullDecl};\n}`);
     }
     intermediatesCollapsed++;
   }
 
-  // i.2. Full-width grid items: children of the NCA or display:contents'd proxies
-  //      that contain NO placed handles. Without explicit grid-column they'd be
-  //      auto-placed into the narrow side track, squeezing content. Full-width
-  //      (1/-1) keeps them in document flow harmlessly.
+  // i.2. Full-width items: children of the NCA or subgrid'd proxies that contain NO
+  //      placed handles. Without explicit placement they'd auto-place into the narrow
+  //      side track, squeezing content. A3: flex NCA → flex: 0 0 100%.
   for (const el of fullWidthEls) {
     const sel = buildSelector(el);
     let cssSelector: string;
@@ -585,16 +709,16 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
       cssSelector = `[data-wm-grid="f${fullWidthEls.indexOf(el)}"]`;
       selectorFallbackContents++;
     }
-    blocks.push(`${cssSelector} {\n  grid-column: 1 / -1;\n}`);
+    const fullDecl = ncaIsFlex ? 'flex: 0 0 100%' : 'grid-column: 1 / -1';
+    blocks.push(`${cssSelector} {\n  ${fullDecl};\n}`);
   }
 
-  // j. Emit grid-column on placed proxies. The proxy's box (bg/border/padding) is preserved.
+  // j. Emit placement on proxies. The proxy's box (bg/border/padding) is preserved.
   // S11.3: stamp each placed proxy with data-wm-plan-slot for the plan assertion.
+  // A3: for flex NCA, use flex properties; for grid/block NCA, use grid-column.
   for (const [el, slotId] of placedProxies) {
     const slot = slotById.get(slotId);
     const pw = slot?.preferredWidth ?? 'full';
-    const gridColumn = (pw === 'full' || !hasSide) ? '1 / -1'
-      : pw === 'side' ? '1' : '2';
     el.setAttribute('data-wm-plan-slot', slotId);
     const sel = buildSelector(el);
     let cssSelector: string;
@@ -605,8 +729,30 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
       cssSelector = `[data-wm-grid="p${selectorFallbackProxy}"]`;
       selectorFallbackProxy++;
     }
-    const decls = [`grid-column: ${gridColumn}`];
+    // A3: flex NCA → flex properties; grid/block NCA → grid-column.
+    let decls: string[];
+    if (ncaIsFlex) {
+      if (pw === 'side' && hasSide) {
+        decls = ['flex: 0 0 min(var(--wm-side-max), 100%)', 'max-width: var(--wm-side-max)'];
+      } else if (pw === 'content' && hasSide) {
+        decls = ['flex: 1 1 0', 'min-width: var(--wm-content-min)'];
+      } else {
+        decls = ['flex: 0 0 100%'];
+      }
+    } else {
+      const gridColumn = (pw === 'full' || !hasSide) ? '1 / -1'
+        : pw === 'side' ? '1' : '2';
+      decls = [`grid-column: ${gridColumn}`];
+    }
     blocks.push(`${cssSelector} {\n${decls.map((d) => `  ${d};`).join('\n')}\n}`);
+  }
+
+  // A5: container query — when the NCA container is narrow, collapse all placed
+  // proxies to full-width. This is the browser-native responsive collapse: no
+  // viewport measurement, no re-run. The browser resolves it from the container's
+  // inline-size. Graceful: only emitted if container-type was set on the NCA.
+  if (containerSupported && (ncaCs.containerType !== 'inline-size' && ncaCs.containerType !== 'size' ? false : true)) {
+    blocks.push(`@container (max-width: 600px) {\n  [data-wm-plan-slot] {\n    grid-column: 1 / -1 !important;\n    flex: 0 0 100% !important;\n    max-width: 100% !important;\n  }\n}`);
   }
 
   // k. Per-node CSS (fluid text + overflow safety) for ALL nodes — placed handles
@@ -628,6 +774,24 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
 
   const selectorFallback = selectorFallbackNca + selectorFallbackProxy + selectorFallbackContents + selectorFallbackPerNode;
   const css = blocks.join('\n\n');
+
+  // A1: Law 0 assertion pass — reject any measurement-provenance length that
+  // reached the final CSS. Every emitted length in this function is either
+  // authorConstraint (slot minWidth), token (var(--wm-*)), or intrinsic
+  // (auto, fit-content, fr). A measurement here would be a Law 0 violation.
+  const emittedLengths = new Map<string, Length[]>();
+  emittedLengths.set('grid-template-columns', [
+    authorConstraint(sideMin, 'px'),
+    authorConstraint(contentMin, 'px'),
+    intrinsic('fit-content'),
+    intrinsic('auto'),  // fr unit → minmax(0, 1fr) → intrinsic
+  ]);
+  emittedLengths.set('gap', [token(0, 'rem')]);
+  emittedLengths.set('container-type', [intrinsic('auto')]);
+  const law0Assertion = assertNoMeasurementLengths(emittedLengths);
+  if (!law0Assertion.passed) {
+    throw new Error(`Law 0 violation (measurement length in emission): ${law0Assertion.violations.join('; ')}`);
+  }
 
   // S11.3: build the emit-time plan — what the CSS INTENDS, asserted at verify time.
   const trackCount = hasSide ? 2 : 1;

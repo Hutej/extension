@@ -10,6 +10,14 @@ this file.)*
 > the solver is responsible for satisfying constraints, and the compiler is responsible for generating
 > CSS. No layer is allowed to take over another layer's responsibility.
 
+**Law 0 — Browser Ownership of Layout** (`docs/LAW_0_BROWSER_OWNERSHIP.md`): the browser
+owns layout; we hand it constraints and let it solve. Every emitted length carries provenance
+(`token | authorConstraint | intrinsic | measurement`); measurement-provenance lengths are
+hard-rejected at emission. Emission is constraint-driven, not measurement-driven. Viewport units
+and measurement-derived values are purged. Container queries replace viewport breakpoints. The
+existing formatting context is preserved, not flattened. Read the law before any layout emission
+change.
+
 ## Pipelines: v1 legacy and v2 new (behind a flag)
 
 `layoutCompiler = 'v1' | 'v2'`. Default `'v1'`. Override via `WM_LAYOUT_COMPILER` env var and a popup

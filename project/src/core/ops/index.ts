@@ -21,6 +21,23 @@
 import type { DesignOp, OpKind } from '../spec';
 import type { Cluster, Perception } from '../perceive';
 
+// A7: DOM mutation policy — the closed list of reasons a mutation is permitted.
+// Default: do not move DOM nodes. Restructuring is permitted ONLY when the
+// transformation is genuinely inexpressible in CSS. Any mutation must carry a
+// recorded reason from this list, or it does not execute.
+export type MutationReason =
+  | 'escape-overflow-hidden'    // content clipped by an overflow:hidden ancestor
+  | 'escape-stacking-context'   // trapped behind a z-index/transform/filter ancestor
+  | 'cross-layout-regions'      // sidebar→topbar requires source-order change
+  | 'impossible-ancestry';      // constraint graph has no CSS solution in current tree
+
+export const MUTATION_REASONS: ReadonlySet<string> = new Set([
+  'escape-overflow-hidden',
+  'escape-stacking-context',
+  'cross-layout-regions',
+  'impossible-ancestry',
+]);
+
 export interface ValidatedOp {
   kind: OpKind;
   target: string;        // handle
@@ -29,6 +46,9 @@ export interface ValidatedOp {
   consent?: boolean;
   /** The live-DOM execution reads this hint (e.g. wrap display, move floating). */
   hint?: string;
+  /** A7: the recorded reason from the closed list, or null if none was provided
+   *  (the op will be refused — default is no mutation). */
+  reason?: string;
 }
 
 export interface OpValidationResult {
@@ -65,10 +85,17 @@ export function validateOps(ops: DesignOp[] | undefined, perception: Perception)
     const cl = byHandle.get(op.target);
     if (!cl) { refused.push(`${op.kind}(${op.target}:no-such-handle)`); continue; }
 
+    // A7: DOM mutation policy — default is no mutation. Any op must carry a
+    // recorded reason from the closed list, or it does not execute.
+    if (!op.reason || !MUTATION_REASONS.has(op.reason)) {
+      refused.push(`${op.kind}(${op.target}:no-mutation-reason — Law 0 default is no DOM mutation)`);
+      continue;
+    }
+
     if (op.kind === 'remove') {
       const r = refuseRemove(cl);
       if (r) { refused.push(`remove(${op.target}:${r})`); continue; }
-      out.push({ kind: 'remove', target: op.target });
+      out.push({ kind: 'remove', target: op.target, reason: op.reason });
       continue;
     }
 
@@ -84,7 +111,7 @@ export function validateOps(ops: DesignOp[] | undefined, perception: Perception)
         // Don't move into a descendant (would orphan the node).
         if (isAncestorHandle(op.target, op.to, byHandle)) { refused.push(`move(${op.target}:into-descendant)`); continue; }
       }
-      out.push({ kind: 'move', target: op.target, to: op.to, consent: op.consent, hint: op.to === 'floating' ? 'floating' : undefined });
+      out.push({ kind: 'move', target: op.target, to: op.to, consent: op.consent, hint: op.to === 'floating' ? 'floating' : undefined, reason: op.reason });
       continue;
     }
 
@@ -93,12 +120,12 @@ export function validateOps(ops: DesignOp[] | undefined, perception: Perception)
         const before = byHandle.get(op.before);
         if (!before) { refused.push(`reorder(${op.target}:bad-before-${op.before})`); continue; }
       }
-      out.push({ kind: 'reorder', target: op.target, before: op.before });
+      out.push({ kind: 'reorder', target: op.target, before: op.before, reason: op.reason });
       continue;
     }
 
     if (op.kind === 'wrap') {
-      out.push({ kind: 'wrap', target: op.target, to: op.to, hint: op.to });
+      out.push({ kind: 'wrap', target: op.target, to: op.to, hint: op.to, reason: op.reason });
       continue;
     }
   }

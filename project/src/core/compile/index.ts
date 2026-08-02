@@ -15,7 +15,7 @@ import type { DesignSpec, DesignRule, StyleDecls, LayoutDecls } from '../spec';
 import type { Perception, Cluster } from '../perceive';
 import { buildDeclarations } from '../capabilities/style/index.ts';
 import { buildLayoutDeclarations } from '../capabilities/structure/index.ts';
-import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, luminanceCompatible, fluidizeRawPxSizing, MIN_CHARS_PER_LINE, MIN_CONTENT_WIDTH_FRACTION, MIN_COMPONENT_WIDTH_FRACTION, COMPONENT_WIDE_FRACTION } from '../laws/index.ts';
+import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, fluidizeRawPxSizing, MIN_CHARS_PER_LINE, MIN_CONTENT_WIDTH_FRACTION } from '../laws/index.ts';
 import { parseColor, colorfulness, pickReadableText, extractGradientStops, pickReadableTextForGradient } from '../../shared/color.ts';
 import { validateOps, type ValidatedOp } from '../ops/index.ts';
 import { expandIntents } from './expand.ts';
@@ -45,7 +45,11 @@ export interface CompileResult {
   rulesEmitted: number;
   invalidTargets: string[];
   droppedProps: string[];
-  baseCoatCount: number;       // clusters base-coated by the harmonizer
+  baseCoatCount: number;       // A6: always 0 now (base-coat deleted) — kept for compat
+  /** A6: forceContrast is a last-resort safety net, reported — never silent.
+   *  Each handle where forceContrast applied a readable pair is listed here so
+   *  the run report names the colour-constraint failures. */
+  forceContrastReport: string[];
   /** Structural ops accepted by the guard laws (content.ts executes them live).
    *  Refused ops are in droppedProps as `kind(target:reason)`. */
   ops: ValidatedOp[];
@@ -192,14 +196,9 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
           droppedProps.push(`refusePageNarrowing: canvasLayout.maxWidth ${modelPx}px -> ${pctValue} (zoom-proof percentage; floor = ${Math.round(MIN_CONTENT_WIDTH_FRACTION * 100)}% of ${cmw}px natural content on a wide page)`);
         }
       } else if (canvasLayout.maxWidth) {
-        // Not a wide page, OR no measured content width — still convert any fixed-px
-        // maxWidth to a zoom-proof percentage of the viewport (a px cap is zoom-hostile
-        // at any width). A `min(Xpx, 100%)` or bare `Xpx` becomes a pure percentage.
-        const converted = percentifyValueToViewport(canvasLayout.maxWidth, vpWidth);
-        if (converted !== canvasLayout.maxWidth) {
-          canvasLayout = { ...canvasLayout, maxWidth: converted };
-          droppedProps.push(`percentifyCanvas: canvasLayout.maxWidth -> ${converted} (zoom-proof % of ${Math.round(vpWidth)}px viewport)`);
-        }
+        // A4: percentify DELETED. A px cap is zoom-hostile, but converting it to
+        // a viewport percentage is the exact failure Law 0 describes. The
+        // structure path's min(X, 100%) wrapping provides relational sizing.
       }
       const r = buildLayoutDeclarations(canvasLayout, { isConstraintOwner: true, ownsTarget: false, dropSizing: opts.dropSizing });
       droppedProps.push(...r.dropped);
@@ -224,12 +223,8 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
       }
       if (readable) decls.push(`color: ${readable} !important;`);
     }
-    // overflow-x:clip prevents horizontal scrollbar WITHOUT affecting
-    // overflow-y (unlike overflow-x:hidden which forces overflow-y:auto per CSS
-    // spec, potentially clipping content). clip is supported in Chrome 90+.
-    if (spec.canvas?.background) {
-      decls.push('overflow-x: clip !important;');
-    }
+    // A6: overflow-x: clip DELETED. Bleed means the layout was over-constrained.
+    // Fix the constraint, don't clip the symptom.
     if (decls.length) { blocks.push(`html, body {\n${indent(decls)}\n}`); rulesEmitted++; }
 
     // Opaque-wrapper neutralization: when a deliberate canvas background is set,
@@ -270,12 +265,11 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
       }
       if (rule.layout && !opts.collapseTargets?.includes(rule.target)) {
         const clampThis = opts.dropSizing || (opts.clampTargets?.includes(rule.target) ?? false) || (opts.squeezeTargets?.includes(rule.target) ?? false);
-        // Percentage geometry law (cluster level) — same as component rules: a
-        // fixed-px width on a composition region is zoom-hostile; convert to a
-        // percentage of the measured parent, floored at the component room law.
-        const compParentW = cluster.layout.parentHandle ? byHandle.get(cluster.layout.parentHandle)?.rect.w : undefined;
-        const layoutInput = percentifyClusterWidth(rule.layout, cluster, compParentW ?? perception.viewport.w, droppedProps, rule.target);
-        const r = buildLayoutDeclarations(layoutInput, {
+        // A4: percentify DELETED. Converting a desired pixel width into a
+        // percentage of the captured viewport is the exact failure Law 0
+        // describes. The structure path's min(X, 100%) wrapping provides
+        // relational sizing without measurement-derived percentages.
+        const r = buildLayoutDeclarations(rule.layout, {
           isConstraintOwner: cluster.layout.isContainer ?? false,
           ownsTarget: cluster.layout.constraintOwnerHandle != null,
           isPassiveWrapper: cluster.layout.isPassiveWrapper ?? false,
@@ -354,27 +348,17 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
       // Targeted overflow repair: strip growth-sizing on ONLY the offending
       // clusters, leaving every other cluster's layout intact (vs the blanket
       // dropLayout that collapsed the whole redesign into a recolor).
-      // Squeeze targets: also strip columnCount (the squeeze cause) and relax width.
+      // A6: squeeze repair DELETED. If content is squeezed, a min-width or
+      // WrapOnOverflow constraint is missing — fix the constraint, not the symptom.
       const clampThis = opts.dropSizing || (opts.clampTargets?.includes(rule.target) ?? false);
-      const squeezeThis = opts.squeezeTargets?.includes(rule.target) ?? false;
       let layoutInput = rule.layout;
-      if (squeezeThis) {
-        layoutInput = stripKeys(layoutInput, ['columnCount', 'width', 'maxWidth', 'minWidth', 'flexBasis']);
-        droppedProps.push(`squeeze(${rule.target})`);
-      }
       // Readable-measure refusal: a text-bearing cluster narrowed below a
       // readable measure (chars-per-line < floor) is the "sleeps in the washroom"
       // failure. Refuse the narrowing value instead of emitting a broken column.
       // The cluster's samples tell us it carries text; the layout value tells us
       // how narrow. Pure geometry — no aesthetic logic.
       layoutInput = refuseSubMeasure(layoutInput, cluster, droppedProps, rule.target);
-      // Percentage geometry law (cluster level): convert fixed-px widths to a
-      // percentage of the measured parent, floored at the component room law for
-      // wide children. A px width is zoom-hostile; a % tracks the parent at every
-      // zoom and window size. The parent is the nearest cluster ancestor (else
-      // the viewport — a top-level cluster IS relative to the viewport).
-      const parentW = cluster?.layout.parentHandle ? byHandle.get(cluster.layout.parentHandle)?.rect.w : undefined;
-      layoutInput = percentifyClusterWidth(layoutInput, cluster, parentW ?? perception.viewport.w, droppedProps, rule.target);
+      // A4: percentify DELETED — see composition-rule note above.
       const r = buildLayoutDeclarations(layoutInput, {
         isConstraintOwner: cl?.isContainer ?? false,
         ownsTarget: cl?.constraintOwnerHandle != null,
@@ -499,53 +483,14 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
     }
   }
 
-  // 3d-b) Targeted clip repair. When word-break didn't fix the bleed (caused by
-  // white-space:nowrap children or fixed-width elements that can't wrap), clip
-  // the overflow on those clusters. Less destructive than dropLayout — preserves
-  // the entire layout, only clips the bleeding cluster's horizontal overflow.
-  if (opts.clipOverflowTargets?.length) {
-    for (const h of new Set(opts.clipOverflowTargets)) {
-      const cl = byHandle.get(h);
-      if (!cl) continue;
-      blocks.push(`${cl.selector} {\n  overflow-x: clip !important;\n}`);
-      rulesEmitted++;
-    }
-  }
+  // A6: clip overflow repair DELETED. Bleed means the layout was over-constrained.
+  // Fix the constraint, don't clip the symptom.
 
-  // 3e) Base-coat harmonizer. After all model rules, for each cluster NOT
-  // addressed (rule/hide/composition) AND not luminance-compatible with the
-  // canvas, emit a safety-net repaint. All clashing unaccounted clusters get
-  // the same base tone + readable text, grouped into ONE CSS rule for efficiency.
-  // No border/shadow/radius stripping — preserve original character. Model rules
-  // are earlier in the cascade so they win source-order. This kills white strips
-  // on dark canvases where the model didn't target that cluster.
-  if (spec.canvas?.background && !opts.dropLayout) {
-    const addressed = new Set<string>();
-    for (const rule of spec.rules) {
-      if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide) addressed.add(rule.target);
-    }
-    if (spec.composition) {
-      for (const rule of spec.composition) {
-        if (rule.styles || rule.layout || rule.hide) addressed.add(rule.target);
-      }
-    }
-    const baseTone = deriveBaseTone(canvasBg);
-    const baseText = pickReadableText(parseColor(baseTone) ?? [255, 255, 255, 1]);
-    const coatSelectors: string[] = [];
-    for (const cl of perception.clusters) {
-      if (addressed.has(cl.handle)) continue;
-      if (!cl.hasSolidBg) continue;               // transparent — shows canvas, no clash
-      if (cl.style.hasBgImage) continue;          // content image — never paint over it
-      if (cl.rect.w < 24 || cl.rect.h < 24) continue;  // too small to read as a "strip"
-      if (luminanceCompatible(cl.style.background, canvasBg)) continue;  // blends with canvas
-      coatSelectors.push(cl.selector);
-      baseCoatCount++;
-    }
-    if (coatSelectors.length) {
-      blocks.push(`${coatSelectors.join(',\n')} {\n  background: ${baseTone} !important;\n  color: ${baseText} !important;\n}`);
-      rulesEmitted++;
-    }
-  }
+  // A6: base-coat harmonizer DELETED. Fifty unaddressed clusters receiving an
+  // identical background and text colour is flat uniformity, not design. Each
+  // cluster gets its own constraint-driven styling. The constraint that now
+  // carries the load: FillParent + MaxWidth + StackVertically per slot.
+  // (The baseCoatCount stays 0 — reported for backward compat.)
 
   // Fluid guard: post-compile safety net. The structure path already wraps
   // fixed px in min(X,100%)/min(X,100vh) by construction; this REWRITES any leak
@@ -554,8 +499,14 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
   const { css: fluidCss, leaks: rawPxLeaks } = fluidizeRawPxSizing(blocks.join('\n\n'));
   for (const leak of rawPxLeaks) droppedProps.push(`fluidize(${leak})`);
 
+  // A6: forceContrast reporting — a last-resort safety net, never silent.
+  // Collect the handles where forceContrast applied a readable pair.
+  const forceContrastReport: string[] = opts.forceContrast
+    ? [...new Set([...(opts.contrastTargets ?? []), ...(opts.pixelInvisibleTargets ?? [])])]
+    : [];
+
   return {
-    css: fluidCss, rulesEmitted, invalidTargets, droppedProps, baseCoatCount, ops: validatedOps,
+    css: fluidCss, rulesEmitted, invalidTargets, droppedProps, baseCoatCount, forceContrastReport, ops: validatedOps,
     ...(escapeHatchUses.length || specIn.intents?.length ? { escapeHatchUses, escapeHatchFraction, expandNotes, expandedTargets } : {}),
   };
 }
@@ -727,60 +678,6 @@ function refuseSubMeasure(layout: LayoutDecls, cluster: Cluster | undefined, dro
  * min(X, 100%) wrap then receives a fluid % value and leaves it untouched.
  *
  * `parentWidth falls back to the viewport when no parent cluster is
- *  known (widthFractionOfParent=1); a real per-rule parent lookup would be tighter,
- *  but perception's parentHandle already captured the nearest cluster ancestor,
- *  so the viewport fallback only hits top-level clusters (correct — they ARE
- *  relative to the viewport).`
- */
-/**
- * Convert a fixed-px width value (bare `Xpx` or `min(Xpx, 100%)`/`min(100%, Xpx)`)
- * to a pure zoom-proof percentage of the viewport. A px ceiling is zoom-hostile
- * (it freezes the proportion at one viewport size); a percentage tracks the viewport
- * at every size. A value already in %/clamp()/calc() is returned unchanged. Pure.
- */
-function percentifyValueToViewport(v: string, viewportWidthPx: number): string {
-  if (!v || viewportWidthPx <= 0) return v;
-  const t = v.trim();
-  const bare = t.match(/^([\d.]+)px$/i);
-  const minWrap = t.match(/^min\(\s*([\d.]+)px\s*,\s*100%\s*\)|^min\(\s*100%\s*,\s*([\d.]+)px\s*\)$/i);
-  let px: number | null = null;
-  if (bare) px = parseFloat(bare[1]);
-  else if (minWrap) px = parseFloat(minWrap[1] ?? minWrap[2]);
-  if (px == null) return v;
-  return `${Math.min(100, Math.round((px / viewportWidthPx) * 100))}%`;
-}
-
-function percentifyClusterWidth(layout: LayoutDecls, cluster: Cluster | undefined, parentWidthPx: number, droppedProps: string[], handle: string): LayoutDecls {
-  if (!cluster || parentWidthPx <= 0) return layout;
-  let out = layout;
-  for (const k of ['width', 'maxWidth', 'minWidth'] as const) {
-    const v = (layout as Record<string, unknown>)[k];
-    if (typeof v !== 'string') continue;
-    // Extract the fixed-px value: a bare `Xpx` OR a `min(Xpx, 100%)`/`min(100%, Xpx)`
-    // (the structure path's viewport-safe wrap, which still freezes a px ceiling —
-    // zoom-hostile). A pure %/clamp()/calc() is left alone.
-    const bare = v.trim().match(/^([\d.]+)px$/i);
-    const minWrap = v.trim().match(/^min\(\s*([\d.]+)px\s*,\s*100%\s*\)|^min\(\s*100%\s*,\s*([\d.]+)px\s*\)$/i);
-    let px: number | null = null;
-    if (bare) px = parseFloat(bare[1]);
-    else if (minWrap) px = parseFloat(minWrap[1] ?? minWrap[2]);
-    if (px == null) continue;                           // already a pure fluid value — leave it
-    let pct = (px / parentWidthPx) * 100;
-    // Room law, component level: a wide child can't shrink below the floor of
-    // its natural fraction. This is the "all my components shrank" bug, one level
-    // down from the page-level MIN_CONTENT_WIDTH_FRACTION law.
-    if (cluster.widthFractionOfParent >= COMPONENT_WIDE_FRACTION) {
-      const floor = MIN_COMPONENT_WIDTH_FRACTION * cluster.widthFractionOfParent * 100;
-      if (pct < floor) pct = floor;
-    }
-    pct = Math.min(100, Math.round(pct));
-    if (out === layout) out = { ...layout };
-    (out as Record<string, unknown>)[k] = `${pct}%`;
-    droppedProps.push(`percentify(${handle}:${k}=${v} -> ${pct}% of ${Math.round(parentWidthPx)}px parent)`);
-  }
-  return out;
-}
-
 /**
  * Decorative-void refusal. A rule that grows a TEXT-LESS, IMAGE-LESS cluster into a
  * large framed box (big padding + a thick border/boxShadow) is a decorative void —

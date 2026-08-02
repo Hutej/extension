@@ -10,10 +10,6 @@ This is not just an extension — this is an AI agent that lives in your browser
   owns constraints, the compiler owns CSS. No layer takes over another's responsibility.
 - **Pipeline flag:** `layoutCompiler = 'v1' | 'v2'` (default `v1`; `WM_LAYOUT_COMPILER` env + popup dev
   toggle). v2 is the Layout IR -> Solver path; the two are not intertwined.
-- **Target device:** DESKTOP/LAPTOP only. No mobile-viewport work.
-- **Never read screenshots or PNG files** — active models are text-only. ONE exception: an advisory,
-  never-in-pipeline self-check via `@cf/moonshotai/kimi-k2.7-code`, ≤1 call per run. The user's eye is
-  the only PASS authority.
 - **Ponytail ladder:** walk it before every change (below). Stop at the first rung that holds.
 
 ## Repo map (root = WebMorph/)
@@ -21,7 +17,8 @@ This is not just an extension — this is an AI agent that lives in your browser
 - `project/` — the real codebase: extension + test harness (WXT, TypeScript strict, MV3, Playwright). All code work happens in `project/src/` and `project/tests/`.
 - `.kiro/steering/product.md` — roadmap with ALL phases + sub-phases and the CURRENT POSITION. **Read before starting any task.**
 - `docs/ARCHITECTURE.md` — engine pipeline, laws/constants, model config, harness gotchas. **Read before touching `project/src/`.**
-- `BROWSER_LAWS/`, `RESEARCH/`, `all-about_webmorph.txt` — background reference; read only when relevant.
+- `docs/LAW_0_BROWSER_OWNERSHIP.md` — the governing law for all layout changes: browser owns layout, we hand it constraints. **Read before any layout emission change.**
+- `all-about_webmorph.txt` — background reference; read only when relevant.
 - `roadmap.txt` - if you dont know in which phase you are, you can refer this and you have authority to make changes in it if the step is completed and moving on. User will not specify this in prompt you have to handle it own
   
 ## Absolute rules
@@ -30,21 +27,10 @@ This is not just an extension — this is an AI agent that lives in your browser
 2. **Zero site-specific hardcoding.** Principles, not recipes. No aesthetic lookup tables. Test grids rotate NOVEL prompts (never reuse one).
 3. **Real proof only:** real extension, real sites, real model calls, real popup→Transform flow. NEVER pass a test by loosening it. NEVER fake or overstate a result.
 4. **All or nothing:** any original-looking region after a redesign = FAILURE, even if every automated check is green. The human eye is the final gate.
-5. **One-shot mandate:** best design in exactly ONE paid model call; deterministic/free repair preferred; paid reReason budget 1 (log loudly as a failure signal); ≤120s hard abort per attempt; retries only on 429/5xx; log tokens per run.
-6. **Do not rebuild `perceive/`** unless the audit proves it wrong (Round 7 rebuilt it — full-page, no node cap, hierarchical, family-aware). No vision/screenshot input to the design model. (Enrichment of `perceive/` is allowed — additive fields like Phase 1's `designRole`; a rebuild is not.)
+6. **Do not rebuild `perceive/`** unless the audit proves it wrong. No vision/screenshot input to the design model. (Enrichment of `perceive/` is allowed — additive fields like Phase 1's `designRole`; a rebuild is not.)
 7. **Security/git:** `.env` stays gitignored (public repo); push only after proven slices. Quality over speed.
 8. **Layout flag:** `layoutCompiler = 'v1' | 'v2'` (default `v1`). P2.5 builds v2 behind the flag; never
    intertwine the two paths.
-
-## The ladder (walk it before every change)
-
-1. Does this need to exist? → no: skip it (YAGNI)
-2. Already in codebase? → reuse
-3. Stdlib? → use it
-4. Native platform feature? → use it
-5. Installed dependency? → use it
-6. One line? → one line
-7. Only then: the minimum that works
 
 ## Run the harness
 
@@ -104,25 +90,5 @@ When your changes create orphans:
 - Don't remove pre-existing dead code unless asked.
 
 The test: Every changed line should trace directly to the user's request.
-
-## 4. Goal-Driven Execution
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
-```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
-```
-
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
-
----
 
 **These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.

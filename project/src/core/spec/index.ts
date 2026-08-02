@@ -64,6 +64,10 @@ export interface DesignOp {
    *  explicitly — a second thought, not a reflex. 'forbidden' targets (primary
    *  content, scripts) are refused regardless. */
   consent?: boolean;
+  /** A7: the mutation reason from the closed list (escape-overflow-hidden,
+   *  escape-stacking-context, cross-layout-regions, impossible-ancestry).
+   *  Required for the op to execute — default is no DOM mutation. */
+  reason?: string;
 }
 
 // ── Phase 2 — the role-intent DSL ───────────────────────────────────
@@ -276,6 +280,7 @@ export function validateSpec(raw: unknown): ValidateResult {
       if (typeof oi.to === 'string') op.to = oi.to;
       if (typeof oi.before === 'string') op.before = oi.before;
       if (oi.consent === true) op.consent = true;
+      if (typeof oi.reason === 'string') op.reason = oi.reason;
       ops.push(op);
     }
     if (ops.length) spec.ops = ops;

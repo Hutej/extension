@@ -17,6 +17,7 @@ import { sanitizeCss } from '@/core/sanitize';
 import { verifyStyle, checkConformance, type VerifyResult, type ConformanceResult } from '@/core/verify';
 import { pixelVerify, classifyInvisibleFailures, type PixelVerifyResult, type InvisibleBreakdown, type PixelInput, type ClusterRect } from '@/core/verify/pixel';
 import { screenshotToPixelInput } from '@/core/verify/capture';
+import { checkResizeInvariance, defaultCheckAt, type ResizeCheckResult } from '@/core/verify/resize';
 import { planRepair, bestNonBroken, type Attempt } from '@/core/repair';
 import { checkCompleteness, mergeSpecs } from '@/core/spec';
 import { applyStyle, applyStyleEverywhere, removeStyle, removeStyleEverywhere, startDefense, startDefenseEverywhere, ensureEscapeUI, removeEscapeUI } from '@/core/execute';
@@ -1217,7 +1218,18 @@ function askForSpec(role: Role, intent: string, perception: string, critique?: s
   });
 }
 
-// ── Persistence / toggle ───────────────────────────────────────────
+// A8: resize-invariance harness — wired, NOT YET RUN. This is a legitimate
+// hard gate once validated against real sites. A layout built from constraints
+// survives a viewport change with no pipeline re-run. Call after the final
+// hard-gate check to validate the transform is resize-invariant.
+// ponytail: not called yet — wired for the next sweep to enable.
+async function _runResizeInvarianceCheck(): Promise<ResizeCheckResult | null> {
+  try {
+    return await checkResizeInvariance(defaultCheckAt);
+  } catch {
+    return null;
+  }
+}
 
 async function reapplyStored(): Promise<boolean> {
   const key = storageKey();

@@ -46,7 +46,8 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // missed, and pixel-squeeze below the readable measure. Merged into the
   // deterministic repair so paint-2 targets what the USER sees, not just DOM flags.
   const pixelInvisible = pixel?.invisibleText ?? [];
-  const pixelSqueeze = pixel?.squeeze ?? [];
+  // A6: squeeze repair DELETED — pixelSqueeze no longer triggers a repair.
+  // If content is squeezed, a min-width or WrapOnOverflow constraint is missing.
   // Phase-1 hard void law (MIN_CONTRAST_RATIO is the pattern): a pixel void is
   // "addressed" ONLY if a structural op (remove/move/reorder/wrap) targets it. Voids
   // CSS can't collapse (empty/decorative containers) must be removed, not decorated.
@@ -131,31 +132,17 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
     return { action: 'recompile', options: { ...prev, trimAccent: true }, reason: `trim accent (${why})` };
   }
 
-  // Overflow / overlap: squeeze repair FIRST (drop columnCount on squeezed
-  // clusters — free, targeted, kills the one-char-per-line failure), then
-  // word-break for text bleeds, then targeted clamp on geometric overflow,
-  // then blanket dropLayout (last resort). Overflow-specific repairs run
-  // ONLY when !noOverflow — when !noOverlap alone, skip straight to keepBest
-  // (overlap is caused by layout shifting, not by sizing growth).
-  // Pixel-squeeze (below readable measure) triggers the squeeze repair even
-  // when there is no geometric overflow — a one-word-per-line failure has
-  // no overflow but is visibly broken. pixelSqueeze feeds the same target list.
-  if (pixelSqueeze.length && !prev.squeezeTargets) {
-    return { action: 'recompile', options: { ...prev, squeezeTargets: pixelSqueeze }, reason: `pixel squeeze repair on ${pixelSqueeze.length} cluster(s): ${pixelSqueeze.slice(0, 6).join(',')}` };
-  }
+  // A6: squeeze repair DELETED. If content is squeezed, a min-width or
+  // WrapOnOverflow constraint is missing — fix the constraint, not the symptom.
+  // A6: clip overflow repair DELETED. Bleed = over-constrained layout.
+  // Overflow / overlap: word-break for text bleeds, then targeted clamp on
+  // geometric overflow, then blanket dropLayout (last resort).
+  // Overflow-specific repairs run ONLY when !noOverflow — when !noOverlap
+  // alone, skip straight to keepBest (overlap is caused by layout shifting).
   if (!c.noOverflow || !c.noOverlap) {
     if (!c.noOverflow) {
-      if (verify.squeezeTargets.length && !prev.squeezeTargets) {
-        return { action: 'recompile', options: { ...prev, squeezeTargets: verify.squeezeTargets }, reason: `squeeze repair on ${verify.squeezeTargets.length} cluster(s): ${verify.squeezeTargets.slice(0, 6).join(',')}` };
-      }
       if (verify.bleedTargets.length && !prev.wordBreakTargets) {
         return { action: 'recompile', options: { ...prev, wordBreakTargets: verify.bleedTargets }, reason: `word-break on ${verify.bleedTargets.length} bleeding cluster(s): ${verify.bleedTargets.slice(0, 6).join(',')}` };
-      }
-      // Clip repair: when word-break didn't fix the bleeds (nowrap children or
-      // fixed-width elements that can't wrap), clip the overflow. Less destructive
-      // than dropLayout — preserves the entire layout.
-      if (verify.bleedTargets.length && prev.wordBreakTargets && !prev.clipOverflowTargets) {
-        return { action: 'recompile', options: { ...prev, clipOverflowTargets: verify.bleedTargets }, reason: `clip overflow on ${verify.bleedTargets.length} still-bleeding cluster(s) (word-break ineffective)` };
       }
       if (verify.overflowTargets.length && !prev.clampTargets) {
         return { action: 'recompile', options: { ...prev, clampTargets: verify.overflowTargets }, reason: `clamp ${verify.overflowTargets.length} overflowing cluster(s): ${verify.overflowTargets.slice(0, 6).join(',')}` };
