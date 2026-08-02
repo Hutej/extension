@@ -49,11 +49,18 @@
       <h1>WebMorph</h1>
     </div>
     <div class="body">
-      <span class="settings-toggle" id="settingsToggle">⚙ API key settings</span>
+      <span class="settings-toggle" id="settingsToggle">⚙ Cloudflare credentials</span>
       <div class="settings" id="settingsArea">
-        <label for="apiKey">OpenAI API key</label>
-        <input type="password" id="apiKey" placeholder="sk-..." />
-        <button id="saveKeyBtn" class="btn-sm" style="margin-top: 6px; width: 100%">Save key</button>
+        <label for="accountId">Cloudflare Account ID</label>
+        <input type="password" id="accountId" placeholder="e.g. a1b2c3d4e5f6..." />
+        <label for="apiToken" style="margin-top: 6px">Cloudflare API Token</label>
+        <input type="password" id="apiToken" placeholder="e.g. v1.0-..." />
+        <button id="saveKeyBtn" class="btn-sm" style="margin-top: 6px; width: 100%">Save credentials</button>
+        <div id="credStatus" style="font-size: 11px; color: var(--muted); margin-top: 4px;"></div>
+        <label style="margin-top: 10px; display: flex; align-items: center; gap: 6px; cursor: pointer;">
+          <input type="checkbox" id="optOutModel" style="width: auto;" />
+          <span style="font-size: 11px;">Opt out of AI model calls (local CSS only)</span>
+        </label>
       </div>
 
       <textarea id="intent" placeholder="Describe the look you want — e.g. warm parchment manuscript, or high-contrast industrial blueprint"></textarea>
@@ -67,6 +74,11 @@
       <div class="elapsed" id="elapsedEl"></div>
       <div class="metrics" id="metricsEl"></div>
       <div class="site-status" id="siteStatus"></div>
+      <div id="disclosure" style="display:none; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-top: 10px; font-size: 11px; line-height: 1.6; color: var(--muted);">
+        <strong style="color: var(--text);">What WebMorph sends to the AI:</strong><br>
+        When you transform a page, WebMorph reads the page's structure (text content, layout, colors, fonts) and sends it to your configured AI model (Cloudflare Workers AI). Form input values, passwords, and credential-shaped strings are redacted before sending. The AI returns a redesigned style that WebMorph applies locally. No page content is stored on any server.<br><br>
+        <button id="disclosureOk" class="btn-sm" style="width: 100%;">I understand</button>
+      </div>
       <div id="webmorph-result" style="display:none"></div>
     </div>
 

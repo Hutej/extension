@@ -18,15 +18,14 @@ import { verifyStyle, checkConformance, type VerifyResult, type ConformanceResul
 import { pixelVerify, classifyInvisibleFailures, type PixelVerifyResult, type InvisibleBreakdown, type PixelInput, type ClusterRect } from '@/core/verify/pixel';
 import { screenshotToPixelInput } from '@/core/verify/capture';
 import { checkResizeInvariance, defaultCheckAt, type ResizeCheckResult } from '@/core/verify/resize';
-import { planRepair, bestNonBroken, type Attempt } from '@/core/repair';
+import { planRepair, type Attempt } from '@/core/repair';
 import { checkCompleteness, mergeSpecs } from '@/core/spec';
-import { applyStyle, applyStyleEverywhere, removeStyle, removeStyleEverywhere, startDefense, startDefenseEverywhere, ensureEscapeUI, removeEscapeUI } from '@/core/execute';
-import { loadSiteState, saveSiteState, clearSiteState, storageKey, type SiteState } from '@/core/persist';
+import { applyStyleEverywhere, removeStyleEverywhere, startDefenseEverywhere, ensureEscapeUI, removeEscapeUI } from '@/core/execute';
+import { loadSiteState, saveSiteState, clearSiteState, storageKey } from '@/core/persist';
 import { parseColor, pickReadableText } from '@/shared/color';
 import { AI_CONFIG, logDebug } from '@/core/config';
 import type { Role } from '@/core/reason';
 import type { DesignSpec } from '@/core/spec';
-import type { Perception } from '@/core/perceive';
 import { TransactionLog, type DomAdapter } from '@/core/ops/transaction';
 import { validateOps, type ValidatedOp } from '@/core/ops';
 import { extractLayoutIR } from '@/core/layout/ir';
@@ -34,7 +33,42 @@ import { detectExclusions } from '@/core/layout/exclusions';
 import { assignSlots } from '@/core/layout/assign';
 import { solve, computeGridPlacementCss, type SolverPlan } from '@/core/layout/solve';
 
-interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?: string; usage?: unknown; model?: string; callMs?: number; }
+/** B5: Redact sensitive data from a string before sending it to the model.
+ *  Collects form input values, password-adjacent text, and credential-shaped
+ *  strings, then replaces them with [REDACTED] in the serialized perception. */
+function redactSensitiveData(text: string): string {
+  let redacted = text;
+  // 1. Collect form input values from the live DOM.
+  const sensitiveValues: string[] = [];
+  for (const el of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('input, textarea, select')) {
+    const val = (el as HTMLInputElement).value;
+    if (val && val.length > 3) sensitiveValues.push(val);
+    // Password-adjacent: if this is a password field, also redact nearby fields.
+    if (el.type === 'password' || el.type === 'email' || el.name?.toLowerCase().includes('pass') || el.name?.toLowerCase().includes('token') || el.name?.toLowerCase().includes('secret') || el.name?.toLowerCase().includes('key')) {
+      if (val && val.length > 1) sensitiveValues.push(val);
+    }
+  }
+  // 2. Credential-shaped strings: API keys, tokens, bearer tokens.
+  const credPatterns = [
+    /\bsk-[a-zA-Z0-9]{20,}\b/g,           // OpenAI-style keys
+    /\bv1\.\d+-[a-zA-Z0-9]{20,}\b/g,       // Cloudflare-style tokens
+    /\b[a-zA-Z0-9]{40,}\b/g,                // Long hex/base64 (potential tokens)
+    /\bbearer\s+[a-zA-Z0-9._-]+/gi,         // Bearer tokens
+  ];
+  // 3. Redact each sensitive value from the text.
+  for (const val of sensitiveValues) {
+    if (val.length > 3 && redacted.includes(val)) {
+      redacted = redacted.split(val).join('[REDACTED]');
+    }
+  }
+  // 4. Redact credential-shaped patterns.
+  for (const pattern of credPatterns) {
+    redacted = redacted.replace(pattern, '[REDACTED]');
+  }
+  return redacted;
+}
+
+interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?: string; usage?: unknown; model?: string; callMs?: number; httpRequests?: number; }
 
 /** Per-role call accounting (calls × tokens × wall-clock per role). The budget is
  *  TIME, not calls — per-role calls are OBSERVABILITY, not a gate. */
@@ -43,6 +77,9 @@ export interface RoleCall {
   ms: number;
   promptTokens?: number;
   completionTokens?: number;
+  /** B3: true HTTP request count (including retries). Surface this — the UI
+   *  reported 1 paid call when up to 5 HTTP requests were made. */
+  httpRequests: number;
 }
 
 export interface Ledger {
@@ -50,14 +87,14 @@ export interface Ledger {
   serializeChars: number;
   serializeCharsBefore: number;  // pre-budget char count (demote/drop tail to fit the budget)
   roleCalls: RoleCall[];          // per-role calls (architect/painter/critic) — observability
-  compileMs: number;
-  applyMs: number;
-  verifyMs: number;
-  pixelVerifyMs: number;   // rendered-pixel capture + detectors
-  persistMs: number;      // storage write
-  unaccountedMs: number;  // totalMs − sum(stages); a big gap = something unmeasured
+  compileMs?: number;   // B3: optional — v2 reports only when measured
+  applyMs?: number;
+  verifyMs?: number;
+  pixelVerifyMs?: number;   // B3: optional — v2 doesn't separate this from verifyMs
+  persistMs?: number;      // B3: optional — v2 reports only when measured
+  unaccountedMs?: number;  // B3: optional — computed from real stages, not invented
   totalMs: number;
-  paidCalls: number;        // total paid calls across roles (observability — NOT a gate)
+  paidCalls: number;        // total HTTP requests across roles (B3: includes retries)
   repairRounds: number;     // Critic repair rounds used
   paintCount: number;     // visible repaints (the ≤2 contract)
   opsExecuted: number;      // structural DOM ops executed (remove/move/reorder/wrap)
@@ -104,7 +141,10 @@ export interface TransformOutcome {
   wallMs?: number;       // total transform wall-clock
   model?: string;        // which model served the request
   usage?: unknown;       // token usage
-  paidCalls?: number;    // total paid model calls used (observability — NOT a gate)
+  paidCalls?: number;    // total HTTP model requests used (B3: includes retries)
+  /** B3: whether the perception was truncated — a partial perception can ship
+   *  a partial redesign as a success. Surfaced so the caller can warn. */
+  perceptionTruncated?: { walk: boolean; serialize: boolean };
   paintCount?: number;   // visible repaints
   ledger?: Ledger;       // stage-by-stage time breakdown (structured run report)
 }
@@ -193,7 +233,7 @@ async function captureShotAt(y: number): Promise<PixelInput> {
   return new Promise<PixelInput>((resolve) => {
     chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, (resp: { ok: boolean; dataUrl?: string }) => {
       if (chrome.runtime.lastError || !resp?.ok || !resp.dataUrl) { resolve({ width: 0, height: 0, data: new Uint8ClampedArray(0) }); return; }
-      screenshotToPixelInput(resp.dataUrl, window.innerWidth || 1280).then(resolve);
+      void screenshotToPixelInput(resp.dataUrl, window.innerWidth || 1280).then(resolve).catch(() => resolve({ width: 0, height: 0, data: new Uint8ClampedArray(0) }));
     });
   });
 }
@@ -346,6 +386,8 @@ const liveDom: DomAdapter = {
   removeChild(parent, node) { parent.removeChild(node); },
   createElement(tag) { return document.createElement(tag); },
   resolveDestination(to) { return to ? document.querySelector<HTMLElement>(`[data-wm-c="${to}"]`) : null; },
+  // B2: extract the handle from a live DOM node for handle-based inverse resolution.
+  handleOf(node) { return node instanceof HTMLElement ? node.getAttribute('data-wm-c') : null; },
 };
 
 /** Execute a validated op set against the live DOM. Idempotent: each op checks
@@ -365,7 +407,7 @@ function executeOps(ops: ValidatedOp[], record: boolean): { executed: number; re
     if (op.kind === 'remove') {
       const next = liveDom.nextSibling(el);
       liveDom.removeChild(parent, el);
-      if (record) txnLog.record({ op: { kind: 'remove', target: op.target }, target: op.target, inverse: { kind: 'reattach', node: el, parent, nextSibling: next } });
+      if (record) txnLog.record({ op: { kind: 'remove', target: op.target }, target: op.target, inverse: { kind: 'reattach', node: el, parentHandle: liveDom.handleOf(parent), nextSiblingHandle: liveDom.handleOf(next) } });
       executed++; continue;
     }
 
@@ -381,7 +423,7 @@ function executeOps(ops: ValidatedOp[], record: boolean): { executed: number; re
       const next = liveDom.nextSibling(el);
       liveDom.insertBefore(parent, wrap, next);
       liveDom.appendChild(wrap, el);
-      if (record) txnLog.record({ op: { kind: 'wrap', target: op.target }, target: op.target, inverse: { kind: 'unwrap', node: el, wrapper: wrap, parent, nextSibling: next } });
+      if (record) txnLog.record({ op: { kind: 'wrap', target: op.target }, target: op.target, inverse: { kind: 'unwrap', handle: op.target, wrapper: wrap, parentHandle: liveDom.handleOf(parent), nextSiblingHandle: liveDom.handleOf(next) } });
       executed++; continue;
     }
 
@@ -394,7 +436,7 @@ function executeOps(ops: ValidatedOp[], record: boolean): { executed: number; re
         if (beforeEl) {
           const next = liveDom.nextSibling(el);
           liveDom.insertBefore(parentEl, el, beforeEl);
-          if (record) txnLog.record({ op: { kind: 'reorder', target: op.target, before: op.before }, target: op.target, inverse: { kind: 'reparent', node: el, parent: parentEl, nextSibling: next } });
+          if (record) txnLog.record({ op: { kind: 'reorder', target: op.target, before: op.before }, target: op.target, inverse: { kind: 'reparent', handle: op.target, parentHandle: liveDom.handleOf(parentEl), nextSiblingHandle: liveDom.handleOf(next) } });
           executed++; continue;
         }
       }
@@ -402,7 +444,7 @@ function executeOps(ops: ValidatedOp[], record: boolean): { executed: number; re
       if (liveDom.nextSibling(el) === null) { executed++; continue; }
       const next = liveDom.nextSibling(el);
       liveDom.appendChild(parentEl, el);
-      if (record) txnLog.record({ op: { kind: 'reorder', target: op.target }, target: op.target, inverse: { kind: 'reparent', node: el, parent: parentEl, nextSibling: next } });
+      if (record) txnLog.record({ op: { kind: 'reorder', target: op.target }, target: op.target, inverse: { kind: 'reparent', handle: op.target, parentHandle: liveDom.handleOf(parentEl), nextSiblingHandle: liveDom.handleOf(next) } });
       executed++; continue;
     }
 
@@ -410,16 +452,10 @@ function executeOps(ops: ValidatedOp[], record: boolean): { executed: number; re
       // 'floating' = position:fixed lever (a mini-player). Idempotent if already fixed.
       if (op.hint === 'floating') {
         if (getComputedStyle(el).position === 'fixed') { executed++; continue; }
-        // Record the original inline position so undo restores it.
-        const prevPos = (el as HTMLElement).style.position;
         const prevInlines = (el as HTMLElement).style.cssText;
         const next = liveDom.nextSibling(el);
         (el as HTMLElement).style.position = 'fixed';
-        // A minimal fixed lever; the Painter/compile refine the exact spot.
-        if (record) txnLog.record({ op: { kind: 'move', target: op.target, to: 'floating', consent: true }, target: op.target, inverse: { kind: 'reparent', node: el, parent, nextSibling: next } });
-        // Restore inline position on undo by stashing the prev cssText on the node.
-        (el as HTMLElement).dataset['wmPrevCss'] = prevInlines;
-        void prevPos;
+        if (record) txnLog.record({ op: { kind: 'move', target: op.target, to: 'floating', consent: true }, target: op.target, inverse: { kind: 'reparent', handle: op.target, parentHandle: liveDom.handleOf(parent), nextSiblingHandle: liveDom.handleOf(next), prevCss: prevInlines } });
         executed++; continue;
       }
       const dest = liveDom.resolveDestination(op.to);
@@ -428,7 +464,7 @@ function executeOps(ops: ValidatedOp[], record: boolean): { executed: number; re
       if (liveDom.parent(el) === dest) { executed++; continue; }
       const next = liveDom.nextSibling(el);
       liveDom.appendChild(dest, el);
-      if (record) txnLog.record({ op: { kind: 'move', target: op.target, to: op.to }, target: op.target, inverse: { kind: 'reparent', node: el, parent, nextSibling: next } });
+      if (record) txnLog.record({ op: { kind: 'move', target: op.target, to: op.to }, target: op.target, inverse: { kind: 'reparent', handle: op.target, parentHandle: liveDom.handleOf(parent), nextSiblingHandle: liveDom.handleOf(next) } });
       executed++; continue;
     }
   }
@@ -457,8 +493,7 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
     // are the prime throw risks (a malformed packOverrides can spread a non-object).
     const msg = (err as Error)?.message || 'Transform crashed (internal error).';
     logDebug(`RUN CRASHED: ${msg}` + (err && (err as Error).stack ? `\n${(err as Error).stack}` : ''));
-    removeStyleEverywhere(activeShadowRoots);
-    markFailed('internal error');
+    rollbackFailed('internal error');
     return { ok: false, kind: 'bad_output', message: msg, paidCalls: 0, wallMs: 0 };
   } finally {
     keepalivePort.disconnect();
@@ -468,6 +503,10 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
 
 async function runStyleImpl(intent: string, restyleOnly = false): Promise<TransformOutcome> {
   const t0 = Date.now();
+  // B4: global abort — one time budget enforced across the whole pipeline.
+  // Per-call timeouts exist, but runs can still exceed designMaxMs when verify +
+  // persist + repair all add up. This check leaves the page untouched on abort.
+  const budgetExceeded = (): boolean => Date.now() - t0 > AI_CONFIG.designMaxMs;
   delete document.documentElement.dataset[APPLIED];
   delete document.documentElement.dataset[FAILED];
   // Reset the visible-paint counter at the start of every transform. The
@@ -486,12 +525,16 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   let perception = perceive();
   activeShadowRoots = perception.shadowRoots;
   const serialized = serializePerception(perception);
-  const serializeChars = serialized.length;
+  // B5: redact sensitive data (form values, credentials) before sending to the model.
+  const serializedRedacted = redactSensitiveData(serialized);
+  const serializeChars = serializedRedacted.length;
+  // B3: flag serialization truncation (budget hit → demoted/dropped entries).
+  if (perception.truncated) perception.truncated.serialize = lastSerializeBudget.before > lastSerializeBudget.after;
   // Phase 2 — the Painter decides surface (not layout), so it gets a TRIMMED
   // perception: header + role/group inventory, no per-cluster geometry/colors
   // (work item B — cuts Painter prompt ~40% + its wall-clock). The Architect keeps
   // the full serialization (it needs geometry for reflow). Logged for the ledger.
-  const painterSerialized = serializePainterPerception(perception);
+  const painterSerialized = redactSensitiveData(serializePainterPerception(perception));
   logDebug(`painter perception trimmed: ${painterSerialized.length}chars (full=${serializeChars})`);
   // Capture the reflow opportunities from the ORIGINAL page (before any op
   // re-perceive). The verify gate checks whether the Architect addressed each; the
@@ -513,9 +556,11 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   const recordCall = (role: Role, res: SpecResponse): void => {
     if (res.callMs == null) return;
     const u = res.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined;
-    roleCalls.push({ role, ms: res.callMs, promptTokens: u?.prompt_tokens, completionTokens: u?.completion_tokens });
+    roleCalls.push({ role, ms: res.callMs, promptTokens: u?.prompt_tokens, completionTokens: u?.completion_tokens, httpRequests: res.httpRequests ?? 1 });
   };
-  const paidCalls = (): number => roleCalls.length;
+  // B3: paidCalls = sum of actual HTTP requests (including retries), not just
+  //  the number of role calls. The UI was reporting 1 call when up to 5 were made.
+  const paidCalls = (): number => roleCalls.reduce((s, c) => s + c.httpRequests, 0);
   // A Critic repair round fits only if the remaining wall-clock clears the per-call
   // minimum; the budget is time, not a call count.
   const canReReason = (): boolean => (AI_CONFIG.designMaxMs - (Date.now() - t0)) > AI_CONFIG.criticMinMs;
@@ -570,21 +615,26 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const v2ExcludedRaw = detectExclusions(perception.clusters);
     const v2ExcludedSet = new Set<string>();
     for (const [h] of v2ExcludedRaw) v2ExcludedSet.add(h);
-    const v2Assignment = assignSlots(v2IR.nodes, v2ExcludedSet);
+    const v2Assignment = assignSlots(v2IR.nodes);
 
     // S4.1: v2 Painter payload — role/slot only, no geometry/rects/widths/positions.
-    const v2Serialized = serializeV2Painter(perception, v2Assignment);
+    const v2Serialized = redactSensitiveData(serializeV2Painter(perception, v2Assignment));
     logDebug(`v2 painter payload: ${v2Serialized.length}chars (v1 painter=${painterSerialized.length}chars, full=${serializeChars}chars)`);
 
     // Painter (one paid call). The solver handles structure.
     const v2PaintRes = await askForSpec('painter', intent, v2Serialized);
     recordCall('painter', v2PaintRes);
     if (!v2PaintRes.ok || !v2PaintRes.spec) {
-      removeStyleEverywhere(activeShadowRoots);
-      markFailed(v2PaintRes.message || 'Painter failed');
+      rollbackFailed(v2PaintRes.message || 'Painter failed');
       return { ok: false, kind: v2PaintRes.kind, message: v2PaintRes.message, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
     }
     const v2Spec = v2PaintRes.spec;
+
+    // B4: global abort after the model call — leaves the page untouched.
+    if (budgetExceeded()) {
+      rollbackFailed('global time budget exceeded');
+      return { ok: false, kind: 'timeout', message: 'The design exceeded the time budget and was rolled back.', paidCalls: paidCalls(), wallMs: Date.now() - t0 };
+    }
 
     // Solver (free): placement data + grid template. S7.1: CSS-only, no DOM mutation.
     const v2SolveResult = solve({ ir: v2IR, assignment: v2Assignment, excluded: v2ExcludedSet });
@@ -601,7 +651,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const v2StructuralCss = v2Placement.css;
     let v2CombinedCss = sanitizeCss(v2StructuralCss + '\n' + sanitizeCss(v2Compiled.css).css).css;
     if (!v2CombinedCss.trim()) {
-      removeStyleEverywhere(activeShadowRoots); markFailed('no styles');
+      rollbackFailed('no styles');
       return { ok: false, message: 'v2 produced no styles', paidCalls: paidCalls(), wallMs: Date.now() - t0 };
     }
 
@@ -637,9 +687,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     // hard gate so repair can fix what's fixable; the hard gate is the FINAL check.
     if (!v2Verify.checks.notBlank) {
       // Content blanked — rollback immediately (no repair can fix this).
-      // S7.1: undo = remove stylesheet (no DOM mutations to undo).
-      removeStyleEverywhere(activeShadowRoots);
-      markFailed('v2 content blanked');
+      rollbackFailed('v2 content blanked');
       logDebug(`v2 ROLLBACK — content blanked`);
       return { ok: false, message: 'v2 content blanked', spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
     }
@@ -654,8 +702,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       const v2Repair = planRepair(v2Verify, v2Options, 0, v2Spec.paletteMode, v2Pixel, false, new Set());
       logDebug(`v2 repair -> ${v2Repair.action}: ${v2Repair.reason}`);
       if (v2Repair.action === 'rollback') {
-        removeStyleEverywhere(activeShadowRoots);
-        markFailed('v2 content blanked (repair)');
+        rollbackFailed('v2 content blanked (repair)');
         return { ok: false, message: 'v2 content blanked', spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
       }
       if (v2Repair.action === 'recompile' && v2Repair.options) {
@@ -749,8 +796,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
         ...(v2Pixel.captureFailed ? ['captureFailed'] : []),
         ...(!v2PlanHonoured ? ['planHonoured'] : []),
       ].join(', ');
-      removeStyleEverywhere(activeShadowRoots);
-      markFailed('v2 hard gate: ' + failures);
+      rollbackFailed('v2 hard gate: ' + failures);
       logDebug(`v2 ROLLBACK — hard gate: ${failures}`);
       return { ok: false, message: 'v2 hard gate: ' + failures, spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0, placement: { placed: v2Placement.nodesPlaced, proxies: v2Placement.proxyCount, subgridProxies: v2Placement.subgridProxies, singleTrackProxies: v2Placement.singleTrackProxies, subgridChildAssignments: v2Placement.subgridChildAssignments, notPlaceable: v2Placement.nodesNotPlaceable.length, gridTemplate: v2Placement.gridTemplateColumns, mixedProxies: v2Placement.mixedProxies, plan: v2Placement.plan, planHonoured: v2PlanHonoured } };
     }
@@ -770,7 +816,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     markApplied(v2Id);
 
     const v2TotalMs = Date.now() - t0;
-    const v2ModelMs = roleCalls.reduce((s, c) => s + c.ms, 0);
+    // B7: v2ModelMs removed — unused variable (lint: no-unused-vars).
     logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] verify=${v2VerifyMsTotal}ms total=${v2TotalMs}ms paidCalls=${paidCalls()} placed=${v2Placement.nodesPlaced} subgrid=${v2Placement.subgridProxies} singleTrack=${v2Placement.singleTrackProxies} childAssign=${v2Placement.subgridChildAssignments} notPlaceable=${v2Placement.nodesNotPlaceable.length} selectorFallback=${v2Placement.selectorFallback} planCols=${v2Placement.plan.expectedColumns} planHonoured=${v2PlanHonoured} paints=${v2PaintCount}`);
 
     return {
@@ -783,10 +829,11 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       clusters: perception.clusters.length,
       placement: { placed: v2Placement.nodesPlaced, proxies: v2Placement.proxyCount, subgridProxies: v2Placement.subgridProxies, singleTrackProxies: v2Placement.singleTrackProxies, subgridChildAssignments: v2Placement.subgridChildAssignments, notPlaceable: v2Placement.nodesNotPlaceable.length, gridTemplate: v2Placement.gridTemplateColumns, mixedProxies: v2Placement.mixedProxies, plan: v2Placement.plan, planHonoured: v2PlanHonoured },
       usage: roleCalls.length ? { total: roleCalls.reduce((s, c) => s + (c.promptTokens ?? 0) + (c.completionTokens ?? 0), 0) } : undefined,
+      perceptionTruncated: perception.truncated,
       ledger: {
         perceiveMs: perception.builtInMs, serializeChars: v2Serialized.length, serializeCharsBefore: lastSerializeBudget.before, roleCalls,
-        compileMs: 0, applyMs: Math.round(performance.now() - v2ApplyMs), verifyMs: v2VerifyMsTotal,
-        pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: v2TotalMs,
+        applyMs: Math.round(performance.now() - v2ApplyMs), verifyMs: v2VerifyMsTotal,
+        totalMs: v2TotalMs,
         paidCalls: paidCalls(), repairRounds: v2PaintCount - 1, paintCount: v2PaintCount,
         opsExecuted: 0, opsRefused: 0, opsRefusedReasons: [],
       },
@@ -806,7 +853,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     recordCall('painter', paintRes);
   } else {
     [archRes, paintRes] = await Promise.all([
-      askForSpec('architect', intent, serialized),
+      askForSpec('architect', intent, serializedRedacted),
       askForSpec('painter', intent, painterSerialized),
     ]);
     recordCall('architect', archRes);
@@ -817,12 +864,16 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     // retry was tried but pushed large pages past the hard budget (a timeout wastes
     // the paid call); shipping the recolor + honest failure is the lesser evil.
   }
+  // B4: global abort after the design calls — leaves the page untouched.
+  if (budgetExceeded() && (!archRes.ok || !paintRes.ok)) {
+    rollbackFailed('global time budget exceeded');
+    return { ok: false, kind: 'timeout', message: 'The design exceeded the time budget and was rolled back.', paidCalls: paidCalls(), wallMs: Date.now() - t0 };
+  }
   if ((!archRes.ok || !archRes.spec) && (!paintRes.ok || !paintRes.spec)) {
     // Both roles failed (or the sole Painter failed) — honest error (no fallback chain).
     const failed = !archRes.ok && !paintRes.ok ? archRes : paintRes;
     logDebug(`LEDGER perceive=${perception.builtInMs}ms serialize=${serializeChars}chars roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms`).join(', ')}] total=${Date.now() - t0}ms paidCalls=${paidCalls()} — FAILED ${failed.kind ?? ''}`);
-    removeStyleEverywhere(activeShadowRoots);
-    markFailed(failed.message || 'engine failed');
+    rollbackFailed(failed.message || 'engine failed');
     return { ok: false, kind: failed.kind, message: failed.message || 'Design engine failed.', paidCalls: paidCalls(), wallMs: Date.now() - t0 };
   }
   let spec = mergeSpecs(archRes.ok ? archRes.spec : undefined, paintRes.ok ? paintRes.spec : undefined);
@@ -963,7 +1014,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     logDebug(`  detail: ${p1.verify.details.join(' | ')}`);
     if (!p1.pixel.passed) logDebug(`  pixel critiques: ${p1.pixel.critiques.join(' | ')}`);
   } catch (e) {
-    removeStyleEverywhere(activeShadowRoots); markFailed('no styles');
+    rollbackFailed('no styles');
     return { ok: false, message: (e as Error).message || 'Produced no applicable styles.', spec, reasoning: spec.reasoning, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
   }
 
@@ -981,7 +1032,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     logDebug(`repair -> ${decision.action}: ${decision.reason}`);
 
     if (decision.action === 'rollback') {
-      removeStyleEverywhere(activeShadowRoots); markFailed('content blanked');
+      rollbackFailed('content blanked');
       return { ...failVerify(spec, phase1Verify!), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
     }
 
@@ -991,7 +1042,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       if (!canReReason()) {
         logDebug('Critic skipped — time budget exhausted; shipping paint 1');
         if (!(phase1Verify!.checks.notBlank && phase1Verify!.checks.contentIntact)) {
-          removeStyleEverywhere(activeShadowRoots); markFailed('time budget — no revision');
+          rollbackFailed('time budget — no revision');
           return { ...failVerify(spec, phase1Verify!), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
         }
       } else {
@@ -1001,7 +1052,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
         const failing = Object.entries(phase1Verify!.checks).filter(([, v]) => !v).map(([k]) => k).join(',');
         logDebug(`CRITIC REPAIR ROUND — fixing: ${failing}${lastPixel && !lastPixel.passed ? ' +pixel' : ''}`);
         repairRounds++;
-        const re = await askForSpec('critic', intent, serialized, critique, Math.max(AI_CONFIG.criticMinMs, AI_CONFIG.designMaxMs - (Date.now() - t0)));
+        const re = await askForSpec('critic', intent, serializedRedacted, critique, Math.max(AI_CONFIG.criticMinMs, AI_CONFIG.designMaxMs - (Date.now() - t0)));
         recordCall('critic', re);
         if (re.ok && re.spec) {
           // Merge the Critic's corrections into the spec (Critic returns a patch:
@@ -1022,13 +1073,13 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
             logDebug(`paint2(critic): checks=${JSON.stringify(p2.verify.checks)} pixel(passed=${p2.pixel.passed})`);
             // If paint 2 is broken, rollback+fail (no 3rd paint to revert).
             if (!(p2.verify.checks.notBlank && p2.verify.checks.contentIntact)) {
-              removeStyleEverywhere(activeShadowRoots); markFailed('revision broke content');
+              rollbackFailed('revision broke content');
               return { ...failVerify(spec, p2.verify), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
             }
           } catch {
             // Critic'd spec produced no styles — keep paint 1 if non-broken.
             if (!(phase1Verify!.checks.notBlank && phase1Verify!.checks.contentIntact)) {
-              removeStyleEverywhere(activeShadowRoots); markFailed('revision failed');
+              rollbackFailed('revision failed');
               return { ...failVerify(spec, phase1Verify!), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
             }
             applyStyleEverywhere(phase1Sanitized, activeShadowRoots); // revert to paint 1
@@ -1050,7 +1101,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
           // Repair broke content — revert to paint 1 (paint 1 is still on screen?
           // No — paint 2 overwrote it). Re-applying paint 1 would be a 3rd paint.
           // Rollback+fail honestly instead.
-          removeStyleEverywhere(activeShadowRoots); markFailed('repair broke content');
+          rollbackFailed('repair broke content');
           return { ...failVerify(spec, p2.verify), paidCalls: paidCalls(), wallMs: Date.now() - t0 };
         }
       } catch {
@@ -1144,7 +1195,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   };
   const rolesStr = roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ');
   logDebug(`LEDGER perceive=${ledger.perceiveMs}ms serialize=${serializeChars}chars${lastSerializeBudget.before > lastSerializeBudget.after ? `(budget ${lastSerializeBudget.before}->${lastSerializeBudget.after})` : ''} roles=[${rolesStr}] compile=${ledger.compileMs}ms apply=${ledger.applyMs}ms verify=${ledger.verifyMs}ms pixelVerify=${ledger.pixelVerifyMs}ms persist=${persistMs}ms unaccounted=${ledger.unaccountedMs}ms total=${totalMs}ms paidCalls=${ledger.paidCalls} repairRounds=${repairRounds} paints=${finalPaintCount} ops=${opsResult.executed}/${opsResult.refused}`);
-  if (ledger.unaccountedMs > 0.15 * totalMs) logDebug(`LEDGER GAP >15%: ${ledger.unaccountedMs}ms unaccounted — investigate`);
+  if ((ledger.unaccountedMs ?? 0) > 0.15 * totalMs) logDebug(`LEDGER GAP >15%: ${ledger.unaccountedMs}ms unaccounted — investigate`);
 
   return {
     ok: true, reasoning: spec.reasoning, spec, verify: lastVerify || undefined,
@@ -1158,6 +1209,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     wallMs: totalMs, model: roleCalls.map((c) => c.role).join('+'),
     usage: roleCalls.length ? { total: roleCalls.reduce((s, c) => s + (c.promptTokens ?? 0) + (c.completionTokens ?? 0), 0) } : undefined,
     paidCalls: paidCalls(), paintCount: finalPaintCount, ledger,
+    perceptionTruncated: perception.truncated,
   };
 }
 
@@ -1210,7 +1262,7 @@ function askForSpec(role: Role, intent: string, perception: string, critique?: s
         // S6.1: fixture record — store the raw response via chrome.storage.local
         // for the harness to read and write to disk.
         if (FIXTURE_MODE === 'record' && response?.ok) {
-          chrome.storage.local.set({ ['webmorph_fixture_' + role]: { hash: djb2(perception), response } });
+          void chrome.storage.local.set({ ['webmorph_fixture_' + role]: { hash: djb2(perception), response } });
         }
         resolve(response as SpecResponse);
       }
@@ -1303,16 +1355,44 @@ async function toggleSiteState(): Promise<void> {
 /** Off / undo: replay the op transaction log backwards (restore the original
  *  DOM), then strip the CSS. The escape hatch stays instant and absolute —
  *  ops are undone BEFORE the style tag is removed, so the page returns to its
- *  pre-transform state in one synchronous pass. The log is session-only. */
-function undoOpsAndCss(): void {
+ *  pre-transform state in one synchronous pass. The log is session-only.
+ *  B2: returns { undone, failed } from the undo for the structural assertion. */
+function undoOpsAndCss(): { undone: number; failed: number } {
   stopDynamicDefense();
   activeSpec = null; activeOps = []; activeStructuralCss = '';
-  txnLog.undoAll(liveDom);
+  const undoResult = txnLog.undoAll(liveDom);
   // S7.1: clean up data-wm-grid / data-wm-plan-slot debug attributes from CSS-only placement.
   document.querySelectorAll('[data-wm-grid]').forEach((el) => el.removeAttribute('data-wm-grid'));
   document.querySelectorAll('[data-wm-plan-slot]').forEach((el) => el.removeAttribute('data-wm-plan-slot'));
   removeStyleEverywhere(activeShadowRoots); removeEscapeUI();
   delete document.documentElement.dataset[APPLIED];
+  return undoResult;
+}
+
+/** B2: structural invariant — after any failed transform, the DOM must be
+ *  structurally identical to its pre-transform state. Encoded as an assertion,
+ *  not a comment: no WebMorph-injected elements or attributes may remain. */
+function assertDomClean(undoResult: { undone: number; failed: number }): void {
+  const remaining = document.getElementById('webmorph-style');
+  const wraps = document.querySelectorAll('[data-wm-wrap]').length;
+  const gridAttrs = document.querySelectorAll('[data-wm-grid]').length;
+  if (remaining || wraps > 0 || gridAttrs > 0 || undoResult.failed > 0) {
+    const issues = [
+      remaining ? 'style element still present' : '',
+      wraps > 0 ? `${wraps} wrapper(s) still present` : '',
+      gridAttrs > 0 ? `${gridAttrs} grid attr(s) still present` : '',
+      undoResult.failed > 0 ? `${undoResult.failed} undo(s) failed` : '',
+    ].filter(Boolean).join('; ');
+    console.error(`[WebMorph] B2 INVARIANT VIOLATION: DOM not clean after failed transform: ${issues}`);
+  }
+}
+
+/** B2: rollback a failed transform — undo ops, strip CSS, assert DOM clean,
+ *  mark failed. Every failure path calls this instead of just stripping CSS. */
+function rollbackFailed(msg: string): void {
+  const ur = undoOpsAndCss();
+  assertDomClean(ur);
+  markFailed(msg);
 }
 
 async function removeAll(): Promise<void> {
@@ -1518,7 +1598,7 @@ async function fastHidePath(intent: string): Promise<TransformOutcome> {
   return {
     ok: true, reasoning: spec.reasoning, spec, perceiveMs: perception.builtInMs,
     clusters: perception.clusters.length, paidCalls: 0, wallMs,
-    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, serializeCharsBefore: 0, roleCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: wallMs, paidCalls: 0, repairRounds: 0, paintCount: 1, opsExecuted: 0, opsRefused: 0, opsRefusedReasons: [] },
+    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, serializeCharsBefore: 0, roleCalls: [], totalMs: wallMs, paidCalls: 0, repairRounds: 0, paintCount: 1, opsExecuted: 0, opsRefused: 0, opsRefusedReasons: [] },
   };
 }
 
@@ -1604,7 +1684,7 @@ async function fastMovePath(intent: string): Promise<TransformOutcome> {
   return {
     ok: true, reasoning: spec.reasoning, spec, perceiveMs: perception.builtInMs,
     clusters: perception.clusters.length, paidCalls: 0, wallMs,
-    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, serializeCharsBefore: 0, roleCalls: [], compileMs: 0, applyMs: 0, verifyMs: 0, pixelVerifyMs: 0, persistMs: 0, unaccountedMs: 0, totalMs: wallMs, paidCalls: 0, repairRounds: 0, paintCount: 1, opsExecuted: 0, opsRefused: 0, opsRefusedReasons: [] },
+    ledger: { perceiveMs: perception.builtInMs, serializeChars: 0, serializeCharsBefore: 0, roleCalls: [], totalMs: wallMs, paidCalls: 0, repairRounds: 0, paintCount: 1, opsExecuted: 0, opsRefused: 0, opsRefusedReasons: [] },
   };
 }
 
@@ -1624,7 +1704,7 @@ export default defineContentScript({
   runAt: 'document_idle',
 
   main() {
-    reapplyStored();
+    void reapplyStored();
 
     // SPA navigation detection.
     const origPush = history.pushState;
@@ -1635,7 +1715,7 @@ export default defineContentScript({
     window.addEventListener('hashchange', onRouteChange);
 
     window.addEventListener('keydown', (e) => {
-      if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'r') toggleSiteState();
+      if (e.altKey && e.shiftKey && e.key.toLowerCase() === 'r') void toggleSiteState();
     });
 
     browser.runtime.onMessage.addListener((message: { action: string; intent?: string }) => {
@@ -1664,8 +1744,7 @@ export default defineContentScript({
           })().catch((err) => {
             const msg = (err as Error)?.message || 'Transform crashed (internal error).';
             logDebug(`LISTENER RUNNER CRASHED: ${msg}` + (err && (err as Error).stack ? `\n${(err as Error).stack}` : ''));
-            removeStyleEverywhere(activeShadowRoots);
-            markFailed('internal error');
+            rollbackFailed('internal error');
             return { ok: false, kind: 'bad_output', message: msg, paidCalls: 0, wallMs: 0 };
           });
           inFlight = runner.finally(() => { inFlight = null; });

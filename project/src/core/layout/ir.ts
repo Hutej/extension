@@ -117,7 +117,7 @@ export function extractLayoutIR(perception: Perception): LayoutIR {
     const arr = childrenOf.get(key);
     if (arr) arr.push(n.handle); else childrenOf.set(key, [n.handle]);
   }
-  const siblingsOf = new Map<string | null, string[]>();
+  const _siblingsOf = new Map<string | null, string[]>();
   // siblings share a parent: a node's siblings are the children-list of its parent (incl itself).
   for (const n of nodes) {
     const sibs = childrenOf.get(n.computedRelationships.parent) ?? [n.handle];

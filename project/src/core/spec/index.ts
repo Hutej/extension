@@ -242,7 +242,10 @@ export function validateSpec(raw: unknown): ValidateResult {
     if (intents.length) spec.intents = intents;
   }
   if (typeof r.pack === 'string' && r.pack) spec.pack = r.pack;
-  if (r.packOverrides && typeof r.packOverrides === 'object') spec.packOverrides = r.packOverrides as Partial<DesignPack>;
+  // B6: validate packOverrides with a real schema check, not a bare cast.
+  // The model output is untrusted — reject anything that fails the check.
+  const validatedOverrides = validatePackOverrides(r.packOverrides);
+  if (validatedOverrides) spec.packOverrides = validatedOverrides;
   if (r.paletteMode === 'restrained' || r.paletteMode === 'vivid') spec.paletteMode = r.paletteMode;
   // Parse composition rules (same shape as regular rules, compiled first).
   if (Array.isArray(r.composition)) {
@@ -456,6 +459,68 @@ function mergePackOverrides(a?: Partial<DesignPack>, b?: Partial<DesignPack>): P
   if (a.surfaces || b.surfaces) (out as Partial<DesignPack>).surfaces = { ...(a.surfaces as Record<SurfaceTier, SurfaceDef>), ...(b.surfaces as Record<SurfaceTier, SurfaceDef>) } as Record<SurfaceTier, SurfaceDef>;
   if (a.layoutRules || b.layoutRules) (out as Partial<DesignPack>).layoutRules = { ...(a.layoutRules as PackLayoutRules), ...(b.layoutRules as PackLayoutRules) } as PackLayoutRules;
   return out;
+}
+
+/** B6: Validate model-supplied packOverrides with a real schema check instead of
+ *  a bare cast. Rejects anything that isn't a plain object with known field names
+ *  and correctly-typed values. This is the trust boundary — the model is untrusted. */
+function validatePackOverrides(raw: unknown): Partial<DesignPack> | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return undefined;
+  const r = raw as Record<string, unknown>;
+  const out: Partial<DesignPack> = {};
+  // Known fields and their validators.
+  if (typeof r.packId === 'string') (out as Record<string, unknown>).packId = r.packId;
+  if (r.colors && typeof r.colors === 'object' && !Array.isArray(r.colors)) {
+    const c = r.colors as Record<string, unknown>;
+    const colors: Record<string, unknown> = {};
+    if (typeof c.canvas === 'string') colors.canvas = c.canvas;
+    if (typeof c.text === 'string') colors.text = c.text;
+    if (typeof c.subtle === 'string') colors.subtle = c.subtle;
+    if (c.accents && typeof c.accents === 'object' && !Array.isArray(c.accents)) {
+      const accents: Record<string, string> = {};
+      for (const [k, v] of Object.entries(c.accents as Record<string, unknown>)) {
+        if (typeof k === 'string' && typeof v === 'string') accents[k] = v;
+      }
+      if (Object.keys(accents).length) colors.accents = accents;
+    }
+    if (Object.keys(colors).length) (out as Record<string, unknown>).colors = colors;
+  }
+  if (r.typeRamp && typeof r.typeRamp === 'object' && !Array.isArray(r.typeRamp)) {
+    const tr: Record<string, number> = {};
+    for (const [k, v] of Object.entries(r.typeRamp as Record<string, unknown>)) {
+      if (typeof k === 'string' && typeof v === 'number') tr[k] = v;
+    }
+    if (Object.keys(tr).length) (out as Record<string, unknown>).typeRamp = tr;
+  }
+  if (r.measurePx && typeof r.measurePx === 'object' && !Array.isArray(r.measurePx)) {
+    const mp: Record<string, number> = {};
+    for (const [k, v] of Object.entries(r.measurePx as Record<string, unknown>)) {
+      if (typeof k === 'string' && typeof v === 'number') mp[k] = v;
+    }
+    if (Object.keys(mp).length) (out as Record<string, unknown>).measurePx = mp;
+  }
+  if (Array.isArray(r.spacingScale) && r.spacingScale.every((v) => typeof v === 'number')) {
+    (out as Record<string, unknown>).spacingScale = r.spacingScale;
+  }
+  if (Array.isArray(r.radiusScale) && r.radiusScale.every((v) => typeof v === 'number')) {
+    (out as Record<string, unknown>).radiusScale = r.radiusScale;
+  }
+  if (Array.isArray(r.borderScale) && r.borderScale.every((v) => typeof v === 'number')) {
+    (out as Record<string, unknown>).borderScale = r.borderScale;
+  }
+  if (Array.isArray(r.shadowScale) && r.shadowScale.every((v) => typeof v === 'number')) {
+    (out as Record<string, unknown>).shadowScale = r.shadowScale;
+  }
+  if (r.surfaces && typeof r.surfaces === 'object' && !Array.isArray(r.surfaces)) {
+    (out as Record<string, unknown>).surfaces = r.surfaces; // ponytail: deeper validation can be added when a malformed surfaces override causes a failure
+  }
+  if (r.layoutRules && typeof r.layoutRules === 'object' && !Array.isArray(r.layoutRules)) {
+    (out as Record<string, unknown>).layoutRules = r.layoutRules;
+  }
+  if (r.lineHeight && typeof r.lineHeight === 'object' && !Array.isArray(r.lineHeight)) {
+    (out as Record<string, unknown>).lineHeight = r.lineHeight;
+  }
+  return Object.keys(out).length ? out : undefined;
 }
 
 /** Coerce a value into a flat string->string decl bag, or undefined. */

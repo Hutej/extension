@@ -39,13 +39,14 @@
  * rebuild the tree. matched-targets = 0 is a HARD ERROR.
  */
 
-import type { LayoutIR, LayoutIRNode, LayoutConstraint, ConstraintPriority } from './ir.ts';
+import type { LayoutIR, LayoutConstraint, ConstraintPriority } from './ir.ts';
 import { currentConstraints } from './ir.ts';
 import type { SlotAssignment } from './assign.ts';
 import type { SlotDef } from './languages/documentation.ts';
 import { DOCUMENTATION_SLOTS } from './languages/documentation.ts';
 import type { Length } from './length.ts';
 import { authorConstraint, token, intrinsic, assertNoMeasurementLengths } from './length.ts';
+import { assertNoRawPxSizing } from '../laws/index.ts';
 
 // ── Fluid token set (from ARCHITECTURE.md, applied at semantic text levels only) ──
 // A4: viewport units (vw) in clamp() are the only remaining vw use — they scale
@@ -96,7 +97,7 @@ export interface SolveResult {
   perNodeDecls: Map<string, string[]>;
   rulesEmitted: number;
   matchedTargets: number;
-  impossibleNodes: string[];
+  // B8: impossibleNodes deleted — populated but never read downstream.
   droppedOptionals: { handle: string; kind: string; reason: string }[];
 }
 
@@ -226,7 +227,7 @@ export function solve(input: SolveInput): SolveResult {
   for (const s of DOCUMENTATION_SLOTS) slotById.set(s.id, s);
 
   // ── 1. Validate constraints (detect impossible + dropped optionals) ──
-  const impossibleNodes: string[] = [];
+  // B8: impossibleNodes removed — populated but never read downstream.
   const droppedOptionals: { handle: string; kind: string; reason: string }[] = [];
   for (const node of ir.nodes) {
     const current = currentConstraints(ir.byHandle.get(node.handle)!);
@@ -235,7 +236,7 @@ export function solve(input: SolveInput): SolveResult {
     const slotConstraints: LayoutConstraint[] = slot
       ? slot.constraints.map((c) => ({ kind: c.kind as LayoutConstraint['kind'], priority: c.priority, source: 'language' as const, value: c.value }))
       : [];
-    mergeConstraints(node.handle, current, slotConstraints, impossibleNodes, droppedOptionals);
+    mergeConstraints(node.handle, current, slotConstraints, droppedOptionals);
   }
 
   // ── 2. Build placement map ───────────────────────────────────────────
@@ -327,7 +328,7 @@ export function solve(input: SolveInput): SolveResult {
   }
 
   const gridCols = hasSide
-    ? `minmax(min(${sideMin}px, 100%), fit-content) minmax(0, 1fr)`
+    ? `minmax(min(${sideMin}px, 100%), var(--wm-side-max)) minmax(0, 1fr)`
     : `minmax(min(${contentMin}px, 100%), 1fr)`;
 
   const matchedTargets = placement.size;
@@ -340,7 +341,7 @@ export function solve(input: SolveInput): SolveResult {
     placement, gridTemplate: gridCols, hasSide, sideMin, contentMin,
     perNodeDecls,
     rulesEmitted: 1 /* :root */ + placement.size + perNodeDecls.size,
-    matchedTargets, impossibleNodes, droppedOptionals,
+    matchedTargets, droppedOptionals,
   };
 }
 
@@ -612,7 +613,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     .filter((id) => slotById.get(id)?.preferredWidth === 'content')
     .map((id) => slotById.get(id)?.minWidth ?? CONTENT_MIN_PX));
   const gridTemplate = hasSide
-    ? `minmax(min(${sideMin}px, 100%), fit-content) minmax(0, 1fr)`
+    ? `minmax(min(${sideMin}px, 100%), var(--wm-side-max)) minmax(0, 1fr)`
     : `minmax(min(${contentMin}px, 100%), 1fr)`;
 
   // g. A3: Emit layout on the NCA, PRESERVING its existing formatting context.
@@ -783,7 +784,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   emittedLengths.set('grid-template-columns', [
     authorConstraint(sideMin, 'px'),
     authorConstraint(contentMin, 'px'),
-    intrinsic('fit-content'),
+    token(0, 'px'),  // var(--wm-side-max) — a named token, not a measurement
     intrinsic('auto'),  // fr unit → minmax(0, 1fr) → intrinsic
   ]);
   emittedLengths.set('gap', [token(0, 'rem')]);
@@ -792,6 +793,11 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   if (!law0Assertion.passed) {
     throw new Error(`Law 0 violation (measurement length in emission): ${law0Assertion.violations.join('; ')}`);
   }
+
+  // B10: real CSS-level Law 0 assertion — reject any raw px in a sizing property
+  // in the emitted CSS. The mock above documents provenance intent; this catches
+  // actual leaks from every emission path in this function.
+  assertNoRawPxSizing(css);
 
   // S11.3: build the emit-time plan — what the CSS INTENDS, asserted at verify time.
   const trackCount = hasSide ? 2 : 1;
@@ -831,7 +837,6 @@ function mergeConstraints(
   handle: string,
   current: LayoutConstraint[],
   slot: LayoutConstraint[],
-  impossibleNodes: string[],
   droppedOptionals: { handle: string; kind: string; reason: string }[],
 ): void {
   const byKind = new Map<string, LayoutConstraint[]>();
@@ -843,11 +848,7 @@ function mergeConstraints(
   for (const [, candidates] of byKind) {
     const priorityRank: Record<ConstraintPriority, number> = { required: 0, preferred: 1, optional: 2 };
     candidates.sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority]);
-    const required = candidates.filter((c) => c.priority === 'required');
-    if (required.length > 1) {
-      const values = new Set(required.map((c) => c.value ?? ''));
-      if (values.size > 1) impossibleNodes.push(handle);
-    }
+    // B8: impossibleNodes removed — the conflict is logged in droppedOptionals.
     const winner = candidates[0];
     for (let i = 1; i < candidates.length; i++) {
       if (candidates[i].priority === 'optional') {

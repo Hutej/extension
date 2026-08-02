@@ -24,7 +24,7 @@
  * a loud pivot-failure flag).
  */
 
-import type { DesignSpec, DesignRule, DesignOp, RoleIntent, AestheticOverrides, StyleDecls, LayoutDecls } from '../spec/index.ts';
+import type { DesignSpec, DesignRule, DesignOp, RoleIntent, StyleDecls, LayoutDecls } from '../spec/index.ts';
 import type { Perception, Cluster } from '../perceive/index.ts';
 import type { DesignRole } from '../perceive/semantic.ts';
 import { resolvePack, type DesignPack, type TypeRole, type SurfaceTier } from '../design/packs.ts';
@@ -287,6 +287,20 @@ export function expandIntents(spec: DesignSpec, perception: Perception): Expansi
         }
       }
     }
+  }
+
+  // B11: colour coverage. After deleting the base-coat harmonizer (A6), clusters
+  // the model addressed with layout but no surface/accent get NO colour — text
+  // stays the site's original colour, invisible on a redesigned canvas. Give
+  // every addressed cluster a text colour from the pack's design system. This is
+  // NOT the base coat (one uniform bg+text for ALL clusters); it's the pack's text
+  // token for clusters the model chose to address, from the design system.
+  for (const handle of allTargets) {
+    const r = rulesByHandle.get(handle);
+    if (!r || !r.styles) continue;
+    if ('color' in r.styles) continue;       // model set explicit text — keep it
+    if ('background' in r.styles || 'backgroundColor' in r.styles || 'backgroundImage' in r.styles) continue; // has a surface — Contrast Lock pairs the text
+    r.styles.color = pack.colors.text;
   }
 
   // Filter rules to those that actually carry something (drop empty placeholders).

@@ -10,27 +10,15 @@ export const AI_CONFIG = {
   // paths are NOT intertwined — the pipeline forks once; no shared mutable state.
   layoutCompiler: (process.env.WM_LAYOUT_COMPILER ?? 'v1') as 'v1' | 'v2',
 
-  // Per-role models. The monolithic call is SPLIT: Architect (composition) +
-  // Painter (palette) run in parallel; Critic (repair) runs on the fastest model.
-  // The design path = Architect + Painter + Critic rounds; restyle-only = Painter
-  // alone; the fast path = no model. Env-overridable (WM_MODEL_*); the operator
-  // updates these by eye from the bake-off (bakeoff.ts prints per-role winners).
-  //
-  // PROVIDER: Cloudflare Workers AI (OpenAI-compatible endpoint) is the LIVE path
-  // for all three roles. Model IDs are the Workers AI @cf/... names. GLM 5.2 is the
-  // flagship (function calling + reasoning, 262K ctx); glm-4.7-flash is the fast
-  // companion for the Critic (mirrors the old gpt-5.1 / gpt-4o-mini split).
-  // OPENAI — disabled in favor of Cloudflare Workers AI, kept for one-step revert:
-  //   architectModel: 'gpt-5.1', painterModel: 'gpt-5.1', criticModel: 'gpt-4o-mini', styleModel: 'gpt-5.1'
+  // Per-role models on Cloudflare Workers AI. GLM 5.2 is the flagship
+  // (function calling + reasoning, 262K ctx); glm-4.7-flash is the fast
+  // companion for the Critic.
   architectModel: process.env.WM_MODEL_ARCHITECT ?? '@cf/zai-org/glm-5.2',
   painterModel: process.env.WM_MODEL_PAINTER ?? '@cf/zai-org/glm-5.2',
   criticModel: process.env.WM_MODEL_CRITIC ?? '@cf/zai-org/glm-4.7-flash',
-  // Single-call path model (restyle-only Painter-alone fallback + the bake-off).
-  // WM_MODEL env override (for the bake-off; production default unchanged).
   styleModel: process.env.WM_MODEL ?? '@cf/zai-org/glm-5.2',
   // No fallback: a known-recolorer fallback is a worse failure than an honest error.
   styleFallbackModel: undefined as string | undefined,
-  // Non-reasoning fallback temperature (unused now — no fallback).
   styleFallbackTemperature: 0.6,
   // Reasoning tokens bill against the completion budget — generous to prevent
   // JSON truncation when the model thinks at higher effort.
@@ -82,8 +70,9 @@ export const AI_CONFIG = {
  * into the role prompts so the model needs minimal runtime re-teaching.
  */
 
-// DEBUG: always log — the test harness reads console output for diagnosis.
-const DEBUG = true;
+// B3: DEBUG = false — was true, shipping page content to the console in production.
+// Gate all content-bearing logs behind this. The test harness enables it via WM_DEBUG.
+const DEBUG = (process.env.WM_DEBUG ?? 'false') === 'true';
 export function logDebug(...args: unknown[]): void {
   if (DEBUG) console.log('[WebMorph]', ...args);
 }

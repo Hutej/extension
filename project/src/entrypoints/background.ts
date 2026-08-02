@@ -28,11 +28,8 @@ export default defineBackground(() => {
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.action === 'styleSpec') {
-      // OPENAI — disabled in favor of Cloudflare Workers AI, kept for easy revert:
-      //   chrome.storage.local.get(['openai_api_key'], async (result) => {
-      //     const apiKey = result.openai_api_key as string | undefined; ... })
-      // Cloudflare Workers AI creds (account id + API token) are injected into
-      // storage by the harness (mirroring the old OpenAI key injection).
+      // B1: Unified on Cloudflare Workers AI credentials (cloudflare_account_id +
+      // cloudflare_api_token). The orphaned openai_api_key path is deleted.
       chrome.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token'], async (result: Record<string, unknown>) => {
         const accountId = result.cloudflare_account_id as string | undefined;
         const apiToken = result.cloudflare_api_token as string | undefined;

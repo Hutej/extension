@@ -22,8 +22,10 @@ export interface SlotAssignment {
   total: number;
 }
 
-/** Assign every node to exactly one slot. Throws on invariant violation. */
-export function assignSlots(nodes: LayoutIRNode[], excluded: Set<string> = new Set()): SlotAssignment {
+/** Assign every node to exactly one slot. Throws on invariant violation.
+ *  B8: the `excluded` parameter was removed — the assigner never used it
+ *  (excluded nodes still land in a slot; exclusion is a solver concern). */
+export function assignSlots(nodes: LayoutIRNode[]): SlotAssignment {
   const handleToSlot = new Map<string, SlotId>();
   const slotToHandles = new Map<SlotId, string[]>();
   for (const slot of DOCUMENTATION_SLOTS) slotToHandles.set(slot.id, []);

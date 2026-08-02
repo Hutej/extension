@@ -185,20 +185,20 @@ export const VIEWPORT_FONT_CEIL_VW = 10; // fallback ceiling (~10% viewport) whe
 export const FONT_CONTAINER_RATIO = 0.15;
 
 /**
- * Make display type viewport/container-safe. Body text (< LARGE_FONT_PX) passes
- * through untouched. Large type is clamped so it can never overflow its block:
- * the ceiling is a fraction of the container width when known, else a
- * viewport fraction. A value that already fits its container is left as-is.
+ * Make display type viewport-safe. Body text (< LARGE_FONT_PX) passes through
+ * untouched. Large type is clamped so it can never overflow: the ceiling is a
+ * viewport token (vw) — never a measurement-derived px. The containerWidthPx
+ * measurement informs the DECISION (should we clamp?) but never the OUTPUT —
+ * Law 0: measurements may inform decisions, never become output.
  */
 export function clampDisplayFont(val: string, containerWidthPx?: number): string {
   const px = fontLengthToPx(val);
   if (px === null || px < LARGE_FONT_PX) return val; // body text — untouched
   if (containerWidthPx && containerWidthPx > 0) {
     const ceil = Math.round(containerWidthPx * FONT_CONTAINER_RATIO);
-    if (px <= ceil) return val;                       // already fits its block
-    return `clamp(1rem, ${val}, ${ceil}px)`;          // scale down to fit the container
+    if (px <= ceil) return val;                       // already fits — measurement is decision-only
   }
-  return `clamp(1rem, ${val}, ${VIEWPORT_FONT_CEIL_VW}vw)`; // no container info -> viewport ceiling
+  return `clamp(1rem, ${val}, ${VIEWPORT_FONT_CEIL_VW}vw)`; // token ceiling (vw, not measurement px)
 }
 
 /** Length -> px, or null for viewport-relative/computed lengths (vw/%/clamp/calc/min -> leave alone). */
@@ -424,34 +424,19 @@ function splitTracks(val: string): string[] {
 }
 
 /**
- * Fluid guard + rewriter: a sizing declaration (width/max-width/min-width/
- * min-height/max-height) whose value is a RAW fixed length (px/pt/cm/in/mm/pc) —
- * NOT wrapped in min()/clamp()/calc()/max() — would freeze the design at one
- * viewport measurement. The compiler already wraps fixed px in min(X,100%) /
- * min(X,100vh) by construction (structure/index.ts); this guard is the post-compile
- * safety net that catches and REWRITES any leak from any path. Bare `height` is
- * logged but NOT rewritten (the model can't set it — not in LAYOUT_PROPS — and
- * rewriting a deliberate height could break layout). `vw`/`vh` are already
- * viewport-relative and are not matched. Pure: takes the emitted CSS as data,
- * returns the rewritten CSS + the offending `prop: value` log entries.
+ * Law 0 assertion: reject any raw fixed-length px in a sizing property that
+ * reached the final CSS. The structure path wraps fixed px in min(X,100%) /
+ * min(X,100vh) by construction; a raw px here means a path leaked. THROWS —
+ * does not rewrite. The old fluidizeRawPxSizing rewriter was proof that raw
+ * pixels were still reaching emission; the source is now fixed (structure path
+ * wraps by construction, clampDisplayFont uses vw tokens), so the guard is a
+ * rejection, not a bandage. `vw`/`vh`/`%`/`fr`/`auto`/`min()`/`clamp()`/`calc()`
+ * are already fluid — not matched.
  */
-export function fluidizeRawPxSizing(css: string): { css: string; leaks: string[] } {
-  const leaks: string[] = [];
-  // Match a raw fixed-length sizing declaration (not wrapped — a wrapped value
-  // starts with min(/clamp(/calc(/max( which doesn't match the digit-first pattern).
-  const re = /(^|[\s{;])(width|max-width|min-width|height|min-height|max-height)\s*:\s*([\d.]+(?:px|pt|cm|in|mm|pc))\s*(!important)?/g;
-  const out = css.replace(re, (full, prefix, prop, val, important) => {
-    if (prop === 'height') {
-      // bare height is not in LAYOUT_PROPS — log only, don't rewrite.
-      leaks.push(`${prop}: ${val}`);
-      return full;
-    }
-    const ceiling = prop === 'min-height' || prop === 'max-height' ? '100vh' : '100%';
-    const replacement = `min(${val}, ${ceiling})`;
-    leaks.push(`${prop}: ${val} -> ${replacement}`);
-    return `${prefix}${prop}: ${replacement}${important ? ' ' + important : ''}`;
-  });
-  return { css: out, leaks };
+export function assertNoRawPxSizing(css: string): void {
+  const re = /(^|[\s{;])(width|max-width|min-width|min-height|max-height)\s*:\s*([\d.]+(?:px|pt|cm|in|mm|pc))\s*(!important)?/;
+  const m = css.match(re);
+  if (m) throw new Error(`Law 0 violation: raw ${m[3]} in ${m[2]} — must be wrapped (min/clamp/calc)`);
 }
 
 

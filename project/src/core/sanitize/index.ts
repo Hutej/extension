@@ -16,8 +16,7 @@
 /** Maximum CSS input length in characters */
 export const MAX_CSS_INPUT_LENGTH = 512_000;
 
-/** Maximum HTML input length in characters */
-export const MAX_HTML_INPUT_LENGTH = 256_000;
+// B8: MAX_HTML_INPUT_LENGTH deleted — only used by deleted sanitizeMarkup.
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -31,10 +30,7 @@ export interface SanitizeCssResult {
   report: SanitizeReport;
 }
 
-export interface SanitizeMarkupResult {
-  html: string;
-  report: SanitizeReport;
-}
+// B8: sanitizeMarkup deleted — never imported anywhere.
 
 // ── CSS Sanitizer ──────────────────────────────────────────────────
 
@@ -97,8 +93,10 @@ export function sanitizeCss(css: string): SanitizeCssResult {
     return '/* [sanitized: behavior removed] */';
   });
 
-  // 5. Strip javascript: protocol in any value
-  result = result.replace(/javascript\s*:/gi, (match) => {
+  // 5. Strip javascript: protocol in any value — B6: decode CSS escape sequences
+  // first so \6a\61\76\61\73\63\72\69\70\74 can't bypass the javascript: check.
+  result = result.replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
+  result = result.replace(/javascript\s*:/gi, (_match) => {
     report.stripped.push(`javascript: protocol`);
     report.strippedCount++;
     return '/* [sanitized: javascript: removed] */';
@@ -108,8 +106,9 @@ export function sanitizeCss(css: string): SanitizeCssResult {
   result = result.replace(/url\s*\(\s*(['"]?)(.*?)\1\s*\)/gi, (match, _quote, urlContent) => {
     const trimmed = urlContent.trim().toLowerCase();
 
-    // Allow data: URIs (inline images)
-    if (trimmed.startsWith('data:')) return match;
+    // Allow data: URIs for images ONLY (B6: was accepting any data: type —
+    // data:text/html, data:text/javascript, etc. could carry script vectors).
+    if (trimmed.startsWith('data:image/')) return match;
 
     // Allow https: image URLs
     if (trimmed.startsWith('https://')) return match;
@@ -128,91 +127,4 @@ export function sanitizeCss(css: string): SanitizeCssResult {
 
 // ── HTML Sanitizer ─────────────────────────────────────────────────
 
-/** Tags that are always stripped entirely (including content) */
-const STRIPPED_TAGS = new Set(['script', 'iframe', 'object', 'embed']);
-
-/** Tags that are stripped but content is preserved */
-const UNWRAP_TAGS = new Set(['noscript']);
-
-/**
- * Sanitize HTML markup: strip dangerous elements and attributes.
- *
- * Dangerous vectors stripped:
- * - <script> tags (including content)
- * - Inline on* event handlers (onclick, onerror, onload, etc.)
- * - External src/href pointing to scripts (javascript: URLs)
- * - <iframe>, <object>, <embed> tags
- * - javascript: protocol in any attribute
- *
- * Preserves benign markup: divs, spans, headings, paragraphs,
- * images with safe src, links with safe href, etc.
- */
-export function sanitizeMarkup(html: string): SanitizeMarkupResult {
-  const report: SanitizeReport = { strippedCount: 0, stripped: [] };
-
-  if (!html || html.length === 0) {
-    return { html: '', report };
-  }
-
-  // Enforce size limit
-  let input = html;
-  if (input.length > MAX_HTML_INPUT_LENGTH) {
-    input = input.substring(0, MAX_HTML_INPUT_LENGTH);
-    report.stripped.push(`Input truncated from ${html.length} to ${MAX_HTML_INPUT_LENGTH} chars`);
-    report.strippedCount++;
-  }
-
-  let result = input;
-
-  // 1. Strip dangerous tags entirely (including content)
-  for (const tag of STRIPPED_TAGS) {
-    const re = new RegExp(`<${tag}\\b[^>]*>[\\s\\S]*?<\\/${tag}>`, 'gi');
-    result = result.replace(re, (match) => {
-      report.stripped.push(`<${tag}>: ${match.substring(0, 80)}`);
-      report.strippedCount++;
-      return '';
-    });
-    // Also strip self-closing variants
-    const reSelf = new RegExp(`<${tag}\\b[^>]*/?>`, 'gi');
-    result = result.replace(reSelf, (match) => {
-      report.stripped.push(`<${tag}> (self-closing): ${match.substring(0, 80)}`);
-      report.strippedCount++;
-      return '';
-    });
-  }
-
-  // 2. Strip inline on* event handlers from any remaining tags
-  result = result.replace(/<([a-zA-Z][a-zA-Z0-9]*)\b([^>]*)>/g, (match, tagName, attrs) => {
-    let cleanedAttrs = attrs;
-    let hadHandler = false;
-
-    // Remove on* attributes
-    cleanedAttrs = cleanedAttrs.replace(/\s+on[a-zA-Z]+\s*=\s*(?:"[^"]*"|'[^']*'|[^\s>]*)/gi, (handlerMatch: string) => {
-      report.stripped.push(`Event handler: ${handlerMatch.trim().substring(0, 60)}`);
-      report.strippedCount++;
-      hadHandler = true;
-      return '';
-    });
-
-    // Remove javascript: in href/src/action/formaction attributes
-    cleanedAttrs = cleanedAttrs.replace(/((?:href|src|action|formaction)\s*=\s*(?:"|'))javascript:[^"']*(?:"|')/gi, (jsMatch: string) => {
-      report.stripped.push(`javascript: URL: ${jsMatch.substring(0, 80)}`);
-      report.strippedCount++;
-      return '';
-    });
-
-    // Remove javascript: in unquoted attributes
-    cleanedAttrs = cleanedAttrs.replace(/((?:href|src|action|formaction)\s*=\s*)javascript:[^\s>]*/gi, (jsMatch: string) => {
-      report.stripped.push(`javascript: URL (unquoted): ${jsMatch.substring(0, 80)}`);
-      report.strippedCount++;
-      return '';
-    });
-
-    if (hadHandler || cleanedAttrs !== attrs) {
-      return `<${tagName}${cleanedAttrs}>`;
-    }
-    return match;
-  });
-
-  return { html: result, report };
-}
+// B8: sanitizeMarkup + STRIPPED_TAGS + UNWRAP_TAGS deleted — never imported anywhere.

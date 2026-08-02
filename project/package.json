@@ -9,11 +9,15 @@
     "compile": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types tests/compile.test.ts",
-    "test:e2e": "node --experimental-strip-types --env-file=.env tests/popup.test.ts"
+    "test:e2e": "node --experimental-strip-types --env-file=.env tests/popup.test.ts",
+    "lint": "eslint src/ --ext .ts"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.2",
+    "@typescript-eslint/eslint-plugin": "^8.65.0",
+    "@typescript-eslint/parser": "^8.65.0",
     "axe-core": "^4.12.1",
+    "eslint": "^10.8.0",
     "playwright": "^1.61.1",
     "typescript": "^5.8.3",
     "wxt": "^0.20.6"

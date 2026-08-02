@@ -15,7 +15,7 @@ import type { DesignSpec, DesignRule, StyleDecls, LayoutDecls } from '../spec';
 import type { Perception, Cluster } from '../perceive';
 import { buildDeclarations } from '../capabilities/style/index.ts';
 import { buildLayoutDeclarations } from '../capabilities/structure/index.ts';
-import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, fluidizeRawPxSizing, MIN_CHARS_PER_LINE, MIN_CONTENT_WIDTH_FRACTION } from '../laws/index.ts';
+import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, assertNoRawPxSizing, MIN_CHARS_PER_LINE, MIN_CONTENT_WIDTH_FRACTION } from '../laws/index.ts';
 import { parseColor, colorfulness, pickReadableText, extractGradientStops, pickReadableTextForGradient } from '../../shared/color.ts';
 import { validateOps, type ValidatedOp } from '../ops/index.ts';
 import { expandIntents } from './expand.ts';
@@ -490,12 +490,11 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
   // carries the load: FillParent + MaxWidth + StackVertically per slot.
   // (The baseCoatCount stays 0 — reported for backward compat.)
 
-  // Fluid guard: post-compile safety net. The structure path already wraps
-  // fixed px in min(X,100%)/min(X,100vh) by construction; this REWRITES any leak
-  // from any path so a frozen-one-viewport value can never reach emitted CSS.
-  // Bare `height` leaks are logged (not rewritten — the model can't set it).
-  const { css: fluidCss, leaks: rawPxLeaks } = fluidizeRawPxSizing(blocks.join('\n\n'));
-  for (const leak of rawPxLeaks) droppedProps.push(`fluidize(${leak})`);
+  // B10: Law 0 assertion — reject any raw px in a sizing property that reached
+  // the final CSS. The structure path wraps fixed px by construction (min(X,100%));
+  // a raw px here means a path leaked. THROWS, does not rewrite — the source is
+  // fixed, so the guard is a gate, not a bandage.
+  assertNoRawPxSizing(blocks.join('\n\n'));
 
   // A6: forceContrast reporting — a last-resort safety net, never silent.
   // Collect the handles where forceContrast applied a readable pair.
@@ -504,7 +503,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
     : [];
 
   return {
-    css: fluidCss, rulesEmitted, invalidTargets, droppedProps, baseCoatCount, forceContrastReport, ops: validatedOps,
+    css: blocks.join('\n\n'), rulesEmitted, invalidTargets, droppedProps, baseCoatCount, forceContrastReport, ops: validatedOps,
     ...(escapeHatchUses.length || specIn.intents?.length ? { escapeHatchUses, escapeHatchFraction, expandNotes, expandedTargets } : {}),
   };
 }

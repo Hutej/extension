@@ -18,19 +18,73 @@ const metricsEl = $<HTMLDivElement>('metricsEl');
 const siteStatus = $<HTMLDivElement>('siteStatus');
 const settingsToggle = $<HTMLSpanElement>('settingsToggle');
 const settingsArea = $<HTMLDivElement>('settingsArea');
-const apiKeyEl = $<HTMLInputElement>('apiKey');
+const accountIdEl = $<HTMLInputElement>('accountId');
+const apiTokenEl = $<HTMLInputElement>('apiToken');
 const saveKeyBtn = $<HTMLButtonElement>('saveKeyBtn');
+const credStatusEl = $<HTMLDivElement>('credStatus');
+const optOutEl = $<HTMLInputElement>('optOutModel');
+const disclosureEl = $<HTMLDivElement>('disclosure');
+const disclosureOkBtn = $<HTMLButtonElement>('disclosureOk');
 
-// ── API key ──
-browser.storage.local.get(['openai_api_key']).then((res: Record<string, unknown>) => {
-  if (res.openai_api_key) apiKeyEl.value = res.openai_api_key as string;
+// ── Cloudflare credentials (B1: unified on cloudflare_account_id + cloudflare_api_token) ──
+void browser.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token', 'webmorphConsentShown', 'webmorphOptOutModel']).then((res: Record<string, unknown>) => {
+  if (res.cloudflare_account_id) accountIdEl.value = res.cloudflare_account_id as string;
+  if (res.cloudflare_api_token) apiTokenEl.value = res.cloudflare_api_token as string;
+  // B5: show disclosure before the first transform.
+  if (!res.webmorphConsentShown) disclosureEl.style.display = 'block';
+  if (res.webmorphOptOutModel) optOutEl.checked = true;
 });
 settingsToggle.addEventListener('click', () => settingsArea.classList.toggle('open'));
-saveKeyBtn.addEventListener('click', () => {
-  browser.storage.local.set({ openai_api_key: apiKeyEl.value.trim() }).then(() => {
-    settingsArea.classList.remove('open');
-    showStatus('API key saved.', 'ok');
-  });
+// B5: opt-out toggle
+optOutEl.addEventListener('change', () => {
+  void browser.storage.local.set({ webmorphOptOutModel: optOutEl.checked });
+});
+// B5: disclosure acknowledgement
+disclosureOkBtn.addEventListener('click', () => {
+  void browser.storage.local.set({ webmorphConsentShown: true });
+  disclosureEl.style.display = 'none';
+});
+saveKeyBtn.addEventListener('click', async () => {
+  const accountId = accountIdEl.value.trim();
+  const apiToken = apiTokenEl.value.trim();
+  credStatusEl.textContent = '';
+  if (!accountId || !apiToken) {
+    credStatusEl.textContent = 'Both Account ID and API Token are required.';
+    credStatusEl.style.color = 'var(--err)';
+    return;
+  }
+  saveKeyBtn.disabled = true;
+  credStatusEl.textContent = 'Validating credentials…';
+  credStatusEl.style.color = 'var(--muted)';
+  try {
+    // B1: Validate credentials with a minimal model call (1 token max) to the
+    // Cloudflare Workers AI endpoint. A 200 = both account ID and token are valid.
+    // A 401/403 = invalid token or wrong account. This catches bad credentials at
+    // save time, not silently at transform time.
+    const url = `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/chat/completions`;
+    const res = await fetch(url, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiToken}` },
+      body: JSON.stringify({ model: '@cf/zai-org/glm-5.2', max_completion_tokens: 1, messages: [{ role: 'user', content: 'hi' }] }),
+    });
+    if (res.ok) {
+      await browser.storage.local.set({ cloudflare_account_id: accountId, cloudflare_api_token: apiToken });
+      settingsArea.classList.remove('open');
+      showStatus('Cloudflare credentials saved and validated.', 'ok');
+      credStatusEl.textContent = '';
+    } else if (res.status === 401 || res.status === 403) {
+      credStatusEl.textContent = 'Invalid credentials — check your Account ID and API Token.';
+      credStatusEl.style.color = 'var(--err)';
+    } else {
+      const body = await res.text().catch(() => '');
+      credStatusEl.textContent = `Validation failed (HTTP ${res.status}): ${body.slice(0, 120)}`;
+      credStatusEl.style.color = 'var(--err)';
+    }
+  } catch (err) {
+    credStatusEl.textContent = `Network error: ${(err as Error).message}`;
+    credStatusEl.style.color = 'var(--err)';
+  }
+  saveKeyBtn.disabled = false;
 });
 
 // ── Helpers ──
@@ -77,6 +131,21 @@ transformBtn.addEventListener('click', async () => {
   if (!intent) { showStatus('Enter a request first.', 'err'); return; }
   const tabId = await getTabId();
   if (!tabId) { showStatus('Cannot find the active tab.', 'err'); return; }
+  // B5: gate on consent disclosure.
+  const consent = await browser.storage.local.get(['webmorphConsentShown', 'webmorphOptOutModel']);
+  if (!consent.webmorphConsentShown) {
+    disclosureEl.style.display = 'block';
+    showStatus('Please review and acknowledge the disclosure below first.', 'info');
+    return;
+  }
+  // B5: gate on opt-out — if the user opted out of model calls, only fast paths work.
+  if (consent.webmorphOptOutModel) {
+    const kind = /^(hide|remove|delete|get rid of|move|shift|relocate|push|send)\b/i.test(intent);
+    if (!kind) {
+      showStatus('Model calls are disabled (opt-out). Only hide/move commands work without AI.', 'err');
+      return;
+    }
+  }
 
   // Loading state.
   showStatus('<span class="spinner"></span>Designing…', 'info');
@@ -108,13 +177,19 @@ transformBtn.addEventListener('click', async () => {
         `<span>⏱ ${fmtMs(res.wallMs ?? 0)}</span>`,
         `<span>🤖 ${res.model ?? '?'}</span>`,
         `<span>🎫 ${fmtUsage(res.usage)}</span>`,
-        `<span>💰 ${res.paidCalls ?? 1} call(s)</span>`,
+        `<span>💰 ${res.paidCalls ?? 1} request(s)</span>`,
         `<span>📊 ${res.clusters ?? '?'} clusters</span>`,
       ].join('');
       metricsEl.className = 'metrics show';
-      updateSiteStatus();
+      // B3: surface perception truncation if it happened.
+      if (res.perceptionTruncated && (res.perceptionTruncated.walk || res.perceptionTruncated.serialize)) {
+        const parts: string[] = [];
+        if (res.perceptionTruncated.walk) parts.push('page was too large to fully perceive');
+        if (res.perceptionTruncated.serialize) parts.push('perception was trimmed to fit the model');
+        showStatus(`⚠ Incomplete perception: ${parts.join('; ')}. The redesign may be partial.`, 'info');
+      }
+      void updateSiteStatus();
     } else {
-      $('webmorph-result').textContent = JSON.stringify(res);
       const kind = res.kind as string | undefined;
       const msg = (kind && ERROR_MESSAGES[kind]) ? ERROR_MESSAGES[kind] : (res.message || 'Transform failed.');
       showStatus(`✗ ${msg}`, 'err');
@@ -134,7 +209,7 @@ removeBtn.addEventListener('click', async () => {
   if (!tabId) return;
   chrome.tabs.sendMessage(tabId, { action: 'remove_all' }, () => {
     showStatus('Transform removed.', 'info');
-    updateSiteStatus();
+    void updateSiteStatus();
   });
 });
 
@@ -174,4 +249,5 @@ async function updateSiteStatus(): Promise<void> {
   });
 }
 
-updateSiteStatus();
+// B7: void the floating promise at module load.
+void updateSiteStatus();

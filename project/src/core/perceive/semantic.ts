@@ -387,5 +387,7 @@ export function summarizeComposition(
 export function hash(str: string): string {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
-  return (h >>> 0).toString(36).padStart(6, '0').slice(-6);
+  // B8: .slice(-6) removed — drops the most significant digit for values >= 36^6.
+  // Modulo 36^6 ensures the value fits in 6 base36 digits, matching perceive/index.ts.
+  return ((h >>> 0) % 2176782336).toString(36).padStart(6, '0');
 }

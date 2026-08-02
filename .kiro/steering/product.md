@@ -71,6 +71,33 @@ Each phase gets an explicit `GATE:` line. A phase is not done until its gate pas
   demotes layoutReshaped to advisory, and fixes the void detector's inter-cluster blindness. Standing:
   0/3 sites clean (MDN passes all 11 gates but renders as 1 visual column by eye — design quality is
   the user's eye, not the gate's). The hard-gate count is 11 everywhere.
+- **BUILD SWEEP 1A — GIVE LAYOUT BACK TO THE BROWSER (Law 0, A1-A9) — BUILT, NOT VERIFIED BY EYE.**
+  Governing law: "A site is responsive because the browser re-solves layout from constraints on every
+  resize, zoom, font load and scrollbar change — not because its CSS is better." Gate (this sweep):
+  typecheck+build+lint ONLY — no site runs, no paid calls (BUILD FIRST, VERIFY LATER, prompt 1 of 6).
+  All 9 items built and committed (342d433 + ff1a406):
+  - [x] A1 — Length type with provenance (token | authorConstraint | intrinsic | measurement). Compiler
+    assertion pass rejects measurement-provenance reaching the emitter. `length.ts`.
+  - [x] A2 — Constraint-driven emission. `constraintToCss()` translates all 9 IR constraint kinds to
+    CSS. Slot constraints drive per-node declarations, not measured rects.
+  - [x] A3 — Preserve formatting context. NCA display detected (grid/flex/block); modify existing
+    context's properties, don't replace (grid→modify grid props, flex→flex props, block→introduce grid).
+  - [x] A4 — Purge viewport units. 20vw + calc(20vw...) → fit-content/fr. 320px → CONTENT_MIN_PX token.
+    percentifyValueToViewport + percentifyClusterWidth deleted. Dead squeezeTargets/clipOverflowTargets
+    options removed from CompileOptions.
+  - [x] A5 — Container queries. container-type:inline-size on NCA + @container(max-width:600px)
+    collapses proxies to full-width. Browser-native responsive collapse, no viewport measurement.
+  - [x] A6 — Delete cake-patching repairs. Squeeze repair deleted (WrapOnOverflow + min-width carries
+    the load). overflow-x:clip deleted (minmax(min(X,100%),...) + min-width:0 carries the load). Base-coat
+    harmonizer deleted (each cluster gets constraint-driven styling). forceContrast downgraded to
+    reported safety net (forceContrastReport: string[] in CompileResult).
+  - [x] A7 — DOM mutation policy. Closed-list reasons (escape-overflow-hidden, escape-stacking-context,
+    cross-layout-regions, impossible-ancestry). Default: no mutation. Ops without valid reason refused.
+  - [x] A8 — Resize-invariance harness. `resize.ts` — simulates 6 viewport widths (320–1920), checks
+    overflow/overlap/squeeze/invisible/blank at each. Wired into content.ts, left UNEXECUTED.
+  - [x] A9 — Documentation. `docs/LAW_0_BROWSER_OWNERSHIP.md` — the law, 5 rules, 9 named violations with
+    fixes, DOM mutation policy, resize invariance. AGENTS.md + ARCHITECTURE.md updated.
+  PENDING: by-eye verification on real sites (next prompt — prompt 2 of 6).
 - **P2.6 Stress sites BBC + YouTube — 5/5-applied beauty gate returns here.** GATE: 5/5 sites applied
   + by-eye beauty on BBC + YouTube under the exclusion registry.
 - **P3 Migration completion + BRUTAL DELETION.** Only AFTER the v2 flag is switched on and parity
@@ -427,7 +454,14 @@ The solver (Step 2) is NOT started. **Phase 5 (role-anchored stable handles) is 
 
 ## Current position (updated)
 
-**P2.5 — Step 11 IN PROGRESS (stop track inheritance, assert the plan).**
+**BUILD SWEEP 1A — GIVE LAYOUT BACK TO THE BROWSER — BUILT, NOT VERIFIED BY EYE.**
+All 9 items (A1–A9) built and committed (342d433 + ff1a406). Gate: typecheck+build+lint only —
+0 errors in src/, build passes, lint passes. No site runs, no paid calls (BUILD FIRST, VERIFY
+LATER — prompt 1 of 6). The by-eye verification is the NEXT prompt. The measurement-derived values
+have been purged from the solver and compiler; the constraint-driven emission layer replaces
+geometry-driven emission. See the roadmap entry above for per-item details.
+
+**Prior: P2.5 — Step 11 IN PROGRESS (stop track inheritance, assert the plan).**
 Step 10 fixed content loss (subgrid replaces display:contents). Step 11 fixes the successor
 defect: subgrid re-imposed the two tracks on every nesting depth → track inheritance.
 

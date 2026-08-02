@@ -551,7 +551,7 @@ function measureFramedClusterFraction(): number {
 
 // ── contrast ───────────────────────────────────────────────────────
 
-function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<string, string>, noHandle: { count: number }): boolean {
+function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<string, string>, _noHandle: { count: number }): boolean {
   // S8.4: sample ONE REPRESENTATIVE PER [data-wm-c] handle (reuses the
   // findBleedTargets dedupe pattern) instead of a global size-sorted element
   // list. The old code had two compounding bugs:
@@ -668,7 +668,7 @@ const SPACING_TOLERANCE_PX = 2;
 /** The set of colors the pack declares — the canvas, the text, the subtle, and
  *  every named accent. A color the emitted CSS uses that ISN'T one of these (and
  *  isn't a derived contrast pair the compiler computed) is an off-system color. */
-function declaredColorSet(spec: DesignSpec, packId: string): Set<string> {
+function declaredColorSet(spec: DesignSpec, _packId: string): Set<string> {
   const pack = packForSpec(spec);
   const out = new Set<string>();
   const add = (c?: string) => { if (c) { const p = parseColor(c); out.add(p ? `rgb(${Math.round(p[0])},${Math.round(p[1])},${Math.round(p[2])})` : c.toLowerCase()); } };
@@ -793,6 +793,6 @@ export function checkConformance(css: string, spec: DesignSpec, escapeHatchUses:
   }
 
   const ok = spacingOff === 0 && typeOff === 0 && colorOff === 0 && familyInconsistency === 0;
-  const escapeHatchFraction = totalTargets > 0 ? escapeHatchUses.filter((h) => true).length / Math.max(1, totalTargets) : 0;
+  const escapeHatchFraction = totalTargets > 0 ? escapeHatchUses.filter(() => true).length / Math.max(1, totalTargets) : 0;
   return { ok, violations, packId: pack.id, escapeHatchUses, escapeHatchFraction };
 }

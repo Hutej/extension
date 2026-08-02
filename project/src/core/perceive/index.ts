@@ -15,7 +15,7 @@ import { STYLE_ELEMENT_ID, SIDE_RAIL_MIN_FRAC, SIDE_RAIL_MAX_FRAC } from '../law
 import { formatPacks } from '../design/packs.ts';
 import { isTransparent, parseColor, colorfulness } from '../../shared/color.ts';
 import {
-  classifyRole, rankDominance, detectGrouping, summarizeComposition, hash as semanticHash,
+  classifyRole, rankDominance, detectGrouping, summarizeComposition,
   type ClusterSignals, type PageContext, type DesignRole, type CompositionSummary,
 } from './semantic.ts';
 
@@ -34,7 +34,8 @@ const TIER1_FULL_DETAIL_COUNT = 80; // top clusters by prominence get full seria
 // be tighter, but the char ceiling is a stable proxy for the token/time cost and
 // the role prompts are smaller than the old monolith, so the fast path keeps detail
 // where it used to be trimmed.`
-const SERIALIZE_BUDGET_SOFT = 16000;  // keep full detail up to here
+// B7: SERIALIZE_BUDGET_SOFT removed — unused (lint: no-unused-vars). The soft
+// ceiling was superseded by the two-phase demote-then-drop approach below.
 const SERIALIZE_BUDGET = 24000;        // hard ceiling — compact/drop tail beyond this
 
 /** Last serialization budget stats — read by content.ts for the ledger. */
@@ -156,6 +157,9 @@ export interface Perception {
    *  band, right rail"). The model sees this UP FRONT, before any node. */
   composition: CompositionSummary;
   shadowRoots: ShadowRoot[];            // open shadow roots for downstream CSS injection
+  /** B3: whether perception was truncated — a partial perception can ship a
+   *  partial redesign as a success. Flag it so the caller can surface it. */
+  truncated?: { walk: boolean; serialize: boolean };
 }
 
 export interface LayoutFingerprint {
@@ -236,9 +240,11 @@ export function perceive(): Perception {
   const vpW = window.innerWidth || 1280;
   const vpArea = vpW * (window.innerHeight || 800);
   let visited = 0;
+  // B3: track whether the walk was truncated by the time/depth cap.
+  let walkTruncated = false;
 
   const walk = (el: HTMLElement, depth: number): void => {
-    if (performance.now() - t0 > MAX_TIME_MS || depth > MAX_DEPTH) return;
+    if (performance.now() - t0 > MAX_TIME_MS || depth > MAX_DEPTH) { walkTruncated = true; return; }
     const tag = el.tagName.toUpperCase();
     if (IGNORED_TAGS.has(tag)) return;
     if (el.id === STYLE_ELEMENT_ID || el.id === ESCAPE_UI_ID || el.hasAttribute('data-webmorph-ui')) return;
@@ -338,6 +344,8 @@ export function perceive(): Perception {
     reflowOpportunity,
     composition,
     shadowRoots,
+    // B3: flag truncation so a partial redesign can't silently ship as success.
+    truncated: { walk: walkTruncated, serialize: false },
   };
 }
 
@@ -479,7 +487,7 @@ function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): 
   interface Raw extends Cluster { _members: Candidate[]; }
   const raws: Raw[] = [];
   const usedHandles = new Set<string>();
-  for (const [sig, members] of groups) {
+  for (const [_sig, members] of groups) {
     const rep = members[0];
     const cappedArea = members.reduce((s, m) => s + Math.min(m.area, vpArea), 0);
     const prominence = cappedArea / vpArea + members.length;
@@ -698,7 +706,7 @@ function representativeFor(cluster: Cluster): HTMLElement | null {
  *  representative. Zero site-specific rules — the class/id tokens (nav/search/
  *  comment/footer…) are universal conventions, not site recipes; geometric + text
  *  signals are the fallback when tokens don't match. */
-function gatherSignals(cluster: Cluster, el: HTMLElement, viewport: { w: number; h: number }): ClusterSignals {
+function gatherSignals(cluster: Cluster, el: HTMLElement, _viewport: { w: number; h: number }): ClusterSignals {
   const rect = el.getBoundingClientRect();
   const textLen = (el.textContent || '').replace(/\s+/g, ' ').trim().length;
   const linkCount = el.querySelectorAll('a[href]').length;
@@ -903,7 +911,7 @@ function buildSkeleton(clusters: Cluster[], vpW: number): LayoutSkeleton {
   return { regions, contentMaxWidthPx, columnCount: Math.max(1, cols.size) };
 }
 
-function findContentWidthFromClusters(clusters: Cluster[], vpW: number): number | null {
+function findContentWidthFromClusters(clusters: Cluster[], _vpW: number): number | null {
   let best = 0;
   for (const c of clusters) {
     if (c.layout.widthRatio >= 0.9) continue;       // skip full-width wrappers

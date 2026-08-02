@@ -241,29 +241,4 @@ function critiqueFor(verify: VerifyResult, pixel?: PixelVerifyResult | null): st
   return parts.join(' ALSO: ') || 'The previous design failed quality checks. Review the page perception and produce a complete, coherent redesign.';
 }
 
-/** Best attempt that passed not-broken checks, preferring ones that also pass
- *  quality checks (covered/coherent/changed). If none are notBroken, fall back
- *  to the highest-changeScore attempt — a 90% good design is better than none. */
-export function bestNonBroken(attempts: Attempt[]): Attempt | null {
-  let best: Attempt | null = null;
-  let bestScore = -1;
-  for (const a of attempts) {
-    if (!a.notBroken) continue;
-    const score = (a.changed ? 4 : 0) + (a.coherent ? 2 : 0) + (a.covered ? 1 : 0) + a.changeScore;
-    if (score > bestScore) { best = a; bestScore = score; }
-  }
-  if (best) return best;
-  // Fallback: prefer attempts where content is NOT collapsed, then highest changeScore.
-  // A design with 2 small collapsed sidebar items is better than no design at all.
-  let fallback: Attempt | null = null;
-  for (const a of attempts) {
-    if (!a.contentIntact) continue;
-    if (!fallback || a.changeScore > fallback.changeScore) fallback = a;
-  }
-  if (fallback) return fallback;
-  // Last resort: highest changeScore among all attempts.
-  for (const a of attempts) {
-    if (!fallback || a.changeScore > fallback.changeScore) fallback = a;
-  }
-  return fallback;
-}
+// B8: bestNonBroken deleted — imported by content.ts, never called.

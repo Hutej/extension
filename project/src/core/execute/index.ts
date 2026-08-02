@@ -13,6 +13,11 @@ const ESCAPE_UI_ID = 'webmorph-escape-ui';
 const SHADOW_STYLE_ID = 'webmorph-shadow-style';
 let observer: MutationObserver | null = null;
 let shadowObservers: MutationObserver[] = [];
+// B4: circuit-breaker for the style re-insert loop. An unbounded loop is a CPU
+// bomb on any page that strips styles. Bound the attempts, then surrender.
+const MAX_DEFENSE_ATTEMPTS = 10;
+let defenseAttempts = 0;
+let shadowDefenseAttempts = new Map<ShadowRoot, number>();
 
 // ── Phase-1 style application ──────────────────────────────────────
 
@@ -56,14 +61,22 @@ export function removeStyleEverywhere(shadowRoots: ShadowRoot[]): void {
   for (const root of shadowRoots) root.querySelector(`#${SHADOW_STYLE_ID}`)?.remove();
 }
 
-/** Re-insert our stylesheet if a framework removes it during re-render. */
+/** Re-insert our stylesheet if a framework removes it during re-render.
+ *  B4: circuit-breaker — bound the re-insert attempts, then surrender. An
+ *  unbounded loop is a CPU bomb on any page that strips styles. */
 export function startDefense(css: string): void {
   stopDefense();
+  defenseAttempts = 0; // B4: reset on each new defense session
   observer = new MutationObserver((mutations) => {
     for (const m of mutations) {
       for (const node of Array.from(m.removedNodes)) {
         if (node instanceof HTMLElement && node.id === STYLE_ELEMENT_ID) {
           stopDefense();
+          defenseAttempts++;
+          if (defenseAttempts > MAX_DEFENSE_ATTEMPTS) {
+            console.warn(`[WebMorph] Defense surrendered after ${MAX_DEFENSE_ATTEMPTS} re-insert attempts — page is stripping styles too aggressively.`);
+            return; // B4: surrender, don't re-insert or re-observe
+          }
           applyStyle(css);
           startDefense(css);
           return;
@@ -77,6 +90,7 @@ export function startDefense(css: string): void {
 export function startDefenseEverywhere(css: string, shadowRoots: ShadowRoot[]): void {
   startDefense(css);
   stopShadowDefense();
+  shadowDefenseAttempts = new Map(); // B4: reset shadow defense counter
   for (const root of shadowRoots) observeShadowRoot(root, css);
 }
 
@@ -86,6 +100,12 @@ function observeShadowRoot(root: ShadowRoot, css: string): void {
       for (const node of Array.from(m.removedNodes)) {
         if (node instanceof HTMLElement && node.id === SHADOW_STYLE_ID) {
           obs.disconnect();
+          const attempts = (shadowDefenseAttempts.get(root) ?? 0) + 1;
+          if (attempts > MAX_DEFENSE_ATTEMPTS) {
+            console.warn(`[WebMorph] Shadow defense surrendered after ${MAX_DEFENSE_ATTEMPTS} attempts on a shadow root.`);
+            return; // B4: surrender
+          }
+          shadowDefenseAttempts.set(root, attempts);
           injectShadowStyle(root, css);
           observeShadowRoot(root, css);
           return;

@@ -111,7 +111,7 @@ export function minContrastAgainstGradient(text: RGBA, stops: RGBA[]): number {
 export function pickReadableTextForGradient(stops: RGBA[], floor = MIN_CONTRAST_FOR_PICK): string {
   if (stops.length === 0) return '#111111';
   const dark: RGBA = [17, 17, 17, 1];
-  const light: RGBA = [245, 245, 245, 1];
+  const _light: RGBA = [245, 245, 245, 1];
   // Dark text is readable iff it clears the floor against the LIGHTEST stop.
   const lightest = stops.reduce((a, b) => (luminance(b) > luminance(a) ? b : a));
   if (contrastRatio(dark, lightest) >= floor) return '#111111';

@@ -37,26 +37,19 @@ export type ReasonError =
 export type Role = 'architect' | 'painter' | 'critic' | 'design';
 
 export type StyleSpecResult =
-  | { ok: true; spec: DesignSpec; usage?: unknown; model?: string; callMs?: number }
-  | { ok: false; kind: ReasonError; message: string; callMs?: number };
+  | { ok: true; spec: DesignSpec; usage?: unknown; model?: string; callMs?: number; httpRequests: number }
+  | { ok: false; kind: ReasonError; message: string; callMs?: number; httpRequests: number };
 
 export interface StyleSpecRequest {
   intent: string;
   perception: string;
   accountId: string;   // Cloudflare account id — builds the Workers AI endpoint URL
-  apiKey: string;      // bearer token — Cloudflare API token (OPENAI key disabled, kept for revert)
+  apiKey: string;      // Cloudflare API token (bearer)
   critique?: string; // regenerative-repair feedback appended to the user message
   timeoutMs?: number; // per-call override (used to cap a Critic round so total stays < budget)
 }
 
-const OPENAI_URL = 'https://api.openai.com/v1/chat/completions';
-// OPENAI — disabled in favor of Cloudflare Workers AI, kept for easy revert.
-// Cloudflare Workers AI exposes an OpenAI-COMPATIBLE chat-completions endpoint:
-// identical request body (messages/response_format/reasoning_effort/max_completion_tokens)
-// and identical response shape (choices[0].message.content + usage), so the existing
-// request builder + response parser are reused — no forked adapter. Only the URL +
-// the bearer token source differ (token + account id come from chrome.storage.local,
-// injected by the harness, mirroring the old OpenAI key injection).
+// B1: Unified on Cloudflare Workers AI. The orphaned OpenAI path is deleted.
 const cfChatUrl = (accountId: string): string =>
   `https://api.cloudflare.com/client/v4/accounts/${accountId}/ai/v1/chat/completions`;
 
@@ -277,6 +270,9 @@ async function callModel(role: Role, intent: string, perception: string, account
   let useResponseFormat = true;
   let useReasoningEffort = true;
   let transient = 0;
+  // B3: track the true HTTP request count — retries re-bill up to 5 requests
+  // per role while the UI reported 1 paid call. This is surfaced in the result.
+  let httpRequests = 0;
 
   while (true) {
     const effort = reasoning && useReasoningEffort ? AI_CONFIG.styleReasoningEffort : undefined;
@@ -292,14 +288,8 @@ async function callModel(role: Role, intent: string, perception: string, account
     const t0 = Date.now();
     let res: Response;
     try {
-      // OPENAI — disabled in favor of Cloudflare Workers AI, kept for easy revert:
-      // res = await fetchWithTimeout(OPENAI_URL, {
-      //   method: 'POST',
-      //   headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
-      //   body: JSON.stringify(bodyObj),
-      // }, timeout);
-      // Cloudflare Workers AI (OpenAI-compatible endpoint — same body + response shape).
-      // `apiKey` carries the Cloudflare API token; `accountId` builds the endpoint URL.
+      // B1: Cloudflare Workers AI (OpenAI-compatible endpoint — same body + response shape).
+      httpRequests++;
       res = await fetchWithTimeout(cfChatUrl(accountId), {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${apiKey}` },
@@ -308,38 +298,38 @@ async function callModel(role: Role, intent: string, perception: string, account
     } catch (err) {
       const e = err as { name?: string; message?: string };
       const s = ((Date.now() - t0) / 1000).toFixed(1);
-      if (e.name === 'AbortError') { logDebug(`role=${role} model=${model} TIMEOUT after ${s}s`); return { ok: false, kind: 'timeout', message: `Design engine timed out after ${s}s. Try again.`, callMs: Date.now() - t0 }; }
+      if (e.name === 'AbortError') { logDebug(`role=${role} model=${model} TIMEOUT after ${s}s`); return { ok: false, kind: 'timeout', message: `Design engine timed out after ${s}s. Try again.`, callMs: Date.now() - t0, httpRequests }; }
       if (transient < AI_CONFIG.maxTransientRetries) { transient++; logDebug(`role=${role} model=${model} network error after ${s}s (${e.message}) — transient retry ${transient}`); await sleep(AI_CONFIG.baseBackoffMs * 2 ** (transient - 1)); continue; }
-      return { ok: false, kind: 'network', message: `Network error: ${e.message}`, callMs: Date.now() - t0 };
+      return { ok: false, kind: 'network', message: `Network error: ${e.message}`, callMs: Date.now() - t0, httpRequests };
     }
     const s = ((Date.now() - t0) / 1000).toFixed(1);
 
     if (!res.ok) {
       const bodyTxt = await safeText(res);
       logDebug(`role=${role} model=${model} HTTP ${res.status} after ${s}s: ${bodyTxt.slice(0, 300)}`);
-      if (res.status === 401 || res.status === 403) return { ok: false, kind: 'invalid_key', message: 'Invalid API key. Check your key in the WebMorph settings.' };
-      if (res.status === 400 && bodyTxt.toLowerCase().includes('context_length')) return { ok: false, kind: 'context_limit', message: 'Page is too large for the model. Try a simpler page.' };
+      if (res.status === 401 || res.status === 403) return { ok: false, kind: 'invalid_key', message: 'Invalid API key. Check your key in the WebMorph settings.', httpRequests };
+      if (res.status === 400 && bodyTxt.toLowerCase().includes('context_length')) return { ok: false, kind: 'context_limit', message: 'Page is too large for the model. Try a simpler page.', httpRequests };
       if (res.status === 429 || res.status >= 500) {
         if (transient < AI_CONFIG.maxTransientRetries) { transient++; await sleep(retryWaitMs(bodyTxt, transient)); continue; }
-        return { ok: false, kind: 'rate_limited', message: 'Rate limited. Wait a moment and try again.' };
+        return { ok: false, kind: 'rate_limited', message: 'Rate limited. Wait a moment and try again.', httpRequests };
       }
       if (res.status === 400 && (useResponseFormat || useReasoningEffort)) {
         logDebug(`role=${role} model=${model} 400 — dropping response_format + reasoning_effort, one retry`);
         useResponseFormat = false; useReasoningEffort = false; continue;
       }
-      return { ok: false, kind: 'invalid_request', message: `API error (${res.status}): ${bodyTxt.slice(0, 120)}` };
+      return { ok: false, kind: 'invalid_request', message: `API error (${res.status}): ${bodyTxt.slice(0, 120)}`, httpRequests };
     }
 
     const data = await res.json();
     const content = data?.choices?.[0]?.message?.content;
     logDebug(`role=${role} model=${model} OK ${s}s tokens=${fmtUsage(data?.usage)}`);
-    if (typeof content !== 'string') return { ok: false, kind: 'bad_output', message: 'Model returned no content.' };
+    if (typeof content !== 'string') return { ok: false, kind: 'bad_output', message: 'Model returned no content.', httpRequests };
     let parsed: unknown;
-    try { parsed = JSON.parse(content); } catch { return { ok: false, kind: 'bad_output', message: 'Model output was not valid JSON.' }; }
+    try { parsed = JSON.parse(content); } catch { return { ok: false, kind: 'bad_output', message: 'Model output was not valid JSON.', httpRequests }; }
     const validated = validateSpec(parsed);
-    if (!validated.ok || !validated.spec) { logDebug(`role=${role} model=${model} invalid spec: ${validated.error}`); return { ok: false, kind: 'bad_output', message: `Invalid design spec: ${validated.error}` }; }
+    if (!validated.ok || !validated.spec) { logDebug(`role=${role} model=${model} invalid spec: ${validated.error}`); return { ok: false, kind: 'bad_output', message: `Invalid design spec: ${validated.error}`, httpRequests }; }
     logDebug(`role=${role} spec produced by ${model}: ${validated.spec.rules.length} rules + ${validated.spec.intents?.length ?? 0} intents (pack=${validated.spec.pack ?? 'default'})`);
-    return { ok: true, spec: validated.spec, usage: data.usage, model, callMs: Date.now() - t0 };
+    return { ok: true, spec: validated.spec, usage: data.usage, model, callMs: Date.now() - t0, httpRequests };
   }
 }
 
@@ -389,9 +379,9 @@ function retryWaitMs(bodyTxt: string, transient: number): number {
 // ── transport helpers ──────────────────────────────────────────────
 
 /** Reasoning-family models: reasoning_effort supported, temperature rejected.
- *  Matches OpenAI gpt-5/o-series (disabled, kept for revert) AND the Cloudflare
- *  Workers AI GLM family (glm-5.2 + glm-4.7-flash both support reasoning_effort). */
-function isReasoningModel(model: string): boolean { return /^(gpt-5|o\d)/i.test(model) || /glm/i.test(model); }
+ *  Matches the Cloudflare Workers AI GLM family (glm-5.2 + glm-4.7-flash both
+ *  support reasoning_effort). */
+function isReasoningModel(model: string): boolean { return /glm/i.test(model); }
 
 async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();
