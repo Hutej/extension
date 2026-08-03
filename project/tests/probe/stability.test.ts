@@ -22,8 +22,8 @@
  * and injected into a plain Playwright page (no extension load needed; perceive()
  * is pure DOM, runs in any page). Run:
  *   node --experimental-strip-types --env-file=.env tests/probe/stability.test.ts
- *   WMSITE=Wikipedia ...   (single site)
- *   WMGRID=smoke           (1 site, quick)
+ *   RVSITE=Wikipedia ...   (single site)
+ *   RVGRID=smoke           (1 site, quick)
  */
 
 import { chromium, type Page } from 'playwright';
@@ -44,8 +44,8 @@ const SITES = [
   { name: 'YouTube', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', settleMs: 6000 },
 ];
 
-const SMOKE = process.env.WMGRID === 'smoke';
-const SITE_FILTER = process.env.WMSITE;
+const SMOKE = process.env.RVGRID === 'smoke';
+const SITE_FILTER = process.env.RVSITE;
 const sites = SMOKE ? SITES.slice(0, 1)
   : SITE_FILTER ? SITES.filter((s) => s.name === SITE_FILTER)
   : SITES;
@@ -107,10 +107,10 @@ interface SerializeSize {
 
 async function measureSerialize(page: Page, bundle: string): Promise<SerializeSize> {
   return await page.evaluate((src: string): SerializeSize => {
-    new Function(src)();   // also defines window.__wmSerialize
-    const perceive = (window as unknown as { __wmPerceive: () => unknown }).__wmPerceive;
-    const clearHandles = (window as unknown as { __wmClearHandles: () => void }).__wmClearHandles;
-    const serialize = (window as unknown as { __wmSerialize: (p: unknown) => string }).__wmSerialize;
+    new Function(src)();   // also defines window.__rvSerialize
+    const perceive = (window as unknown as { __rvPerceive: () => unknown }).__rvPerceive;
+    const clearHandles = (window as unknown as { __rvClearHandles: () => void }).__rvClearHandles;
+    const serialize = (window as unknown as { __rvSerialize: (p: unknown) => string }).__rvSerialize;
     clearHandles();
     const p = perceive() as { composition: { summary: string }; clusters: { designRole: string; group: string | null; dominanceRank: number }[] };
     const text = serialize(p);
@@ -130,15 +130,15 @@ async function measureSerialize(page: Page, bundle: string): Promise<SerializeSi
 }
 
 async function runPerceive(page: Page, bundle: string): Promise<PerceptionShape> {
-  // Inject the bundle (defines window.__wmPerceive) then call it. addInitScript
+  // Inject the bundle (defines window.__rvPerceive) then call it. addInitScript
   // would only fire on navigation; we evaluate the bundle directly each run so a
   // reload between runs is clean (no stale globals). clearHandles first so a prior
-  // run's [data-wm-c] attrs don't bias the next (perceive() calls clearHandles
+  // run's [data-rv-c] attrs don't bias the next (perceive() calls clearHandles
   // itself, but be explicit — a probe must not depend on that for clean data).
   return await page.evaluate(async (src: string): Promise<PerceptionShape> => {
-    new Function(src)();   // defines window.__wmPerceive + window.__wmClearHandles
-    const perceive = (window as unknown as { __wmPerceive: () => unknown }).__wmPerceive;
-    const clearHandles = (window as unknown as { __wmClearHandles: () => void }).__wmClearHandles;
+    new Function(src)();   // defines window.__rvPerceive + window.__rvClearHandles
+    const perceive = (window as unknown as { __rvPerceive: () => unknown }).__rvPerceive;
+    const clearHandles = (window as unknown as { __rvClearHandles: () => void }).__rvClearHandles;
     clearHandles();
     const p = perceive() as {
       builtInMs: number; nodeCount: number;
@@ -293,16 +293,16 @@ async function mutationRemove(page: Page, bundle: string): Promise<{ before: Per
   const removedHandle = await page.evaluate((clusters: { handle: string; count: number; selector: string }[]) => {
     // Re-derive the selector here: the bundle's clusters have handles but the
     // eval payload above only carried the shape, not the selector. Resolve by
-    // [data-wm-c] (perceive stamped them).
+    // [data-rv-c] (perceive stamped them).
     const repeated = clusters.filter((c) => c.count > 1);
     if (repeated.length) {
       const h = repeated[0].handle;
-      const els = Array.from(document.querySelectorAll(`[data-wm-c="${h}"]`));
+      const els = Array.from(document.querySelectorAll(`[data-rv-c="${h}"]`));
       const last = els[els.length - 1];
       if (last) { (last as HTMLElement).setAttribute('data-probe-removed', '1'); last.remove(); return h; }
     }
     const lastChild = document.body.lastElementChild as HTMLElement | null;
-    if (lastChild && !lastChild.hasAttribute('data-webmorph-ui')) { lastChild.setAttribute('data-probe-removed', '1'); lastChild.remove(); return null; }
+    if (lastChild && !lastChild.hasAttribute('data-revueon-ui')) { lastChild.setAttribute('data-probe-removed', '1'); lastChild.remove(); return null; }
     return null;
   }, before.clusters.map((c) => ({ handle: c.handle, count: c.count, selector: '' })));
   await page.waitForTimeout(200);
@@ -332,7 +332,7 @@ async function mutationReorder(page: Page, bundle: string): Promise<{ before: Pe
     };
     const walk = (cur: HTMLElement, depth: number): boolean => {
       if (depth > 5) return false;
-      const kids = Array.from(cur.children).filter((e) => e.tagName !== 'SCRIPT' && e.tagName !== 'STYLE' && !e.hasAttribute('data-webmorph-ui')) as HTMLElement[];
+      const kids = Array.from(cur.children).filter((e) => e.tagName !== 'SCRIPT' && e.tagName !== 'STYLE' && !e.hasAttribute('data-revueon-ui')) as HTMLElement[];
       // Find the first adjacent pair that are BOTH content.
       for (let i = 0; i + 1 < kids.length; i++) {
         if (isContent(kids[i]) && isContent(kids[i + 1])) {

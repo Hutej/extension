@@ -40,7 +40,7 @@ export function buildOutline(): { tree: HeadingNode[]; clusterByHeading: Map<str
   const stack: HeadingNode[] = [];
   const clusterByHeading = new Map<string, string>();
   for (const h of headings) {
-    const handle = h.el.getAttribute('data-wm-c') || null;
+    const handle = h.el.getAttribute('data-rv-c') || null;
     const node: HeadingNode = { level: h.level, text: h.text, handle, depth: h.depth, children: [] };
     while (stack.length && stack[stack.length - 1].level >= h.level) stack.pop();
     if (stack.length) stack[stack.length - 1].children.push(node);
@@ -247,7 +247,7 @@ export function inventoryInteractive(clusters: Cluster[]): InteractiveInventory 
       if ((e as HTMLInputElement).disabled || e.getAttribute('aria-hidden') === 'true') return null;
       const ti = e.tabIndex;
       if (ti < 0) return null;
-      const handle = (e.closest('[data-wm-c]')?.getAttribute('data-wm-c')) ?? null;
+      const handle = (e.closest('[data-rv-c]')?.getAttribute('data-rv-c')) ?? null;
       return { el: e, ti, dom: domOrder++, handle };
     })
     .filter((r): r is { el: HTMLElement; ti: number; dom: number; handle: string | null } => r !== null);

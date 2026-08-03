@@ -71,7 +71,7 @@
 - **Dependencies:** R7 (budget enforcement benefits from a shared abort).
 
 ## R9 — Undo safety (try/catch + non-destructive restore)
-- **What:** Wrap `undoAll` (`transaction:81`) in try/catch; resolve inverses by handle (re-query) rather than live `Node` refs; restore inline styles additively (snapshot only WebMorph-owned properties) instead of `cssText` wholesale (`transaction:95`).
+- **What:** Wrap `undoAll` (`transaction:81`) in try/catch; resolve inverses by handle (re-query) rather than live `Node` refs; restore inline styles additively (snapshot only Revueon-owned properties) instead of `cssText` wholesale (`transaction:95`).
 - **Why:** RC6/H15/H16 — undo crashes/half-undoes after re-render; `wmPrevCss` wipes site inline styles.
 - **Expected benefit:** Robust undo after SPA re-render; no site-state destruction.
 - **Trade-offs:** handle-based re-resolution is more code; additive restore is more precise but slower.
@@ -111,7 +111,7 @@
 - **Dependencies:** none.
 
 ## R14 — `verifyStyle` perf (cache + batch + memoize)
-- **What:** Cache `querySelectorAll([data-wm-c])` once per call; batch rect/style reads; memoize `effectiveBackground`; reduce forced reflows.
+- **What:** Cache `querySelectorAll([data-rv-c])` once per call; batch rect/style reads; memoize `effectiveBackground`; reduce forced reflows.
 - **Why:** H20/M19/M20 — 8-10 scans + 3 reflows + O(depth²) recursion, runs 2-3× per transform.
 - **Expected benefit:** Multi-hundred-ms saved per transform on large pages.
 - **Trade-offs:** caching assumes the cluster set is stable during a verify call (true — no apply in between).

@@ -1,4 +1,4 @@
-# WebMorph — Engine Architecture
+# Revueon — Engine Architecture
 
 *(Read this before touching `project/src/`. Loaded ON DEMAND, not in every prompt — it can afford
 detail. If any fact here disagrees with the code, THE CODE WINS: verify against the code and update
@@ -20,7 +20,7 @@ change.
 
 ## Pipelines: v1 legacy and v2 new (behind a flag)
 
-`layoutCompiler = 'v1' | 'v2'`. Default `'v1'`. Override via `WM_LAYOUT_COMPILER` env var and a popup
+`layoutCompiler = 'v1' | 'v2'`. Default `'v1'`. Override via `RV_LAYOUT_COMPILER` env var and a popup
 dev toggle. The two implementations are NOT intertwined — the pipeline forks once; no shared mutable
 state, no conditionals sprinkled through `compile/`. Once v2 is stable we switch the flag and delete
 v1 — that deletion comes later, not now.

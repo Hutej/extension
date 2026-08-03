@@ -17,7 +17,7 @@ USER                POPUP               CONTENT SCRIPT          BACKGROUND      
  │                   │                      │  else runStyle()      │                      │
  │                   │                      │─ clearHandles()       │                      │
  │                   │                      │─ perceive() ─────────│─────────────────────►│ (DOM walk,
- │                   │                      │  (stamp data-wm-c,    │                      │  no network)
+ │                   │                      │  (stamp data-rv-c,    │                      │  no network)
  │                   │                      │   role-classify)      │                      │
  │                   │                      │─ captureLayoutFinger │                      │
  │                   │                      │  print() [before]    │                      │
@@ -52,14 +52,14 @@ USER                POPUP               CONTENT SCRIPT          BACKGROUND      
 1. **User clicks Transform** — `popup/main.ts:129` `chrome.tabs.sendMessage(tabId, {action:'transform', intent})`.
 2. **Content script receives** — `content.ts:1557` `chrome.runtime.onMessage`. **If a transform is already running (`inFlight`), the message is dropped silently** (`content.ts:1559` falls through with no `return`/`sendResponse`) → the popup's callback never fires → popup hangs. **No "busy" reply.**
 3. **Run wrapper** — `content.ts:1580` `runner = runStyle(...)` with `.catch` (swallows stack, returns `wallMs:0` → telemetry zeroed on crash) and `.finally` (clears `inFlight`).
-4. **In-flight flag + keepalive** — `content.ts:406` sets `webmorphRunInFlight = Date.now()` (persists forever if the tab crashes — no TTL) and `chrome.runtime.connect()` to keep the service worker alive (`background.ts:27` empty `onConnect` handler).
-5. **Clear + perceive** — `content.ts:446` `clearHandles()` then `perceive()` (`perceive/index.ts:230`). Walks the live DOM up to depth 30 / 6s (`perceive:241`), clusters boxes, stamps `data-wm-c` (`perceive:523`), enriches layout/semantic, role-classifies. **Shadow-DOM resolution gap here — see `05_DOM_PIPELINE.md`.**
+4. **In-flight flag + keepalive** — `content.ts:406` sets `revueonRunInFlight = Date.now()` (persists forever if the tab crashes — no TTL) and `chrome.runtime.connect()` to keep the service worker alive (`background.ts:27` empty `onConnect` handler).
+5. **Clear + perceive** — `content.ts:446` `clearHandles()` then `perceive()` (`perceive/index.ts:230`). Walks the live DOM up to depth 30 / 6s (`perceive:241`), clusters boxes, stamps `data-rv-c` (`perceive:523`), enriches layout/semantic, role-classifies. **Shadow-DOM resolution gap here — see `05_DOM_PIPELINE.md`.**
 6. **Before-fingerprint** — `content.ts:462` `captureLayoutFingerprint()` (`perceive:920`) — the baseline regions for delta gates (overflow/collapse).
 7. **v2 layout path** (if `layoutCompiler==='v2'`) — `content.ts:529` `extractLayoutIR` → `:533` `assignSlots` → `:550` `solve` → `:551` `computeGridPlacementCss`. (v1 skips this.)
 8. **AI calls (parallel, paid)** — `content.ts:738` `Promise.all([askForSpec('architect'), askForSpec('painter')])`. Each routes through `background.ts:29` → `chrome.storage.local.get(['cloudflare_account_id','cloudflare_api_token'])` (`background.ts:36`) → `reason/index.ts` POST to Cloudflare. **This is ≥2 paid calls, violating the "one-shot" mandate — see `06_AI_PIPELINE.md`.**
 9. **Compile** — `content.ts:853` `compileSpec(spec)` → `expandIntents` (`compile/expand.ts`) → `resolvePack` (`design/packs.ts`) → `buildDeclarations` (`capabilities/style`) → laws (`core/laws`).
-10. **Apply CSS** — `content.ts:858` `applyStyleEverywhere(css)` (`execute/index.ts:19`) injects/updates `<style id=webmorph-style>` in `<head>` and every open shadow root; `applyInlineBackstop` sets inline `!important` bg+text on contrast-failing clusters.
-11. **Verify** — `content.ts:873` `verifyStyle(...)` (`verify/index.ts:79`). **8-10 full-tree `querySelectorAll([data-wm-c])` scans + 3 forced reflows + per-sample parent-chain `getComputedStyle` walks — see `10_PERFORMANCE_ANALYSIS.md`.**
+10. **Apply CSS** — `content.ts:858` `applyStyleEverywhere(css)` (`execute/index.ts:19`) injects/updates `<style id=revueon-style>` in `<head>` and every open shadow root; `applyInlineBackstop` sets inline `!important` bg+text on contrast-failing clusters.
+11. **Verify** — `content.ts:873` `verifyStyle(...)` (`verify/index.ts:79`). **8-10 full-tree `querySelectorAll([data-rv-c])` scans + 3 forced reflows + per-sample parent-chain `getComputedStyle` walks — see `10_PERFORMANCE_ANALYSIS.md`.**
 12. **Pixel verify** — `content.ts:223` `captureAndPixelVerify` → `background.ts:55` `captureVisibleTab` → `verify/capture.ts` decode → `verify/pixel.ts` void/invisible/squeeze detectors. **A capture failure at all 3 scroll positions returns `passed:true` (0-size → variance 765 → "no problems").**
 13. **Repair decision** — `content.ts:910` `planRepair` (`repair/index.ts`). Routes to: `forceContrast`/`squeeze` (free deterministic), `reReason` critic (paid, only if `canReReason()`), or `keepBest`. **`bestNonBroken` is dead code — see `06_AI_PIPELINE.md`.**
 14. **Failure → rollback CSS only** — `content.ts:913` (hard gate fail), `:954` (paint2 broke), `:983` (repair broke), `:924` (time budget): all call `removeStyleEverywhere(...)` **but never `txnLog.undoAll`** → structural DOM ops executed at step 10b (below) are NOT undone. **RC3 — silent permanent structural data loss.**
@@ -108,7 +108,7 @@ SITE ──pushState/replaceState/popstate/hashchange──► content.ts handle
                                                             ├─ compile + applyStyle
                                                             └─ startDynamicDefense()
 ```
-**Gap:** only `pushState`/`replaceState`/`popstate`/`hashchange` are hooked (`content.ts:1546`). **Turbo `turbo:load` morphs reuse DOM nodes without `pushState`** → no re-perceive → `data-wm-c` stamps sit on recycled nodes → `txnLog` inverses reference recycled nodes → undo replays against wrong nodes (see `12_FAILURE_SIMULATION.md`).
+**Gap:** only `pushState`/`replaceState`/`popstate`/`hashchange` are hooked (`content.ts:1546`). **Turbo `turbo:load` morphs reuse DOM nodes without `pushState`** → no re-perceive → `data-rv-c` stamps sit on recycled nodes → `txnLog` inverses reference recycled nodes → undo replays against wrong nodes (see `12_FAILURE_SIMULATION.md`).
 
 ## Fast paths (gate bypass)
 
@@ -118,4 +118,4 @@ SITE ──pushState/replaceState/popstate/hashchange──► content.ts handle
 ## Lifecycle: extension reload / tab suspend
 
 - **Extension reload:** the service worker restarts; `chrome.storage.local` survives (spec+CSS+opts). On next interaction, `reapplyStored` re-applies. But **`applyInlineBackstop` is NOT re-run on reload** (`reapplyStored:1196` never calls it) → clusters needing the inline `!important` bg/text pair revert to invisible text after a reload. *(verified)*
-- **Tab suspend (MV3 tab discarding):** the content script is gone. On revival, the page reloads; WebMorph's `onMessage` listener must re-register. Stored state is re-applied on the next user action. **UNVERIFIED:** whether suspended-then-revived tabs reliably re-inject the content script.
+- **Tab suspend (MV3 tab discarding):** the content script is gone. On revival, the page reloads; Revueon's `onMessage` listener must re-register. Stored state is re-applied on the next user action. **UNVERIFIED:** whether suspended-then-revived tabs reliably re-inject the content script.

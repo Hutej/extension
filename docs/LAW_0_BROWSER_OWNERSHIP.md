@@ -42,7 +42,7 @@
 | `20vw` side track | Viewport unit in `grid-template-columns` — ignores container, counts scrollbar | `fit-content()` + token floor via `minmax()` |
 | `calc(20vw - …)` | Measurement-derived track width | `minmax(min(<token>, 100%), fit-content)` |
 | `percentify` | Converting a desired pixel width into a percentage of the captured viewport | Express width relationally: `min()`, `clamp()`, `fr`, `fit-content()` |
-| `320px` content floor | Hardcoded px ceiling | `var(--wm-content-min)` token |
+| `320px` content floor | Hardcoded px ceiling | `var(--rv-content-min)` token |
 | `display: grid` on NCA unconditionally | Flattening a working flex/block context | Detect context; modify if flex/grid exists, introduce only if none |
 | Squeeze repair | Patching a rendered result (drop `columnCount`) | A `min-width` or `WrapOnOverflow` constraint carries the load |
 | `overflow-x: clip/auto` bleed repair | Patching overflow | The layout was over-constrained; fix the constraint |

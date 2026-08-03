@@ -1,11 +1,11 @@
 /**
- * WebMorph e2e test harness — drives the real popup→Transform flow on real sites.
+ * Revueon e2e test harness — drives the real popup→Transform flow on real sites.
  * Round 7: real assertions, 5-site grid (incl. GitHub SPA + YouTube Shadow DOM),
- * novel prompts, persistence test, smoke tier via WMGRID env var.
+ * novel prompts, persistence test, smoke tier via RVGRID env var.
  *
  * Run: cd project && node --experimental-strip-types --env-file=.env tests/popup.test.ts
- *   WMGRID=smoke  — 1 site, 1 prompt, <3min (regression catch)
- *   WMGRID=full   — 5 sites, 5 prompts (default, acceptance grid)
+ *   RVGRID=smoke  — 1 site, 1 prompt, <3min (regression catch)
+ *   RVGRID=full   — 5 sites, 5 prompts (default, acceptance grid)
  *
  * S9.6 FIX-CYCLE CAP: max 3 fix cycles for the WHOLE step, summed across ALL gates.
  * Not 3 per gate — 3 total. The agent must report the total as a single number.
@@ -18,7 +18,7 @@ import path from 'node:path';
 import fs from 'node:fs';
 import { detectRecolor, detectVoids, detectInvisibleText, type PixelInput, type ClusterRect } from '../src/core/verify/pixel.ts';
 
-const SMOKE = process.env.WMGRID === 'smoke';
+const SMOKE = process.env.RVGRID === 'smoke';
 
 interface SiteSpec {
   name: string;
@@ -52,11 +52,11 @@ const SITES: SiteSpec[] = [
 const ARTIFACTS_DIR = path.join(import.meta.dirname, 'artifacts');
 
 // S6.1: fixture mode — record/replay model responses to eliminate model latency
-// from layout iteration. WM_FIXTURES is also inlined into the extension at build
+// from layout iteration. RV_FIXTURES is also inlined into the extension at build
 // time (wxt.config.ts define). The harness does the file I/O (node:fs); the
-// extension reads injected fixtures via window.__wmFixtures (replay) or stores
-// raw responses on window.__wmFixtureResponse (record).
-const FIXTURE_MODE = (process.env.WM_FIXTURES ?? 'off') as 'off' | 'record' | 'replay';
+// extension reads injected fixtures via window.__rvFixtures (replay) or stores
+// raw responses on window.__rvFixtureResponse (record).
+const FIXTURE_MODE = (process.env.RV_FIXTURES ?? 'off') as 'off' | 'record' | 'replay';
 const FIXTURES_DIR = path.join(import.meta.dirname, 'fixtures', 'painter');
 
 function promptSlug(prompt: string): string {
@@ -126,7 +126,7 @@ interface RunResult {
 // those failures ARE the specification. Workstream code turns them green.
 
 /** Pixel audit at 3 scroll positions (top/mid/deep). Builds ClusterRect[] from the
- *  live [data-wm-c] elements (with hasImage/hasGradient flags), captures a
+ *  live [data-rv-c] elements (with hasImage/hasGradient flags), captures a
  *  screenshot at each position, and runs the PURE detectVoids + detectInvisibleText
  *  from core/verify/pixel. The decorative-dead-zone case (a large gradient/texture
  *  region with NO text or image — the Wikipedia gradient dead-zone) is now caught
@@ -146,9 +146,9 @@ async function pixelAudit(page: Page): Promise<{ voids: number; invisibleText: n
     const rects: ClusterRect[] = await page.evaluate(() => {
       const seen = new Set<string>();
       const out: ClusterRect[] = [];
-      for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-        if (el.hasAttribute('data-webmorph-ui') || !(el instanceof HTMLElement)) continue;
-        const h = el.getAttribute('data-wm-c')!;
+      for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+        if (el.hasAttribute('data-revueon-ui') || !(el instanceof HTMLElement)) continue;
+        const h = el.getAttribute('data-rv-c')!;
         if (seen.has(h)) continue;
         seen.add(h);
         const r = el.getBoundingClientRect();
@@ -237,13 +237,13 @@ async function proportionStableCheck(page: Page): Promise<{ ok: boolean; drift: 
       await page.waitForTimeout(500);
       const ratio = await page.evaluate(() => {
         // Stable selector: the main content by tag/role (survives handle re-stamping
-        // on resize). Fallback: the widest text-bearing non-full-width [data-wm-c].
+        // on resize). Fallback: the widest text-bearing non-full-width [data-rv-c].
         const innerW = window.innerWidth || 1;
         let el = document.querySelector('main, [role="main"], article') as HTMLElement | null;
         if (!el) {
           let best = 0;
-          for (const c of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-            if (c.hasAttribute('data-webmorph-ui') || !(c instanceof HTMLElement)) continue;
+          for (const c of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+            if (c.hasAttribute('data-revueon-ui') || !(c instanceof HTMLElement)) continue;
             const r = c.getBoundingClientRect();
             const frac = r.width / innerW;
             if (frac >= 0.9 || frac < 0.15) continue;
@@ -297,8 +297,8 @@ async function mobileNarrowCheck(page: Page): Promise<{ ok: boolean; details: st
       let el = document.querySelector('main, [role="main"], article') as HTMLElement | null;
       if (!el) {
         let best = 0;
-        for (const c of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-          if (c.hasAttribute('data-webmorph-ui') || !(c instanceof HTMLElement)) continue;
+        for (const c of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+          if (c.hasAttribute('data-revueon-ui') || !(c instanceof HTMLElement)) continue;
           const r = c.getBoundingClientRect();
           if ((c.textContent || '').trim().length > 80 && r.width > best) { best = r.width; el = c; }
         }
@@ -327,7 +327,7 @@ async function zoomCheck(page: Page): Promise<boolean> {
     await page.waitForTimeout(400);
     const overflow = await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth + 4);
     const hasContent = await page.evaluate(() => {
-      const el = document.querySelector('[data-wm-c]') as HTMLElement | null;
+      const el = document.querySelector('[data-rv-c]') as HTMLElement | null;
       return el ? el.offsetWidth > 0 && el.offsetHeight > 0 : false;
     });
     let pixelOk = true;
@@ -355,12 +355,12 @@ async function devtoolsCheck(page: Page): Promise<boolean> {
 }
 
 /** Scroll-load proof: scroll down on SPA/shadow sites, wait, check new content
- *  has [data-wm-c] handles (dynamic defender re-stamped them). */
+ *  has [data-rv-c] handles (dynamic defender re-stamped them). */
 async function scrollLoadCheck(page: Page): Promise<boolean> {
   await page.evaluate(() => window.scrollTo(0, document.body.scrollHeight * 0.6));
   await page.waitForTimeout(2000);
   const stamped = await page.evaluate(() => {
-    const els = document.querySelectorAll('[data-wm-c]');
+    const els = document.querySelectorAll('[data-rv-c]');
     let withText = 0;
     for (const el of els) {
       if ((el.textContent || '').trim().length > 10) withText++;
@@ -397,7 +397,7 @@ async function spaOpReRenderCheck(page: Page, popup: Page, resultJson: string): 
   //    onRouteChange (debounced 500ms) → handleRouteChange → reapplyStored.
   await page.evaluate(() => history.pushState({}, '', window.location.href));
   await page.waitForTimeout(1200); // 500ms debounce + reapply + margin
-  const appliedAfterRoute = await page.evaluate(() => document.documentElement.hasAttribute('data-webmorph-applied'));
+  const appliedAfterRoute = await page.evaluate(() => document.documentElement.hasAttribute('data-revueon-applied'));
   if (!appliedAfterRoute) problems.push('design marker lost after route change (reapplyStored did not re-apply)');
 
   // 2) Direct DOM re-insertion of a removed node → restyleDynamic re-derives the op.
@@ -405,35 +405,35 @@ async function spaOpReRenderCheck(page: Page, popup: Page, resultJson: string): 
   //    the dynamic defender re-removes it (or at minimum re-asserts the design). This
   //    exercises the MutationObserver → restyleDynamic → executeOps path.
   if (removedHandle) {
-    const stillGoneBefore = await page.evaluate((h) => !document.querySelector(`[data-wm-c="${h}"]`), removedHandle);
+    const stillGoneBefore = await page.evaluate((h) => !document.querySelector(`[data-rv-c="${h}"]`), removedHandle);
     // Re-insert a stub with the removed handle to simulate a framework re-adding it.
     await page.evaluate((h) => {
       const stub = document.createElement('div');
-      stub.setAttribute('data-wm-c', h);
+      stub.setAttribute('data-rv-c', h);
       stub.textContent = 're-inserted by test';
       document.body.appendChild(stub);
     }, removedHandle);
     await page.waitForTimeout(1200); // 600ms restyle debounce + margin
     // The dynamic defender should have re-run; the design marker must still be present.
-    const appliedAfterReinsert = await page.evaluate(() => document.documentElement.hasAttribute('data-webmorph-applied'));
+    const appliedAfterReinsert = await page.evaluate(() => document.documentElement.hasAttribute('data-revueon-applied'));
     if (!appliedAfterReinsert) problems.push('design marker lost after DOM re-insertion (restyleDynamic did not re-assert)');
     // Note: the re-inserted stub may or may not be re-removed (the op re-derive runs
     // validateOps against a fresh perception; the stub has a different signature so it
     // gets a new handle — the op targets the ORIGINAL handle. The point is the defense
     // RAN: the design marker is still present, the style is still applied). Clean up.
-    await page.evaluate((h) => { const s = document.querySelector(`[data-wm-c="${h}"]`); if (s) s.remove(); }, removedHandle);
+    await page.evaluate((h) => { const s = document.querySelector(`[data-rv-c="${h}"]`); if (s) s.remove(); }, removedHandle);
     void stillGoneBefore;
   }
   return { ok: problems.length === 0, details: problems.join('; ') || (opsEmitted ? `ops=${opsEmitted} re-render defense held` : 'no ops — defense path not exercised') };
 }
 
-/** Visible-paint count: read the data-webmorph-paint-count attribute
+/** Visible-paint count: read the data-revueon-paint-count attribute
  *  (instrumented in the content script). Absent = -1 (uninstrumented -> the
  *  assertion fails — a no-op check is worse than no check). <=2 = apply + one
  *  batched repair; >2 = visible repair theater = failing check. */
 async function paintCountCheck(page: Page): Promise<number> {
   return await page.evaluate(() => {
-    const v = document.documentElement.dataset['webmorphPaintCount'];
+    const v = document.documentElement.dataset['revueonPaintCount'];
     if (v === undefined) return -1;          // uninstrumented -> assertion fails
     return parseInt(v, 10) || 0;
   });
@@ -443,19 +443,19 @@ async function paintCountCheck(page: Page): Promise<number> {
  *  Uses page.evaluate (not a Playwright handle) — the button is re-created
  *  by the content script on re-apply, so a cached handle may detach. */
 async function escapeHatchCheck(page: Page): Promise<boolean> {
-  const exists = await page.evaluate(() => !!document.getElementById('webmorph-escape-ui'));
+  const exists = await page.evaluate(() => !!document.getElementById('revueon-escape-ui'));
   if (!exists) return false;
   // Click via evaluate — robust to re-renders.
   await page.evaluate(() => {
-    const btn = document.getElementById('webmorph-escape-ui') as HTMLButtonElement | null;
+    const btn = document.getElementById('revueon-escape-ui') as HTMLButtonElement | null;
     btn?.click();
   });
   await page.waitForTimeout(300);
-  const hasStyle = await page.evaluate(() => !!document.getElementById('webmorph-style'));
+  const hasStyle = await page.evaluate(() => !!document.getElementById('revueon-style'));
   if (hasStyle) return false;
   // Re-apply via toggle so subsequent checks have the design.
   await page.evaluate(() => {
-    const btn = document.getElementById('webmorph-escape-ui') as HTMLButtonElement | null;
+    const btn = document.getElementById('revueon-escape-ui') as HTMLButtonElement | null;
     btn?.click();
   });
   await page.waitForTimeout(500);
@@ -469,8 +469,8 @@ async function escapeHatchCheck(page: Page): Promise<boolean> {
  *  page (chrome.runtime is undefined in the content page's main world; the popup
  *  is an extension page so it has chrome.runtime). */
 async function undoFidelityCheck(page: Page, popup: Page): Promise<boolean> {
-  if (!await page.evaluate(() => !!document.getElementById('webmorph-escape-ui'))) return false;
-  const fp = () => { const s = (el: Element): string => { if (el.id === 'webmorph-style' || el.id === 'webmorph-escape-ui') return ''; const tag = el.tagName.toLowerCase(); const attrs = ['role', 'data-wm-wrap'].map((a) => el.getAttribute(a) ? `${a}=${el.getAttribute(a)}` : '').filter(Boolean).join(','); const kids = Array.from(el.children).map(s).filter(Boolean).join(','); return `${tag}${attrs ? '[' + attrs + ']' : ''}${kids ? '(' + kids + ')' : ''}`; }; return s(document.body); };
+  if (!await page.evaluate(() => !!document.getElementById('revueon-escape-ui'))) return false;
+  const fp = () => { const s = (el: Element): string => { if (el.id === 'revueon-style' || el.id === 'revueon-escape-ui') return ''; const tag = el.tagName.toLowerCase(); const attrs = ['role', 'data-rv-wrap'].map((a) => el.getAttribute(a) ? `${a}=${el.getAttribute(a)}` : '').filter(Boolean).join(','); const kids = Array.from(el.children).map(s).filter(Boolean).join(','); return `${tag}${attrs ? '[' + attrs + ']' : ''}${kids ? '(' + kids + ')' : ''}`; }; return s(document.body); };
   const before = await page.evaluate(fp);
   // Toggle OFF via the popup (which has chrome.runtime): replays the op log backwards + removes CSS.
   await popup.evaluate(() => new Promise<void>((resolve) => chrome.runtime.sendMessage({ action: 'toggle' }, () => resolve())));
@@ -513,8 +513,8 @@ async function squeezeCheck(page: Page): Promise<number> {
   return await page.evaluate(() => {
     const MIN_CPL = 12;
     let squeezed = 0;
-    for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-      if (el.hasAttribute('data-webmorph-ui') || !(el instanceof HTMLElement)) continue;
+    for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+      if (el.hasAttribute('data-revueon-ui') || !(el instanceof HTMLElement)) continue;
       const text = (el.textContent || '').trim();
       if (text.length < 80) continue;            // need real prose, not a label
       const r = el.getBoundingClientRect();
@@ -668,9 +668,9 @@ async function run() {
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${extId}/popup.html`);
 
-  // WMSITE=<name> runs a single named site (cheap, avoids rate-limit collisions when
+  // RVSITE=<name> runs a single named site (cheap, avoids rate-limit collisions when
   // diagnosing one site's op behavior). smoke takes precedence; full otherwise.
-  const siteFilter = process.env.WMSITE;
+  const siteFilter = process.env.RVSITE;
   const sites = SMOKE ? SITES.slice(0, 1)
     : siteFilter ? SITES.filter((s) => s.name === siteFilter)
     : SITES;
@@ -690,7 +690,7 @@ async function run() {
         await page.reload({ waitUntil: 'domcontentloaded' });
         try {
           await page.waitForFunction(
-            () => document.documentElement.hasAttribute('data-webmorph-applied'),
+            () => document.documentElement.hasAttribute('data-revueon-applied'),
             null, { timeout: 15000 },
           );
           console.log(`  [persistence] ✓ design survived reload`);
@@ -817,11 +817,11 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
   };
 
   const page = await context.newPage();
-  // Capture WebMorph console logs for debugging.
+  // Capture Revueon console logs for debugging.
   const wmLogs: string[] = [];
   page.on('console', (msg) => {
     const txt = msg.text();
-    if (txt.includes('[WebMorph]')) wmLogs.push(txt);
+    if (txt.includes('[Revueon]')) wmLogs.push(txt);
   });
   try {
     await page.goto(site.url, { waitUntil: 'domcontentloaded', timeout: 30000 });
@@ -843,10 +843,10 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
     await intentEl.fill(site.prompt);
 
     // Clear previous result + markers.
-    await popup.$eval('#webmorph-result', (el) => { el.textContent = ''; }).catch(() => {});
+    await popup.$eval('#revueon-result', (el) => { el.textContent = ''; }).catch(() => {});
     await page.evaluate(() => {
-      document.documentElement.removeAttribute('data-webmorph-applied');
-      document.documentElement.removeAttribute('data-webmorph-failed');
+      document.documentElement.removeAttribute('data-revueon-applied');
+      document.documentElement.removeAttribute('data-revueon-failed');
     });
 
     // S6.1: fixture replay — inject stored model responses into chrome.storage.local
@@ -862,7 +862,7 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
       }
       const storageData: Record<string, unknown> = {};
       for (const [role, data] of Object.entries(fixture)) {
-        storageData['webmorph_fixture_' + role] = data;
+        storageData['revueon_fixture_' + role] = data;
       }
       const worker = context.serviceWorkers()[0];
       if (worker) await worker.evaluate((d) => chrome.storage.local.set(d), storageData);
@@ -879,14 +879,14 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
     let markerSeen = false;
     try {
       await page.waitForFunction(
-        () => document.documentElement.hasAttribute('data-webmorph-applied') ||
-              document.documentElement.hasAttribute('data-webmorph-failed'),
+        () => document.documentElement.hasAttribute('data-revueon-applied') ||
+              document.documentElement.hasAttribute('data-revueon-failed'),
         null, { timeout: 130000 },
       );
       markerSeen = true;
-      result.applied = await page.evaluate(() => document.documentElement.hasAttribute('data-webmorph-applied'));
+      result.applied = await page.evaluate(() => document.documentElement.hasAttribute('data-revueon-applied'));
       if (!result.applied) {
-        const failMsg = await page.evaluate(() => document.documentElement.getAttribute('data-webmorph-failed') || '(unknown)');
+        const failMsg = await page.evaluate(() => document.documentElement.getAttribute('data-revueon-failed') || '(unknown)');
         console.log(`  FAILED: ${failMsg}`);
       }
     } catch {
@@ -914,18 +914,18 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
     try {
       const worker = context.serviceWorkers()[0];
       if (worker) {
-        const shotData = await worker.evaluate(() => chrome.storage.local.get('webmorph_transformed_shot')) as Record<string, string>;
-        if (shotData?.webmorph_transformed_shot) {
-          const base64 = shotData.webmorph_transformed_shot.replace(/^data:image\/png;base64,/, '');
+        const shotData = await worker.evaluate(() => chrome.storage.local.get('revueon_transformed_shot')) as Record<string, string>;
+        if (shotData?.revueon_transformed_shot) {
+          const base64 = shotData.revueon_transformed_shot.replace(/^data:image\/png;base64,/, '');
           fs.writeFileSync(path.join(ARTIFACTS_DIR, `after_${site.name}_transformed.png`), Buffer.from(base64, 'base64'));
           console.log(`  transformed screenshot saved: after_${site.name}_transformed.png`);
         }
-        await worker.evaluate(() => chrome.storage.local.remove('webmorph_transformed_shot')).catch(() => {});
+        await worker.evaluate(() => chrome.storage.local.remove('revueon_transformed_shot')).catch(() => {});
       }
     } catch { /* best effort */ }
 
     // Read result JSON from popup.
-    const resultJson = await popup.$eval('#webmorph-result', (el) => el.textContent).catch(() => '');
+    const resultJson = await popup.$eval('#revueon-result', (el) => el.textContent).catch(() => '');
     if (resultJson) {
       try {
         const parsed = JSON.parse(resultJson);
@@ -1002,11 +1002,11 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
     // and write to disk. The extension stores them after each successful model call.
     if (FIXTURE_MODE === 'record') {
       const worker = context.serviceWorkers()[0];
-      const roles = ['webmorph_fixture_painter', 'webmorph_fixture_architect', 'webmorph_fixture_critic'];
+      const roles = ['revueon_fixture_painter', 'revueon_fixture_architect', 'revueon_fixture_critic'];
       const data = worker ? await worker.evaluate((keys) => chrome.storage.local.get(keys), roles) as Record<string, { hash: string; response: unknown }> : {};
       const fixtures: Record<string, { hash: string; response: unknown }> = {};
       for (const [key, value] of Object.entries(data)) {
-        if (value) fixtures[key.replace('webmorph_fixture_', '')] = value;
+        if (value) fixtures[key.replace('revueon_fixture_', '')] = value;
       }
       if (Object.keys(fixtures).length > 0) {
         const fp = fixturePath(site.name, site.prompt);
@@ -1044,7 +1044,7 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
       }
     }
 
-    // Log WebMorph console output for debugging failures.
+    // Log Revueon console output for debugging failures.
     if (wmLogs.length) {
       const relevant = wmLogs.filter((l) => l.includes('PAID') || l.includes('repair') || l.includes('FAILED') || l.includes('INCOMPLETE') || l.includes('dropLayout') || l.includes('rollback') || l.includes('keepBest') || l.includes('iter 0') || l.includes('collapsed') || l.includes('COLLAPSE') || l.includes('OVERFLOW') || l.includes('LEDGER') || l.includes('REFLOW') || l.includes('reflow') || l.includes('PHASE2') || l.includes('paint1') || l.includes('paint2') || l.includes('SHELL') || l.includes('POST-MOVE') || l.includes('POST-RAF') || l.includes('solver') || l.includes('placement') || l.includes('grid-template') || l.includes('plan:'));
       if (relevant.length) console.log(`  logs: ${relevant.slice(0, 30).join(' | ')}`);

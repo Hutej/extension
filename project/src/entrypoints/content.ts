@@ -141,7 +141,7 @@ export interface TransformOutcome {
    *  evidence — so the run report proves WHY the deterministic guarantee held or
    *  which class still leaks, instead of asserting a guarantee the count contradicts. */
   invisibleBreakdown?: { records: { handle: string; cls: string; evidence: string }[]; byClass: Record<string, number> } | null;
-  /** count of low-contrast text nodes WITHOUT a [data-wm-c] ancestor —
+  /** count of low-contrast text nodes WITHOUT a [data-rv-c] ancestor —
    *  invisible to handle-targeted repair and the pixel detector. */
   contrastNoHandle?: number;
   /** conformance to the declared pack (spacing ∈ scale, type ∈ ramp,
@@ -164,8 +164,8 @@ export interface TransformOutcome {
   ledger?: Ledger;       // stage-by-stage time breakdown (structured run report)
 }
 
-const APPLIED = 'webmorphApplied';
-const FAILED = 'webmorphFailed';
+const APPLIED = 'revueonApplied';
+const FAILED = 'revueonFailed';
 
 let inFlight: Promise<TransformOutcome> | null = null;
 let activeShadowRoots: ShadowRoot[] = [];
@@ -199,7 +199,7 @@ function markFailed(msg: string): void {
 
 // ── Core run ───────────────────────────────────────────────
 
-/** Build ClusterRect[] from the current [data-wm-c] elements for the pixel
+/** Build ClusterRect[] from the current [data-rv-c] elements for the pixel
  *  detectors. One representative per handle, with the rendered rect + text + font
  *  size. Skips our own UI nodes. `hasImage`/`hasGradient` flag content-image vs
  *  gradient/texture backgrounds so the void detector can recognize a DECORATIVE
@@ -208,9 +208,9 @@ function markFailed(msg: string): void {
 function buildClusterRects(): ClusterRect[] {
   const seen = new Set<string>();
   const out: ClusterRect[] = [];
-  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-    if (el.hasAttribute('data-webmorph-ui') || !(el instanceof HTMLElement)) continue;
-    const handle = el.getAttribute('data-wm-c')!;
+  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+    if (el.hasAttribute('data-revueon-ui') || !(el instanceof HTMLElement)) continue;
+    const handle = el.getAttribute('data-rv-c')!;
     if (seen.has(handle)) continue;
     seen.add(handle);
     const r = el.getBoundingClientRect();
@@ -291,7 +291,7 @@ async function captureAndPixelVerify(before?: PixelInput): Promise<{ result: Pix
  *  the grid-column says "2" but the element renders at x=0 (track inheritance, or
  *  auto-placement putting items in different rows so they look like 1 column). */
 function assertPlanHonoured(plan: SolverPlan): boolean {
-  const proxies = document.querySelectorAll<HTMLElement>('[data-wm-plan-slot]');
+  const proxies = document.querySelectorAll<HTMLElement>('[data-rv-plan-slot]');
   if (proxies.length === 0) return true;
   // (1) measured distinct visual columns = distinct left-edge x-positions (bucketed
   // to 40px) among non-full-width proxies (grid-column-end !== "-1").
@@ -309,7 +309,7 @@ function assertPlanHonoured(plan: SolverPlan): boolean {
   for (const [slotId, expectedTrack] of Object.entries(plan.slotToTrack)) {
     let found = false;
     for (const el of proxies) {
-      if (el.getAttribute('data-wm-plan-slot') !== slotId) continue;
+      if (el.getAttribute('data-rv-plan-slot') !== slotId) continue;
       const start = parseInt(getComputedStyle(el).gridColumnStart, 10);
       if (start === expectedTrack) { found = true; break; }
     }
@@ -329,8 +329,8 @@ function assertPlanHonoured(plan: SolverPlan): boolean {
  *   - emittedBg[handle]  : the `background` our CSS actually painted on it (live).
  *   - liveEffBg[handle]  : the effective bg the text sits on (parent-chain walk).
  *   - multiBg            : handles whose rect spans >1 distinct opaque-ancestor bg.
- *  A no-handle survivor (text with no [data-wm-c]) is invisible to the pixel
- *  detector entirely (buildClusterRects only iterates [data-wm-c]); those are
+ *  A no-handle survivor (text with no [data-rv-c]) is invisible to the pixel
+ *  detector entirely (buildClusterRects only iterates [data-rv-c]); those are
  *  counted separately on VerifyResult.contrastNoHandle. */
 function classifyInvisible(invisible: string[]): InvisibleBreakdown | null {
   if (!invisible.length) return null;
@@ -339,7 +339,7 @@ function classifyInvisible(invisible: string[]): InvisibleBreakdown | null {
   const multiBg = new Set<string>();
   const colorDiag = new Map<string, string>();
   for (const h of invisible) {
-    const el = document.querySelector<HTMLElement>(`[data-wm-c="${h}"]`);
+    const el = document.querySelector<HTMLElement>(`[data-rv-c="${h}"]`);
     if (!el) continue;
     emittedBg.set(h, getComputedStyle(el).backgroundColor || '');
     liveEffBg.set(h, effectiveBgStr(el));
@@ -393,16 +393,16 @@ function effectiveBgAt(x: number, y: number): string {
 /** The live DOM adapter for the op transaction layer. executeOps + txnLog.undoAll
  *  go through this so the inverse logic in transaction.ts is DOM-agnostic. */
 const liveDom: DomAdapter = {
-  resolve(handle) { return document.querySelector<HTMLElement>(`[data-wm-c="${handle}"]`); },
+  resolve(handle) { return document.querySelector<HTMLElement>(`[data-rv-c="${handle}"]`); },
   parent(node) { return node.parentNode; },
   nextSibling(node) { return node.nextSibling; },
   insertBefore(parent, node, ref) { parent.insertBefore(node, ref); },
   appendChild(parent, node) { parent.appendChild(node); },
   removeChild(parent, node) { parent.removeChild(node); },
   createElement(tag) { return document.createElement(tag); },
-  resolveDestination(to) { return to ? document.querySelector<HTMLElement>(`[data-wm-c="${to}"]`) : null; },
+  resolveDestination(to) { return to ? document.querySelector<HTMLElement>(`[data-rv-c="${to}"]`) : null; },
   // extract the handle from a live DOM node for handle-based inverse resolution.
-  handleOf(node) { return node instanceof HTMLElement ? node.getAttribute('data-wm-c') : null; },
+  handleOf(node) { return node instanceof HTMLElement ? node.getAttribute('data-rv-c') : null; },
 };
 
 /** Execute a validated op set against the live DOM. Idempotent: each op checks
@@ -428,12 +428,12 @@ function executeOps(ops: ValidatedOp[], record: boolean): { executed: number; re
 
     if (op.kind === 'wrap') {
       // Idempotent: if the cluster is already the sole child of a wrapper we
-      // created, skip (re-derive on reload). Detect a wrapper with a data-wm-wrap
+      // created, skip (re-derive on reload). Detect a wrapper with a data-rv-wrap
       // attr around the cluster.
-      const existingWrap = el.parentElement?.getAttribute('data-wm-wrap') === 'true' ? el.parentElement : null;
+      const existingWrap = el.parentElement?.getAttribute('data-rv-wrap') === 'true' ? el.parentElement : null;
       if (existingWrap) { executed++; continue; }
       const wrap = liveDom.createElement('div') as HTMLElement;
-      wrap.setAttribute('data-wm-wrap', 'true');
+      wrap.setAttribute('data-rv-wrap', 'true');
       if (op.hint) (wrap as HTMLElement).style.display = op.hint;
       const next = liveDom.nextSibling(el);
       liveDom.insertBefore(parent, wrap, next);
@@ -494,7 +494,7 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
   // timeout (in askForSpec) is the backstop if the SW dies anyway. The in-flight flag
   // surfaces a stale-run warning in the popup.
   const keepalivePort = chrome.runtime.connect();
-  void chrome.storage.local.set({ webmorphRunInFlight: Date.now() });
+  void chrome.storage.local.set({ revueonRunInFlight: Date.now() });
   try {
     return await runStyleImpl(intent, restyleOnly);
   } catch (err) {
@@ -512,7 +512,7 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
     return { ok: false, kind: 'bad_output', message: msg, paidCalls: 0, wallMs: 0 };
   } finally {
     keepalivePort.disconnect();
-    void chrome.storage.local.remove('webmorphRunInFlight');
+    void chrome.storage.local.remove('revueonRunInFlight');
   }
 }
 
@@ -527,7 +527,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   // Reset the visible-paint counter at the start of every transform. The
   // harness asserts paintCount <= 2 (apply + one batched repair). applyStyleEverywhere
   // increments it.
-  document.documentElement.dataset['webmorphPaintCount'] = '0';
+  document.documentElement.dataset['revueonPaintCount'] = '0';
   stopDynamicDefense();
   activeSpec = null;
   // Clear any stale style from a previous transform or reapplyStored before the
@@ -593,7 +593,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       return p && p[3] === 1 ? bg : null;
     };
     for (const h of new Set(targets)) {
-      const el = document.querySelector<HTMLElement>(`[data-wm-c="${h}"]`);
+      const el = document.querySelector<HTMLElement>(`[data-rv-c="${h}"]`);
       if (!el) continue;
       // skip content images (url()) but NOT gradients. A gradient bg can
       // make text invisible; the inline backstop (inline+!important) overrides it
@@ -619,9 +619,9 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   if (AI_CONFIG.layoutCompiler === 'v2' && !restyleOnly) {
     // CSS-only relayout. No DOM mutation, nothing for txnLog to undo.
     // Undo = removeStyleEverywhere (the stylesheet carries the grid + display:contents).
-    // Clean up any stale data-wm-grid / data-wm-plan-slot debug attributes from a prior transform.
-    document.querySelectorAll('[data-wm-grid]').forEach((el) => el.removeAttribute('data-wm-grid'));
-    document.querySelectorAll('[data-wm-plan-slot]').forEach((el) => el.removeAttribute('data-wm-plan-slot'));
+    // Clean up any stale data-rv-grid / data-rv-plan-slot debug attributes from a prior transform.
+    document.querySelectorAll('[data-rv-grid]').forEach((el) => el.removeAttribute('data-rv-grid'));
+    document.querySelectorAll('[data-rv-plan-slot]').forEach((el) => el.removeAttribute('data-rv-plan-slot'));
     removeStyleEverywhere(activeShadowRoots);
 
     // compute IR + slots BEFORE the Painter so the payload has slot info.
@@ -676,7 +676,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     if (v2Spec.composition) for (const rule of v2Spec.composition) if (rule.styles || rule.layout || rule.hide) v2ModelAddressed.add(rule.target);
     if (v2Spec.relations?.length) for (const h of transformIntent(v2Spec, perception).expandedTargets) v2ModelAddressed.add(h);
 
-    // display:contents'd elements with [data-wm-c] have their box dissolved.
+    // display:contents'd elements with [data-rv-c] have their box dissolved.
     // Their content is visible in the children (now grid items), but the handle's
     // region collapses. Exempt these handles from the contentIntact check so a
     // real structural reshape isn't falsely flagged as content collapse.
@@ -684,7 +684,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const v2ApplyMs = performance.now();
     applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
     let v2PaintCount = 1;
-    document.documentElement.dataset['webmorphPaintCount'] = '1';
+    document.documentElement.dataset['revueonPaintCount'] = '1';
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
     // verify (DOM + pixel) — the safety net v2 was missing.
@@ -732,7 +732,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
         const allContrastTargets = [...new Set([...(v2Options.pixelInvisibleTargets ?? []), ...(v2Options.contrastTargets ?? [])])];
         applyInlineBackstop(v2Spec, allContrastTargets, v2Options.contrastTargetBgs as Record<string, string> | undefined);
         v2PaintCount = 2;
-        document.documentElement.dataset['webmorphPaintCount'] = '2';
+        document.documentElement.dataset['revueonPaintCount'] = '2';
         await new Promise<void>((r) => requestAnimationFrame(() => r()));
         // Re-verify after repair.
         v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), new Set(), reflowOpportunity);
@@ -764,7 +764,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
           v2Verify = v2Paint1Verify;
           v2Pixel = v2Paint1Pixel;
           v2PaintCount = 1;
-          document.documentElement.dataset['webmorphPaintCount'] = '1';
+          document.documentElement.dataset['revueonPaintCount'] = '1';
         }
       }
     }
@@ -778,7 +778,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       await new Promise<void>((resolve) => {
         chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, (resp: { ok: boolean; dataUrl?: string }) => {
           if (chrome.runtime.lastError || !resp?.ok || !resp.dataUrl) { resolve(); return; }
-          chrome.storage.local.set({ webmorph_transformed_shot: resp.dataUrl }, () => resolve());
+          chrome.storage.local.set({ revueon_transformed_shot: resp.dataUrl }, () => resolve());
         });
       });
     } catch { /* best effort — don't block the gate */ }
@@ -1127,7 +1127,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   // Set the dataset explicitly from the internal counter — applyStyleEverywhere no
   // longer increments it (defense re-applies are invisible restores, not visible
   // paints), so the harness reads the true visible-paint count.
-  document.documentElement.dataset['webmorphPaintCount'] = String(paintCount);
+  document.documentElement.dataset['revueonPaintCount'] = String(paintCount);
   const finalPaintCount = paintCount;
   if (finalPaintCount > 2) logDebug(`PAINT BUDGET EXCEEDED: ${finalPaintCount} > 2 (visible repair theater)`);
 
@@ -1168,7 +1168,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   const key = storageKey();
   const state = await loadSiteState(key);
   const id = `style_${Date.now()}`;
-  const appliedCss = document.getElementById('webmorph-style')?.textContent ?? attempts[attempts.length - 1]?.css ?? '';
+  const appliedCss = document.getElementById('revueon-style')?.textContent ?? attempts[attempts.length - 1]?.css ?? '';
   lastAppliedCss = appliedCss;
   state.enabled = true;
   state.style = { id, intent, spec, css: appliedCss, reasoning: spec.reasoning, compileOptions: options, createdAt: Date.now() };
@@ -1229,7 +1229,7 @@ function failVerify(spec: DesignSpec, verify: VerifyResult): TransformOutcome {
 }
 
 // fixture mode — inlined at build time, 'off' (default) → dead branch in production.
-const FIXTURE_MODE = (process.env.WM_FIXTURES ?? 'off') as 'off' | 'record' | 'replay';
+const FIXTURE_MODE = (process.env.RV_FIXTURES ?? 'off') as 'off' | 'record' | 'replay';
 
 // ponytail: djb2 — 4-line non-crypto hash for stale-fixture detection (not security).
 function djb2(s: string): string {
@@ -1243,12 +1243,12 @@ function askForSpec(role: Role, intent: string, perception: string, critique?: s
     // fixture replay — return stored response, zero network. The harness
     // injects the fixture via chrome.storage.local before the transform.
     if (FIXTURE_MODE === 'replay') {
-      const key = 'webmorph_fixture_' + role;
+      const key = 'revueon_fixture_' + role;
       chrome.storage.local.get([key], (data) => {
         const fx = data[key] as { hash: string; response: SpecResponse } | undefined;
         if (!fx) { resolve({ ok: false, kind: 'fixture_missing', message: `No fixture for role ${role}. Expected chrome.storage.local key ${key}.` }); return; }
         const currentHash = djb2(perception);
-        if (currentHash !== fx.hash) console.warn(`[WebMorph] STALE FIXTURE ${role}: request hash ${currentHash} != fixture hash ${fx.hash} — replaying anyway`);
+        if (currentHash !== fx.hash) console.warn(`[Revueon] STALE FIXTURE ${role}: request hash ${currentHash} != fixture hash ${fx.hash} — replaying anyway`);
         resolve(fx.response);
       });
       return;
@@ -1273,7 +1273,7 @@ function askForSpec(role: Role, intent: string, perception: string, critique?: s
         // fixture record — store the raw response via chrome.storage.local
         // for the harness to read and write to disk.
         if (FIXTURE_MODE === 'record' && response?.ok) {
-          void chrome.storage.local.set({ ['webmorph_fixture_' + role]: { hash: djb2(perception), response } });
+          void chrome.storage.local.set({ ['revueon_fixture_' + role]: { hash: djb2(perception), response } });
         }
         resolve(response as SpecResponse);
       }
@@ -1333,7 +1333,7 @@ async function reapplyStored(): Promise<boolean> {
   if (structuralCss) {
     // v2 path: stored CSS already includes structural + Painter + forceContrast repair.
     css = state.style.css;
-    // Still re-stamp handles so [data-wm-c] selectors match on the live page.
+    // Still re-stamp handles so [data-rv-c] selectors match on the live page.
     clearHandles();
     perception = perceive();
     activeShadowRoots = perception.shadowRoots;
@@ -1372,9 +1372,9 @@ function undoOpsAndCss(): { undone: number; failed: number } {
   stopDynamicDefense();
   activeSpec = null; activeOps = []; activeStructuralCss = '';
   const undoResult = txnLog.undoAll(liveDom);
-  // clean up data-wm-grid / data-wm-plan-slot debug attributes from CSS-only placement.
-  document.querySelectorAll('[data-wm-grid]').forEach((el) => el.removeAttribute('data-wm-grid'));
-  document.querySelectorAll('[data-wm-plan-slot]').forEach((el) => el.removeAttribute('data-wm-plan-slot'));
+  // clean up data-rv-grid / data-rv-plan-slot debug attributes from CSS-only placement.
+  document.querySelectorAll('[data-rv-grid]').forEach((el) => el.removeAttribute('data-rv-grid'));
+  document.querySelectorAll('[data-rv-plan-slot]').forEach((el) => el.removeAttribute('data-rv-plan-slot'));
   removeStyleEverywhere(activeShadowRoots); removeEscapeUI();
   delete document.documentElement.dataset[APPLIED];
   return undoResult;
@@ -1382,11 +1382,11 @@ function undoOpsAndCss(): { undone: number; failed: number } {
 
 /** structural invariant — after any failed transform, the DOM must be
  *  structurally identical to its pre-transform state. Encoded as an assertion,
- *  not a comment: no WebMorph-injected elements or attributes may remain. */
+ *  not a comment: no Revueon-injected elements or attributes may remain. */
 function assertDomClean(undoResult: { undone: number; failed: number }): void {
-  const remaining = document.getElementById('webmorph-style');
-  const wraps = document.querySelectorAll('[data-wm-wrap]').length;
-  const gridAttrs = document.querySelectorAll('[data-wm-grid]').length;
+  const remaining = document.getElementById('revueon-style');
+  const wraps = document.querySelectorAll('[data-rv-wrap]').length;
+  const gridAttrs = document.querySelectorAll('[data-rv-grid]').length;
   if (remaining || wraps > 0 || gridAttrs > 0 || undoResult.failed > 0) {
     const issues = [
       remaining ? 'style element still present' : '',
@@ -1394,7 +1394,7 @@ function assertDomClean(undoResult: { undone: number; failed: number }): void {
       gridAttrs > 0 ? `${gridAttrs} grid attr(s) still present` : '',
       undoResult.failed > 0 ? `${undoResult.failed} undo(s) failed` : '',
     ].filter(Boolean).join('; ');
-    console.error(`[WebMorph] INVARIANT VIOLATION: DOM not clean after failed transform: ${issues}`);
+    console.error(`[Revueon] INVARIANT VIOLATION: DOM not clean after failed transform: ${issues}`);
   }
 }
 
@@ -1417,7 +1417,7 @@ async function removeAll(): Promise<void> {
 // A MutationObserver (light DOM + active shadow roots) debounces a FREE
 // re-perceive + re-compile(stored spec) + re-apply — no model call. New content
 // is either styled (matches an existing family) or base-coated (novel signature).
-// Self-trigger is avoided by ignoring additions of our own data-webmorph-ui nodes.
+// Self-trigger is avoided by ignoring additions of our own data-revueon-ui nodes.
 function restyleDynamic(): void {
   if (!activeSpec) return;
   restyleTimer = null;
@@ -1449,7 +1449,7 @@ function startDynamicDefense(): void {
   // escape UI) so re-applying never self-triggers a restyle loop.
   const hasForeignAdd = (muts: MutationRecord[]): boolean =>
     muts.some((m) => Array.from(m.addedNodes).some(
-      (n) => !((n instanceof HTMLElement) && n.hasAttribute('data-webmorph-ui')),
+      (n) => !((n instanceof HTMLElement) && n.hasAttribute('data-revueon-ui')),
     ));
   dynamicObserver = new MutationObserver((muts) => {
     if (!hasForeignAdd(muts)) return;
@@ -1588,7 +1588,7 @@ async function fastHidePath(intent: string): Promise<TransformOutcome> {
   }
   applyStyleEverywhere(sanitized, activeShadowRoots);
   lastAppliedCss = sanitized;
-  document.documentElement.dataset['webmorphPaintCount'] = '1'; // 1 visible paint (fast path)
+  document.documentElement.dataset['revueonPaintCount'] = '1'; // 1 visible paint (fast path)
   await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
   const key = storageKey();
@@ -1660,7 +1660,7 @@ async function fastMovePath(intent: string): Promise<TransformOutcome> {
   let spec: DesignSpec;
   if (isTop || isBottom) {
     const stickyVal = isTop ? 'top: 0' : 'bottom: 0';
-    const selectors = moveHandles.map((h) => `[data-wm-c="${h}"]`);
+    const selectors = moveHandles.map((h) => `[data-rv-c="${h}"]`);
     const rawCss = `${selectors.join(',\n')} {\n  position: sticky;\n  ${stickyVal};\n}`;
     sanitized = sanitizeCss(rawCss).css;
     spec = { reasoning: `fast move: ${intent}`, rules: moveHandles.map((h) => ({ target: h, styles: {} })) };
@@ -1673,7 +1673,7 @@ async function fastMovePath(intent: string): Promise<TransformOutcome> {
 
   applyStyleEverywhere(sanitized, activeShadowRoots);
   lastAppliedCss = sanitized;
-  document.documentElement.dataset['webmorphPaintCount'] = '1';
+  document.documentElement.dataset['revueonPaintCount'] = '1';
   await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
   const key = storageKey();

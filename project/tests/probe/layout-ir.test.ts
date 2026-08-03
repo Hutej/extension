@@ -23,7 +23,7 @@
  *
  * Run:
  *   node --experimental-strip-types --env-file=.env tests/probe/layout-ir.test.ts
- *   WMGRID=smoke  (1 site)  | WMSITE=Wikipedia
+ *   RVGRID=smoke  (1 site)  | RVSITE=Wikipedia
  */
 
 import { chromium, type Page } from 'playwright';
@@ -38,8 +38,8 @@ const SITES = [
   { name: 'YouTube', url: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ', settleMs: 6000 },
 ];
 
-const SMOKE = process.env.WMGRID === 'smoke';
-const SITE_FILTER = process.env.WMSITE;
+const SMOKE = process.env.RVGRID === 'smoke';
+const SITE_FILTER = process.env.RVSITE;
 const sites = SMOKE ? SITES.slice(0, 1)
   : SITE_FILTER ? SITES.filter((s) => s.name === SITE_FILTER)
   : SITES;
@@ -115,12 +115,12 @@ function flipSeverity(from: string, to: string, merged: boolean): 'CRITICAL' | '
 async function runIR(page: Page, bundle: string): Promise<IRShape> {
   return await page.evaluate(async (src: string): Promise<IRShape> => {
     new Function(src)();
-    const perceive = (window as unknown as { __wmPerceive: () => unknown }).__wmPerceive;
-    const clearHandles = (window as unknown as { __wmClearHandles: () => void }).__wmClearHandles;
-    const extractIR = (window as unknown as { __wmExtractLayoutIR: (p: unknown) => any }).__wmExtractLayoutIR;
-    const curCons = (window as unknown as { __wmCurrentConstraints: (n: any) => any[] }).__wmCurrentConstraints;
-    const detectExcl = (window as unknown as { __wmDetectExclusions: (c: any[]) => Map<string, string> }).__wmDetectExclusions;
-    const assignS = (window as unknown as { __wmAssignSlots: (n: any[], e: Set<string>) => any }).__wmAssignSlots;
+    const perceive = (window as unknown as { __rvPerceive: () => unknown }).__rvPerceive;
+    const clearHandles = (window as unknown as { __rvClearHandles: () => void }).__rvClearHandles;
+    const extractIR = (window as unknown as { __rvExtractLayoutIR: (p: unknown) => any }).__rvExtractLayoutIR;
+    const curCons = (window as unknown as { __rvCurrentConstraints: (n: any) => any[] }).__rvCurrentConstraints;
+    const detectExcl = (window as unknown as { __rvDetectExclusions: (c: any[]) => Map<string, string> }).__rvDetectExclusions;
+    const assignS = (window as unknown as { __rvAssignSlots: (n: any[], e: Set<string>) => any }).__rvAssignSlots;
     clearHandles();
     const p = perceive() as any;
     const clusters = p.clusters as any[];
@@ -397,12 +397,12 @@ async function baselineAndAt(page: Page, bundle: string, url: string, _settleMs:
   // MutationObserver settle condition instead of the fixed settleMs stopwatch.
   await page.evaluate((src: string) => { new Function(src)(); }, bundle);
   const settleResult = await page.evaluate(async () => {
-    const wfs = (globalThis as unknown as { __wmWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__wmWaitForSettle;
+    const wfs = (globalThis as unknown as { __rvWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__rvWaitForSettle;
     if (wfs) return await wfs(500, 6000);
     return { settled: false, waitMs: 0 };
   });
   // P5.2 — clear the sticky role cache on navigation (session-scoped, not page-persisted).
-  await page.evaluate(() => { (globalThis as unknown as { __wmClearRoleCache?: () => void }).__wmClearRoleCache?.(); });
+  await page.evaluate(() => { (globalThis as unknown as { __rvClearRoleCache?: () => void }).__rvClearRoleCache?.(); });
   const ir = await runIR(page, bundle);
   (ir as IRShape & { settleInfo?: { settled: boolean; waitMs: number } }).settleInfo = settleResult;
   return ir;
@@ -480,7 +480,7 @@ async function mutInsert(page: Page, bundle: string, base: IRShape): Promise<Per
 
 async function mutRemove(page: Page, bundle: string, base: IRShape): Promise<PerturbResult> {
   await page.evaluate(() => {
-    const els = Array.from(document.querySelectorAll('[data-wm-c]')) as HTMLElement[];
+    const els = Array.from(document.querySelectorAll('[data-rv-c]')) as HTMLElement[];
     if (els.length) els[els.length - 1].remove();
     else (document.body.lastElementChild as HTMLElement | null)?.remove();
   });
@@ -730,10 +730,10 @@ async function crossRunAgreement(page: Page, bundle: string, docSites: { name: s
     await page.setViewportSize({ width: BASE_W, height: BASE_H });
     await page.evaluate((src: string) => { new Function(src)(); }, bundle);
     const s1 = await page.evaluate(async () => {
-      const wfs = (globalThis as unknown as { __wmWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__wmWaitForSettle;
+      const wfs = (globalThis as unknown as { __rvWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__rvWaitForSettle;
       return wfs ? await wfs(500, 6000) : { settled: false, waitMs: 0 };
     }) as { settled: boolean; waitMs: number };
-    await page.evaluate(() => { (globalThis as unknown as { __wmClearRoleCache?: () => void }).__wmClearRoleCache?.(); });
+    await page.evaluate(() => { (globalThis as unknown as { __rvClearRoleCache?: () => void }).__rvClearRoleCache?.(); });
     const ir1 = await runIR(page, bundle);
 
     // Run 2 (fresh reload, cache cleared again)
@@ -741,10 +741,10 @@ async function crossRunAgreement(page: Page, bundle: string, docSites: { name: s
     await page.setViewportSize({ width: BASE_W, height: BASE_H });
     await page.evaluate((src: string) => { new Function(src)(); }, bundle);
     const s2 = await page.evaluate(async () => {
-      const wfs = (globalThis as unknown as { __wmWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__wmWaitForSettle;
+      const wfs = (globalThis as unknown as { __rvWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__rvWaitForSettle;
       return wfs ? await wfs(500, 6000) : { settled: false, waitMs: 0 };
     }) as { settled: boolean; waitMs: number };
-    await page.evaluate(() => { (globalThis as unknown as { __wmClearRoleCache?: () => void }).__wmClearRoleCache?.(); });
+    await page.evaluate(() => { (globalThis as unknown as { __rvClearRoleCache?: () => void }).__rvClearRoleCache?.(); });
     const ir2 = await runIR(page, bundle);
 
     // Compare: for shared handles, fraction with same role.
@@ -793,7 +793,7 @@ async function main(): Promise<void> {
   await crossRunAgreement(page, bundle, docSitesForAgreement);
 
   // Step 3 — run the v2 solver on MDN, execute the wrapper plan, show the shell grid.
-  const solverSite = process.env.WM_RUN_SOLVER ? (SMOKE ? sites[0] : sites.find((s) => s.name === 'MDN') ?? sites[0]) : null;
+  const solverSite = process.env.RV_RUN_SOLVER ? (SMOKE ? sites[0] : sites.find((s) => s.name === 'MDN') ?? sites[0]) : null;
   if (solverSite) {
     console.log(`\n\n========== STEP 3 — V2 SOLVER + SLOT WRAPPERS (${solverSite.name}) ==========`);
     await page.goto(solverSite.url, { waitUntil: 'domcontentloaded', timeout: 45000 });
@@ -801,20 +801,20 @@ async function main(): Promise<void> {
     // S3.4 — settle condition, not fixed wait.
     await page.evaluate((src: string) => { new Function(src)(); }, bundle);
     const settleInfo = await page.evaluate(async () => {
-      const wfs = (globalThis as unknown as { __wmWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__wmWaitForSettle;
+      const wfs = (globalThis as unknown as { __rvWaitForSettle?: (q?: number, m?: number) => Promise<{ settled: boolean; waitMs: number }> }).__rvWaitForSettle;
       return wfs ? await wfs(500, 6000) : { settled: false, waitMs: 0 };
     }) as { settled: boolean; waitMs: number };
     console.log(`  settle: ${settleInfo.settled ? 'quiet' : 'timeout'} @ ${settleInfo.waitMs}ms`);
-    await page.evaluate(() => { (globalThis as unknown as { __wmClearRoleCache?: () => void }).__wmClearRoleCache?.(); });
+    await page.evaluate(() => { (globalThis as unknown as { __rvClearRoleCache?: () => void }).__rvClearRoleCache?.(); });
     const solverResult = await page.evaluate(async (src: string) => {
       new Function(src)();
-      const perceive = (window as unknown as { __wmPerceive: () => unknown }).__wmPerceive;
-      const clearHandles = (window as unknown as { __wmClearHandles: () => void }).__wmClearHandles;
-      const extractIR = (window as unknown as { __wmExtractLayoutIR: (p: unknown) => any }).__wmExtractLayoutIR;
-      const detectExcl = (window as unknown as { __wmDetectExclusions: (c: any[]) => Map<string, string> }).__wmDetectExclusions;
-      const assignS = (window as unknown as { __wmAssignSlots: (n: any[], e: Set<string>) => any }).__wmAssignSlots;
-      const solve = (window as unknown as { __wmSolve: (i: any) => any }).__wmSolve;
-      const computePlacement = (window as unknown as { __wmComputeGridPlacementCss: (r: any) => any }).__wmComputeGridPlacementCss;
+      const perceive = (window as unknown as { __rvPerceive: () => unknown }).__rvPerceive;
+      const clearHandles = (window as unknown as { __rvClearHandles: () => void }).__rvClearHandles;
+      const extractIR = (window as unknown as { __rvExtractLayoutIR: (p: unknown) => any }).__rvExtractLayoutIR;
+      const detectExcl = (window as unknown as { __rvDetectExclusions: (c: any[]) => Map<string, string> }).__rvDetectExclusions;
+      const assignS = (window as unknown as { __rvAssignSlots: (n: any[], e: Set<string>) => any }).__rvAssignSlots;
+      const solve = (window as unknown as { __rvSolve: (i: any) => any }).__rvSolve;
+      const computePlacement = (window as unknown as { __rvComputeGridPlacementCss: (r: any) => any }).__rvComputeGridPlacementCss;
       clearHandles();
       const p = perceive() as any;
       const ir = extractIR(p);

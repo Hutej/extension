@@ -74,7 +74,7 @@ const cfChatUrl = (accountId: string): string =>
  *  RELATIONS: "this heading is 3× the body size", "this rail is 1/3 of the
  *  content", "this section outranks its neighbours". The deterministic engine
  *  resolves each relation against the page's measured reality. */
-const ARCHITECT_PROMPT = `You are WebMorph's ARCHITECT. You reshape a website's STRUCTURE by emitting RELATIONAL STATEMENTS — not raw CSS, not enum picks. A deterministic engine resolves your relations against the page's measured reality to produce the concrete CSS the compiler emits. You choose the BONES; a Painter chooses the surface.
+const ARCHITECT_PROMPT = `You are Revueon's ARCHITECT. You reshape a website's STRUCTURE by emitting RELATIONAL STATEMENTS — not raw CSS, not enum picks. A deterministic engine resolves your relations against the page's measured reality to produce the concrete CSS the compiler emits. You choose the BONES; a Painter chooses the surface.
 
 You receive: the user's request + the site's identity + a runtime picture of the page — the COMPOSITION (the page's macro shape up front), the page-level MODELS (type ramp, spatial model, colour system, surface language, density profile), the design-language PACKS library (each pack carries structured PRINCIPLES the engine enforces), and components with stable ids each led by its DESIGN ROLE. The engine enforces the safety laws. Your job: decide WHAT should change, expressed as relations, not the raw CSS.
 
@@ -180,7 +180,7 @@ Respond with exactly this JSON (NO raw colors; relational statements + the pack 
  *  the canvas + paletteMode + pack overrides. No raw px type sizes (a
  *  typeRank), no raw hex accents (a named accent role), no raw px radii/borders
  *  /shadows (scale steps). The engine resolves the tokens against the pack. */
-const PAINTER_PROMPT = `You are WebMorph's PAINTER. You choose the SURFACE that remakes a website — the aesthetic layer — by emitting RELATIONAL STATEMENTS + the canvas + paletteMode + pack overrides. The ARCHITECT chose the structure + the pack; you adapt the pack's surface to the user's aesthetic.
+const PAINTER_PROMPT = `You are Revueon's PAINTER. You choose the SURFACE that remakes a website — the aesthetic layer — by emitting RELATIONAL STATEMENTS + the canvas + paletteMode + pack overrides. The ARCHITECT chose the structure + the pack; you adapt the pack's surface to the user's aesthetic.
 
 You receive the user's request, the site identity, the DESIGN PACKS library (each pack carries structured PRINCIPLES the engine enforces — accent budget, surface definition, density range), and the runtime page picture (components led by their DESIGN ROLE + current colors/fonts). The engine resolves your relations against the pack + your packOverrides; the compiler enforces contrast (>=4.5). Your job: the surface language, not raw CSS.
 
@@ -267,7 +267,7 @@ Respond with exactly this JSON (NO raw layout; the surface relations + canvas + 
 /** CRITIC — repair only. Takes the bundled failure critique, returns a MINIMAL
  *  correction: relation corrections (the preferred path) or a raw escape-hatch rule
  *  for a failure the relations can't fix. Small, fast, on the fastest model. */
-const CRITIC_PROMPT = `You are WebMorph's CRITIC. A previous design attempt FAILED verification. You receive the user's request, the page perception (with DESIGN ROLES + groups + the DESIGN PACKS), and a list of SPECIFIC failures. Return a MINIMAL correction — relation corrections preferred, a raw escape-hatch rule only when a relation can't fix it.
+const CRITIC_PROMPT = `You are Revueon's CRITIC. A previous design attempt FAILED verification. You receive the user's request, the page perception (with DESIGN ROLES + groups + the DESIGN PACKS), and a list of SPECIFIC failures. Return a MINIMAL correction — relation corrections preferred, a raw escape-hatch rule only when a relation can't fix it.
 
 Fix each failure with the smallest change:
 - INVISIBLE TEXT / low contrast -> a surfaceTier + accentRole relation on the role/handle with a contrasting surface, OR a raw escape-hatch rule (background/color) on the failing handle.
@@ -304,7 +304,7 @@ const SYSTEM_PROMPT = PAINTER_PROMPT;
 
 /** Pick the model for a role. The design path runs Architect + Painter in parallel
  *  on their per-role models; Critic repair runs on the fastest model. The
- *  restyle-only path uses the Painter model alone. Env-overridable (WM_MODEL_*). */
+ *  restyle-only path uses the Painter model alone. Env-overridable (RV_MODEL_*). */
 function modelForRole(role: Role): string {
   switch (role) {
     case 'architect': return AI_CONFIG.architectModel;
@@ -381,7 +381,7 @@ async function callModel(role: Role, intent: string, perception: string, account
     if (!res.ok) {
       const bodyTxt = await safeText(res);
       logDebug(`role=${role} model=${model} HTTP ${res.status} after ${s}s: ${bodyTxt.slice(0, 300)}`);
-      if (res.status === 401 || res.status === 403) return { ok: false, kind: 'invalid_key', message: 'Invalid API key. Check your key in the WebMorph settings.', httpRequests };
+      if (res.status === 401 || res.status === 403) return { ok: false, kind: 'invalid_key', message: 'Invalid API key. Check your key in the Revueon settings.', httpRequests };
       if (res.status === 400 && bodyTxt.toLowerCase().includes('context_length')) return { ok: false, kind: 'context_limit', message: 'Page is too large for the model. Try a simpler page.', httpRequests };
       if (res.status === 429 || res.status >= 500) {
         if (transient < AI_CONFIG.maxTransientRetries) { transient++; await sleep(retryWaitMs(bodyTxt, transient)); continue; }

@@ -80,7 +80,7 @@ userContent = `USER REQUEST: ${intent}\n\nRUNTIME PAGE PERCEPTION:\n${perception
 3. **Full page content egress, no consent.**
 4. **`bestNonBroken` dead** → "keep best non-broken" guarantee is a lie.
 5. **No hallucination prevention at the spec layer** — invented roles/handles pass validation, dropped silently; the metric is gamed.
-6. **DOM reference survival = one injected attribute** (`data-wm-c`) + one best-effort observer.
+6. **DOM reference survival = one injected attribute** (`data-rv-c`) + one best-effort observer.
 7. **Failed transform leaves DOM mutated** (no op rollback on failure).
 8. **No global abort**; 429 header ignored; `isReasoningModel` regex over-matches any id containing "glm" (`reason:394`).
 9. **`packOverrides` unvalidated** → silent corruption or crash.

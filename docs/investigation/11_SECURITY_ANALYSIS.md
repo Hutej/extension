@@ -55,7 +55,7 @@
 ## 10. Messaging attack surface (MEDIUM)
 - **`captureVisibleTab(undefined)` (`background.ts:56`):** if `sender.tab` is missing, captures the last-focused window → wrong-page screenshot leak (information disclosure of another tab's content to the recolor baseline).
 - **`inFlight` drop (`content.ts:1559`):** no busy reply → a rapid double-Transform can leave the popup hanging; not a security issue but a DoS vector against the user's own session.
-- **`webmorphRunInFlight` persists after a tab crash** (`content.ts:407`) — not security, but a liveness bug.
+- **`revueonRunInFlight` persists after a tab crash** (`content.ts:407`) — not security, but a liveness bug.
 
 ## 11. CSP / Trusted Types
 - **CSP:** `execute:19-28` injects `<style>.textContent = css`. Extension content scripts are generally exempt from page CSP in MV3, but inline-style property writes (`applyInlineBackstop`) and `documentElement.appendChild` (`execute:125`) may be affected. **UNVERIFIED** on a `style-src 'none'` strict site.

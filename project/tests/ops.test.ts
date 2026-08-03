@@ -20,7 +20,7 @@ function style(over: Partial<ClusterStyle> = {}): ClusterStyle {
 }
 function cluster(over: Partial<Cluster>): Cluster {
   return {
-    handle: 'c000000', selector: '[data-wm-c="c000000"]', count: 1, tag: 'div', role: null,
+    handle: 'c000000', selector: '[data-rv-c="c000000"]', count: 1, tag: 'div', role: null,
     isNativeControl: false, isCheckboxRadio: false, hasSolidBg: true, rect: { x: 0, y: 0, w: 100, h: 100, vx: 0, vy: 0, aboveFold: true },
     samples: [], prominence: 1, layout: layout(), widthFractionOfParent: 1,
     emptinessScore: 0, moveSafety: 'safe', sourceOrder: 0,
@@ -111,7 +111,7 @@ function fakeDom(root: FakeNode): DomAdapter {
 }
 /** Serialise the fake tree to a comparable structural string. */
 function struct(n: FakeNode): string {
-  const h = n.handle ? `#${n.handle}` : (n.attrs['data-wm-wrap'] ? '+wrap' : '');
+  const h = n.handle ? `#${n.handle}` : (n.attrs['data-rv-wrap'] ? '+wrap' : '');
   return n.children.length ? `${n.tag}${h}[${n.children.map(struct).join(',')}]` : `${n.tag}${h}`;
 }
 
@@ -241,10 +241,10 @@ testDecorativeGradientVoid();
 // are readable regardless" — but the guarantee fails in 4 distinct ways. This pure
 // check proves each surviving invisible cluster is classified into its ROOT CAUSE:
 //   wrong-bg   : pair derived from a surface != the one the text sits on
-//   cascade-loss: no pair won for the handle (site rule beat [data-wm-c], or the
+//   cascade-loss: no pair won for the handle (site rule beat [data-rv-c], or the
 //                handle dropped from the live perception — emit is empty)
 //   multi-bg   : the cluster rect spans >1 distinct background
-//   no-handle  : detected upstream (no [data-wm-c]); survivors here all have handles
+//   no-handle  : detected upstream (no [data-rv-c]); survivors here all have handles
 function testInvisibleClassifier() {
   const inv = ['c1', 'c2', 'c3', 'c4'];
   // c1: emitted a light bg, but text sits on a dark panel → WRONG-BG.

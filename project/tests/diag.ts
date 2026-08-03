@@ -32,22 +32,22 @@ async function main() {
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${extId}/popup.html`);
   await popup.$eval('#intent', (el, v) => { (el as HTMLTextAreaElement).value = v; }, 'Carnival Rio samba — explosive magenta lime and gold');
-  await popup.$eval('#webmorph-result', (el) => { (el as HTMLElement).textContent = ''; }).catch(() => {});
+  await popup.$eval('#revueon-result', (el) => { (el as HTMLElement).textContent = ''; }).catch(() => {});
   await page.bringToFront();
   const btn = await popup.$('#transformBtn');
   await btn?.click();
   console.log('clicked transform; waiting 90s for marker...');
   try {
     await page.waitForFunction(
-      () => document.documentElement.hasAttribute('data-webmorph-applied') || document.documentElement.hasAttribute('data-webmorph-failed'),
+      () => document.documentElement.hasAttribute('data-revueon-applied') || document.documentElement.hasAttribute('data-revueon-failed'),
       null, { timeout: 90000 },
     );
     console.log('MARKER appeared');
   } catch {
     console.log('no marker after 90s');
   }
-  console.log(`applied attr: ${await page.evaluate(() => document.documentElement.hasAttribute('data-webmorph-applied'))}`);
-  console.log(`failed attr: ${await page.evaluate(() => document.documentElement.getAttribute('data-webmorph-failed'))}`);
+  console.log(`applied attr: ${await page.evaluate(() => document.documentElement.hasAttribute('data-revueon-applied'))}`);
+  console.log(`failed attr: ${await page.evaluate(() => document.documentElement.getAttribute('data-revueon-failed'))}`);
   await context.close();
 }
 main().catch((e) => { console.error('FATAL', e); process.exit(1); });

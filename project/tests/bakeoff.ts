@@ -6,7 +6,7 @@
  *
  * Run: node --experimental-strip-types --env-file=.env tests/bakeoff.ts
  *
- * For each role × candidate: set WM_MODEL_<ROLE>, rebuild the extension (wxt build
+ * For each role × candidate: set RV_MODEL_<ROLE>, rebuild the extension (wxt build
  * replaces process.env at build time), run the smoke harness, parse the printed
  * metrics, print a per-role table + a per-role winner. Sequential (one-shot mandate).
  * The operator updates AI_CONFIG.<role>Model with each winner BY EYE — no auto-edit
@@ -27,9 +27,9 @@ interface RoleSpec {
 // Per-role candidate models. The Architect is the hard part (composition) → strong
 // models; the Painter is palette + type → mid; the Critic is small repair → fastest.
 const ROLES: RoleSpec[] = [
-  { role: 'architect', envVar: 'WM_MODEL_ARCHITECT', candidates: ['gpt-5.1', 'gpt-5.2', 'gpt-4o'] },
-  { role: 'painter', envVar: 'WM_MODEL_PAINTER', candidates: ['gpt-5.1', 'gpt-4o', 'gpt-4o-mini'] },
-  { role: 'critic', envVar: 'WM_MODEL_CRITIC', candidates: ['gpt-4o-mini', 'gpt-4o'] },
+  { role: 'architect', envVar: 'RV_MODEL_ARCHITECT', candidates: ['gpt-5.1', 'gpt-5.2', 'gpt-4o'] },
+  { role: 'painter', envVar: 'RV_MODEL_PAINTER', candidates: ['gpt-5.1', 'gpt-4o', 'gpt-4o-mini'] },
+  { role: 'critic', envVar: 'RV_MODEL_CRITIC', candidates: ['gpt-4o-mini', 'gpt-4o'] },
 ];
 const LATENCY_TARGET_MS = 30_000;
 
@@ -54,7 +54,7 @@ function runCandidate(role: string, envVar: string, model: string): RunResult {
   // Run the smoke harness with the rebuilt extension.
   const out = execSync('node --experimental-strip-types --env-file=.env tests/popup.test.ts', {
     cwd: ROOT, timeout: 180_000, encoding: 'utf-8',
-    env: { ...process.env, [envVar]: model, WMGRID: 'smoke' },
+    env: { ...process.env, [envVar]: model, RVGRID: 'smoke' },
   });
   // Parse metrics from stdout.
   const wallMatch = out.match(/wall-clock:\s*([\d.]+)s/);

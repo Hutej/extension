@@ -8,17 +8,17 @@
 `verify/index.ts:79` `verifyStyle` is the single biggest performance hazard. Per call, it triggers:
 
 **From `captureLayoutFingerprint` (`perceive:920-959`):**
-- `querySelectorAll([data-wm-c])` + `getBoundingClientRect` + `getComputedStyle` per region (cap 200, `:928`).
+- `querySelectorAll([data-rv-c])` + `getBoundingClientRect` + `getComputedStyle` per region (cap 200, `:928`).
 - `querySelectorAll('h1,h2,h3,h4,p,li,a,button')` + `getComputedStyle` (`:944-947`).
-- A second full `querySelectorAll([data-wm-c])` + `getBoundingClientRect` for column detection (`:949-953`).
+- A second full `querySelectorAll([data-rv-c])` + `getBoundingClientRect` for column detection (`:949-953`).
 - `computeOverlapCount` (`perceive:1000`): a third `querySelectorAll` + `getBoundingClientRect` + **O(n²)** pairwise overlap (cap 18 regions → 153 comparisons, `:1010`).
 - `countTextBleeds` (`perceive:987`): a fourth `querySelectorAll` + `getComputedStyle` + `scrollWidth` per element.
 - `document.documentElement.scrollWidth` (`perceive:958`) — a forced reflow.
 
 **From `verifyStyle` itself, after the fingerprint:**
 - `findPrimaryContentNode` (`:84`) → `getBoundingClientRect` (`:87`).
-- `querySelectorAll([data-wm-c])` + `getBoundingClientRect` + `getComputedStyle(.opacity)` for `contentVisible` (`:123-128`).
-- `querySelectorAll([data-wm-c])` + `getComputedStyle` + `getBoundingClientRect` per moved handle (`:140-147`).
+- `querySelectorAll([data-rv-c])` + `getBoundingClientRect` + `getComputedStyle(.opacity)` for `contentVisible` (`:123-128`).
+- `querySelectorAll([data-rv-c])` + `getComputedStyle` + `getBoundingClientRect` per moved handle (`:140-147`).
 - `scrollWidth` read (`:153`) — a **second forced reflow**.
 - `measureAccentAreaFraction` (`:206→504`): `querySelectorAll` + `getComputedStyle` + `getBoundingClientRect` per cluster.
 - `measureFramedClusterFraction` (`:207→535`): `querySelectorAll` + `getComputedStyle` per cluster.
@@ -27,7 +27,7 @@
 - `findSqueezeTargets` (`:231→341`): `querySelectorAll` + `getComputedStyle` + `clientWidth`/`clientHeight` per cluster.
 - `checkContrast` (`:175→554`): `querySelectorAll` + `getComputedStyle(.fontSize)` per rep, then per sampled rep: `getBoundingClientRect` + `getComputedStyle(.color)` + `effectiveBackground` (`:613` — walks the parent chain calling `getComputedStyle` per ancestor, **unbounded depth**) + `gradientStopsInChain` (`:632` — walks up to 12 ancestors).
 
-**Total per `verifyStyle` call:** ~8-10 full-tree `querySelectorAll([data-wm-c])` scans, ~3 forced reflows, and an **unbounded parent-chain `getComputedStyle` walk per contrast sample** with **O(depth²) recursion** (`effectiveBackground` recurses for every semi-transparent ancestor, no memoization). A pathological 20-deep transparent stack → 210 `getComputedStyle` calls for one sample × `CONTRAST_SAMPLE_COUNT`.
+**Total per `verifyStyle` call:** ~8-10 full-tree `querySelectorAll([data-rv-c])` scans, ~3 forced reflows, and an **unbounded parent-chain `getComputedStyle` walk per contrast sample** with **O(depth²) recursion** (`effectiveBackground` recurses for every semi-transparent ancestor, no memoization). A pathological 20-deep transparent stack → 210 `getComputedStyle` calls for one sample × `CONTRAST_SAMPLE_COUNT`.
 
 **Frequency:** runs **2-3× per transform** (paint1, paint2, regression guard). On a 200-cluster page this is multi-hundred-ms of reflow — it eats the 120s budget, not the model.
 

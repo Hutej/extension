@@ -27,11 +27,11 @@ import { buildSafetyProfile, type SafetyProfile, type RegionSafety } from './dyn
 import { deepQuerySelector, deepQuerySelectorAll } from './dom-utils.ts';
 
 const IGNORED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'BR', 'HR', 'WBR', 'LINK', 'META', 'TEMPLATE', 'SLOT', 'PATH', 'DEFS']);
-const ESCAPE_UI_ID = 'webmorph-escape-ui';
+const ESCAPE_UI_ID = 'revueon-escape-ui';
 
 const MAX_TIME_MS = 6000;           // budget — no node cap, time is the only limit
 const MAX_DEPTH = 30;               // safety net (not a truncation — 30 is very deep)
-const CLUSTER_ATTR = 'data-wm-c';
+const CLUSTER_ATTR = 'data-rv-c';
 const TIER1_FULL_DETAIL_COUNT = 80; // top clusters by prominence get full serialization
 // Adaptive serialization budget (the budget is TIME, not chars). The fast path
 // keeps FULL detail up to the soft ceiling; the compact/drop trim fires only when
@@ -318,7 +318,7 @@ export function perceive(): Perception {
     if (performance.now() - t0 > MAX_TIME_MS || depth > MAX_DEPTH) { walkTruncated = true; return; }
     const tag = el.tagName.toUpperCase();
     if (IGNORED_TAGS.has(tag)) return;
-    if (el.id === STYLE_ELEMENT_ID || el.id === ESCAPE_UI_ID || el.hasAttribute('data-webmorph-ui')) return;
+    if (el.id === STYLE_ELEMENT_ID || el.id === ESCAPE_UI_ID || el.hasAttribute('data-revueon-ui')) return;
 
     const rect = el.getBoundingClientRect();
     const w = Math.round(rect.width);
@@ -631,7 +631,7 @@ function structuralPath(el: HTMLElement): string {
 // changes (which means a new handle → cache miss → fresh classification). The
 // cache is session-scoped and cleared on navigation. Stored on globalThis so
 // it persists across the probe's `new Function(src)()` re-executions.
-const ROLE_CACHE_KEY = '__wmRoleCache';
+const ROLE_CACHE_KEY = '__rvRoleCache';
 interface RoleCacheEntry { role: DesignRole; confidence: number; }
 function getRoleCache(): Map<string, RoleCacheEntry> {
   const w = globalThis as unknown as { [ROLE_CACHE_KEY]?: Map<string, RoleCacheEntry> };
@@ -704,7 +704,7 @@ function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): 
   // Stamp handles on kept members.
   for (const r of kept) for (const m of r._members) m.el.setAttribute(CLUSTER_ATTR, r.handle);
 
-  // Enrich layout facts now that handles exist (needs data-wm-c on ancestors).
+  // Enrich layout facts now that handles exist (needs data-rv-c on ancestors).
   for (const r of kept) enrichLayout(r, r._members[0], vpW);
 
   // Structural enrichment for the op vocabulary: emptiness + move-safety +
@@ -1171,7 +1171,7 @@ function findContentWidthFromStamped(): number | null {
 function countTextBleeds(): number {
   let n = 0;
   for (const el of deepQuerySelectorAll(`[${CLUSTER_ATTR}]`)) {
-    if (!(el instanceof HTMLElement) || el.hasAttribute('data-webmorph-ui') || el.clientWidth === 0) continue;
+    if (!(el instanceof HTMLElement) || el.hasAttribute('data-revueon-ui') || el.clientWidth === 0) continue;
     const cs = getComputedStyle(el);
     if (cs.overflowX !== 'visible') continue;
     const bg = parseColor(cs.backgroundColor);
@@ -1286,7 +1286,7 @@ export function findPrimaryContentNode(): Element | null {
   let bestLen = 200;
   const vpArea = (window.innerWidth || 1280) * (window.innerHeight || 800);
   for (const el of deepQuerySelectorAll(`[${CLUSTER_ATTR}]`)) {
-    if (el.hasAttribute('data-webmorph-ui')) continue;
+    if (el.hasAttribute('data-revueon-ui')) continue;
     const textLen = (el.textContent || '').replace(/\s+/g, ' ').trim().length;
     if (textLen < bestLen) continue;
     const rect = el.getBoundingClientRect();

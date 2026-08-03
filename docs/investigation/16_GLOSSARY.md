@@ -1,10 +1,10 @@
 # 16 — Glossary
 
-> Beginner-friendly definitions of every important WebMorph concept.
+> Beginner-friendly definitions of every important Revueon concept.
 
 ## Extension terms
 
-**MV3 (Manifest V3)** — The current Chrome extension architecture. The background script is a *service worker* (ephemeral: Chrome kills it after ~30s idle). This is why WebMorph keeps it alive with a port (`background.ts:27`) during a model fetch.
+**MV3 (Manifest V3)** — The current Chrome extension architecture. The background script is a *service worker* (ephemeral: Chrome kills it after ~30s idle). This is why Revueon keeps it alive with a port (`background.ts:27`) during a model fetch.
 
 **Service worker (SW)** — The extension's background process. Holds the Cloudflare credentials and relays AI calls. It can be killed mid-fetch by Chrome under memory pressure, even with a keepalive port.
 
@@ -20,11 +20,11 @@
 
 **Perception** — A structured description of the page captured by `perceive()`: clusters, roles, geometry, colors, fonts. The model's view of the page.
 
-**Cluster** — A group of visually-similar DOM boxes treated as one unit. Each cluster gets a `data-wm-c` handle and a role.
+**Cluster** — A group of visually-similar DOM boxes treated as one unit. Each cluster gets a `data-rv-c` handle and a role.
 
-**`data-wm-c` / handle** — A 6-character identifier (e.g. `c1a2b3`) stamped as an HTML attribute on each cluster's representative element (`perceive:523`). The model emits these handles; CSS targets them via `[data-wm-c="c1a2b3"]`. **This is the fragile identity surface** — it disappears if the framework re-renders the node.
+**`data-rv-c` / handle** — A 6-character identifier (e.g. `c1a2b3`) stamped as an HTML attribute on each cluster's representative element (`perceive:523`). The model emits these handles; CSS targets them via `[data-rv-c="c1a2b3"]`. **This is the fragile identity surface** — it disappears if the framework re-renders the node.
 
-**`data-wm-grid`** (v2) — A targeting attribute stamped by the solver (`solve:491,511,529,547`) for grid CSS, despite the "CSS-only" claim.
+**`data-rv-grid`** (v2) — A targeting attribute stamped by the solver (`solve:491,511,529,547`) for grid CSS, despite the "CSS-only" claim.
 
 **Role** — One of 14 design classifications (masthead, nav-primary, nav-local, sidebar, toc, main, article-body, footer, actions-primary, listing, metadata, media, search, ad-or-void). Assigned by `semantic.ts classifyRole`.
 
@@ -58,21 +58,21 @@
 
 **`startDynamicDefense`** — Re-styles on site mutations, re-perceives on bursts (`content.ts:1272`).
 
-**Fixture mode (`WM_FIXTURES`)** — Test-only record/replay of model responses (no network). Dead-branched in production. `content.ts:1099`.
+**Fixture mode (`RV_FIXTURES`)** — Test-only record/replay of model responses (no network). Dead-branched in production. `content.ts:1099`.
 
 ## Identity / stability terms
 
 **Structural identity handle** — `hash(structuralPath(el))`. Tag + nth-of-type chain from a stable ancestor (id/data-testid/role/aria-label/name). Capped at depth 10.
 
-**Sticky role cache** — Classify once per handle per session, reuse on every pass (`globalThis.__wmRoleCache`). **Never cleared** (RC4).
+**Sticky role cache** — Classify once per handle per session, reuse on every pass (`globalThis.__rvRoleCache`). **Never cleared** (RC4).
 
-**Composed tree** — The real rendered tree including shadow DOM. WebMorph walks it but reads back only the light (flat) tree — the core defect (RC1).
+**Composed tree** — The real rendered tree including shadow DOM. Revueon walks it but reads back only the light (flat) tree — the core defect (RC1).
 
 **Role stability / slot stability** — Probe metrics: how often a handle's role (or slot) stays the same across perturbations (resize/zoom/mutation). Gates require ≥0.90–0.95.
 
 ## Failure-mode terms
 
-**FOUC** — Flash of unstyled content: the `data-wm-c` attribute is gone during a framework re-render → CSS stops matching → original styles flash until the defender re-stamps.
+**FOUC** — Flash of unstyled content: the `data-rv-c` attribute is gone during a framework re-render → CSS stops matching → original styles flash until the defender re-stamps.
 
 **Layout thrashing** — Interleaved layout reads and writes that force the browser to recalculate layout repeatedly. `verifyStyle` is the main offender.
 

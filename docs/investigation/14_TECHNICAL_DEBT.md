@@ -16,17 +16,17 @@
 - **`hash` is duplicated** — `perceive:1482` (fixed, modulo `2176782336`) vs `semantic:390` (unfixed `.slice(-6)`). The same bug class fixed in one place, live in another.
 
 ## Doc drift
-- **`solve.ts:23`** claims "data-wm-c is a DEBUG label only; nothing in emitted CSS depends on it" — **false for v1** (100% of v1 CSS is keyed on `data-wm-c`, `perceive:503`).
+- **`solve.ts:23`** claims "data-rv-c is a DEBUG label only; nothing in emitted CSS depends on it" — **false for v1** (100% of v1 CSS is keyed on `data-rv-c`, `perceive:503`).
 - **`expand.ts:104`** comment says 5-char handles; code uses 6 (`:108`, `spec:510`).
 - **`ARCHITECTURE.md`** says hard gates = 6; `verify/index.ts` exposes 13 booleans; v2 uses 11 (`v2HardGates` since S9.4 added squeeze, S10.3a added captureFailed, S11.3 added planHonoured); the count was 6/7/9/10/11 across docs — now reconciled to 11 everywhere (S11.7).
-- **`--wm-step-1`** deleted token referenced in docs.
+- **`--rv-step-1`** deleted token referenced in docs.
 - **`ir.ts` field comment** says `sourceOrder` is "DOM document-order index" — it is prominence order (`perceive:515`).
 
 ## Untested invariants
-- **The `wxt.config.ts` env define-invariant** — every `process.env.WM_*` referenced in `config/index.ts` must be listed in `wxt.config.ts:21-30` or the content script bricks (`process is not defined` → no listener → "Cannot reach the page"). No compile-time test asserts this. A contributor adding `process.env.WM_MODEL_STYLE` silently bricks every build.
+- **The `wxt.config.ts` env define-invariant** — every `process.env.RV_*` referenced in `config/index.ts` must be listed in `wxt.config.ts:21-30` or the content script bricks (`process is not defined` → no listener → "Cannot reach the page"). No compile-time test asserts this. A contributor adding `process.env.RV_MODEL_STYLE` silently bricks every build.
 - **Gate semantics** — the hard-gate count and `v2HardGates` membership drift; no test pins the definition.
 - **`chrome.storage.local` quota** on large specs (`persist`) — UNVERIFIED.
-- **Fixture mode leak to production** (`content.ts:1099` `WM_FIXTURES`) — only build-time-gated; no runtime assertion that `FIXTURE_MODE==='off'` in a production build. A dev build accidentally promoted → stale canned designs, no model call.
+- **Fixture mode leak to production** (`content.ts:1099` `RV_FIXTURES`) — only build-time-gated; no runtime assertion that `FIXTURE_MODE==='off'` in a production build. A dev build accidentally promoted → stale canned designs, no model call.
 
 ## Architectural debt
 - **v1 is still the default; v2 is behind a flag with fabricated telemetry** (`content.ts:716-722` zeros) → can't trust v2 metrics.

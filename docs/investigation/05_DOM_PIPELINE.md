@@ -20,7 +20,7 @@
 - Per element: `getBoundingClientRect()` (`:246`) + `getComputedStyle(el)` (`:261`) → **layout reads on every element** (forced-layout-read cost, no writes interleave).
 
 ### Cluster + stamp
-- `clusterAndStamp` (`:471`) groups candidates into clusters, picks a `representativeFor(cluster)` (`:692`), and **stamps `data-wm-c="<handle>"`** (`:523`).
+- `clusterAndStamp` (`:471`) groups candidates into clusters, picks a `representativeFor(cluster)` (`:692`), and **stamps `data-rv-c="<handle>"`** (`:523`).
 - **The shadow-DOM resolution gap (verified):** `representativeFor` (`:692`), `findScrollables` (`:376`), `enrichSemantic` (`:815`) all resolve via light-tree `document.querySelector(cluster.selector)`. A shadow-stamped cluster returns `null` → `if (!el)` at `:819` → defaulted to **`ad-or-void`/0** (except pre/code → `article-body`). **YouTube and all web-component-heavy sites are systematically classified as empty voids.**
 - **Closed shadow roots** invisible (`el.shadowRoot` null). **iframes** never entered.
 
@@ -51,7 +51,7 @@
 ## 3. DOM Mutation — `applyStyleEverywhere` + `executeOps`
 
 ### CSS injection
-- `applyStyle` (`execute:19-28`): finds/creates `<style id=webmorph-style>`, sets `textContent`, appends to `<head>` (re-appends existing to win cascade order). Also into every open shadow root via `observeShadowRoot`.
+- `applyStyle` (`execute:19-28`): finds/creates `<style id=revueon-style>`, sets `textContent`, appends to `<head>` (re-appends existing to win cascade order). Also into every open shadow root via `observeShadowRoot`.
 - `applyInlineBackstop` (`content.ts:509`): inline `!important` bg+text on contrast-failing clusters. **Not persisted, not re-applied on reload.**
 
 ### Structural ops (v1)
@@ -59,7 +59,7 @@
 - `executeOps` iterates in spec order, **no dependency resolution** → a `reorder` whose `before` was removed earlier falls to "move to end" silently.
 
 ### Identity attributes (v2)
-- `setAttribute('data-wm-grid',…)` (`solve:491,511,529,547`) — DOM mutations despite the "CSS-only" claim.
+- `setAttribute('data-rv-grid',…)` (`solve:491,511,529,547`) — DOM mutations despite the "CSS-only" claim.
 
 ## 4. Observer Lifecycle
 

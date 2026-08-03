@@ -21,12 +21,12 @@
 3. **The fluid-token set** (`ARCHITECTURE.md:123-130`) — `clamp()`-based viewport-relative type/spacing — is the correct approach to zoom-hostility.
 4. **The exclusion-registry *idea*** (`exclusions.ts`) — principled detection (no hostnames) of JS-controlled subtrees — is right in principle, though the heuristics miss modern libraries.
 5. **The v2 CSS-only-grid direction** (Step 7) is the correct escape from the SPA-re-render trap that killed v1 DOM reparenting. Moving from `applySlotWrappers` (DOM moves) to `display:grid` + `display:contents` (CSS only) avoids triggering framework MutationObservers. **(Caveat: it still calls `setAttribute`, and `display:contents` has its own content-loss issues.)**
-6. **Record/replay fixtures** (`WM_FIXTURES`, `content.ts:1099`) — test-only, dead-branched in production — let layout code be tested without paying the model. Good testing architecture.
+6. **Record/replay fixtures** (`RV_FIXTURES`, `content.ts:1099`) — test-only, dead-branched in production — let layout code be tested without paying the model. Good testing architecture.
 
 ## Architectural weaknesses
 
 ### W1 — Identity = one injected attribute (single point of failure)
-The whole product rests on `data-wm-c` (`perceive:503`) surviving framework re-renders. The MutationObserver defender (`execute:62`) is the only backstop. v2 swaps to `data-wm-grid`/`buildSelector` — **same class of dependency on an injected attribute**. If the defender misses a node (shadow timing, `display:none` subtree, attribute-observing framework), that node is permanently unstyled → the "all-or-nothing" rule fails.
+The whole product rests on `data-rv-c` (`perceive:503`) surviving framework re-renders. The MutationObserver defender (`execute:62`) is the only backstop. v2 swaps to `data-rv-grid`/`buildSelector` — **same class of dependency on an injected attribute**. If the defender misses a node (shadow timing, `display:none` subtree, attribute-observing framework), that node is permanently unstyled → the "all-or-nothing" rule fails.
 
 ### W2 — Perception is the source of truth but is partial, time-bounded, and flat-tree-resolved
 - 6s/depth-30 cap silently truncates (`perceive:241`) with no `truncated` flag.
@@ -57,7 +57,7 @@ Grid auto-places rows in DOM order; `order`/`grid-area` are banned for a11y (`so
 - **`content.ts` is a 1603-line god orchestrator** coupled to every `core/*` module. The v1/v2 fork, message handling, observers, undo, persistence, and capture relay all live here. High hidden coupling; hard to test in isolation.
 - **`buildSelector` (solve) duplicates `structuralPath` (perceive)** — two copies of fragile identity logic with different joiners (` > ` vs `/`). Divergence is a silent targeting bug.
 - **`hash` is duplicated** (`perceive:1482` fixed, `semantic:390` unfixed) — the same bug class fixed in one place, live in another.
-- **Identity coupling:** the model emits handles; the expander/compile/solve all resolve them via `data-wm-c`/`data-wm-grid`. A change to the handle format touches the prompt, the validator, the expander, and the selector builder.
+- **Identity coupling:** the model emits handles; the expander/compile/solve all resolve them via `data-rv-c`/`data-rv-grid`. A change to the handle format touches the prompt, the validator, the expander, and the selector builder.
 
 ## Scalability
 
@@ -68,7 +68,7 @@ Grid auto-places rows in DOM order; `order`/`grid-area` are banned for a11y (`so
 | Notion | orphaned blocks | `contenteditable` excluded; block chrome isn't; nested trees exceed depth 30 |
 | YouTube | **no redesign** | shadow-DOM resolution gap → feed = voids (verified) |
 | Reddit | scroll breaks | infinite-scroll virtualization missed by `isVirtualized` |
-| GitHub | undo breakage | Turbo morph re-renders → `data-wm-c` on recycled nodes → undo replays wrong nodes |
+| GitHub | undo breakage | Turbo morph re-renders → `data-rv-c` on recycled nodes → undo replays wrong nodes |
 | Google Docs | partial | `contenteditable` excluded; dense UI → 6s cap |
 | 100K-node page | silent partial redesign | 6s truncation, no flag |
 

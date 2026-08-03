@@ -252,7 +252,7 @@ export const MAX_FRAMED_FRACTION = 0.45;
 export const MAX_REGION_OVERLAP = 0.35;
 
 /** The single injected style element id. Unlayered + appended last in <head> wins the cascade (Exp 006). */
-export const STYLE_ELEMENT_ID = 'webmorph-style';
+export const STYLE_ELEMENT_ID = 'revueon-style';
 
 /**
  * Reject obviously dangerous values before they reach a declaration.

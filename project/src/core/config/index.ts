@@ -6,17 +6,17 @@
 
 export const AI_CONFIG = {
   // Pipeline flag: v1 (legacy compile) or v2 (Layout IR -> Solver). Default v1.
-  // Override via WM_LAYOUT_COMPILER env var or the popup dev toggle. The two
+  // Override via RV_LAYOUT_COMPILER env var or the popup dev toggle. The two
   // paths are NOT intertwined — the pipeline forks once; no shared mutable state.
-  layoutCompiler: (process.env.WM_LAYOUT_COMPILER ?? 'v1') as 'v1' | 'v2',
+  layoutCompiler: (process.env.RV_LAYOUT_COMPILER ?? 'v1') as 'v1' | 'v2',
 
   // Per-role models on Cloudflare Workers AI. GLM 5.2 is the flagship
   // (function calling + reasoning, 262K ctx); glm-4.7-flash is the fast
   // companion for the Critic.
-  architectModel: process.env.WM_MODEL_ARCHITECT ?? '@cf/zai-org/glm-5.2',
-  painterModel: process.env.WM_MODEL_PAINTER ?? '@cf/zai-org/glm-5.2',
-  criticModel: process.env.WM_MODEL_CRITIC ?? '@cf/zai-org/glm-4.7-flash',
-  styleModel: process.env.WM_MODEL ?? '@cf/zai-org/glm-5.2',
+  architectModel: process.env.RV_MODEL_ARCHITECT ?? '@cf/zai-org/glm-5.2',
+  painterModel: process.env.RV_MODEL_PAINTER ?? '@cf/zai-org/glm-5.2',
+  criticModel: process.env.RV_MODEL_CRITIC ?? '@cf/zai-org/glm-4.7-flash',
+  styleModel: process.env.RV_MODEL ?? '@cf/zai-org/glm-5.2',
   // No fallback: a known-recolorer fallback is a worse failure than an honest error.
   styleFallbackModel: undefined as string | undefined,
   styleFallbackTemperature: 0.6,
@@ -29,8 +29,8 @@ export const AI_CONFIG = {
   // 6a test: 'medium' timed out at 130s (hard abort) on GLM 5.2 / Cloudflare
   // Workers AI — the model's thinking time dominates wall-clock. 'low' runs
   // 59-90s with good quality (invisible=0, coverage=1.0). REVERT to 'low'.
-  // Env-overridable (WM_EFFORT) kept for future re-testing with a faster model.
-  styleReasoningEffort: (process.env.WM_EFFORT ?? 'low') as 'low' | 'medium',
+  // Env-overridable (RV_EFFORT) kept for future re-testing with a faster model.
+  styleReasoningEffort: (process.env.RV_EFFORT ?? 'low') as 'low' | 'medium',
 
   // Time budget (replaces the call-count cap). The wall-clock owns the run:
   // design ≤30s target, ≤120s absolute hard abort. Within it, as many Critic
@@ -71,8 +71,8 @@ export const AI_CONFIG = {
  */
 
 // DEBUG = false — was true, shipping page content to the console in production.
-// Gate all content-bearing logs behind this. The test harness enables it via WM_DEBUG.
-const DEBUG = (process.env.WM_DEBUG ?? 'false') === 'true';
+// Gate all content-bearing logs behind this. The test harness enables it via RV_DEBUG.
+const DEBUG = (process.env.RV_DEBUG ?? 'false') === 'true';
 export function logDebug(...args: unknown[]): void {
-  if (DEBUG) console.log('[WebMorph]', ...args);
+  if (DEBUG) console.log('[Revueon]', ...args);
 }

@@ -55,9 +55,9 @@ export interface VerifyResult {
   contentWidthBefore: number | null;           // contentMaxWidthPx before apply (usesRoom critique)
   contentWidthAfter: number | null;            // contentMaxWidthPx after apply (usesRoom critique)
   repeatedAccent: boolean;
-  /** Count of low-contrast text nodes WITHOUT a [data-wm-c] ancestor — invisible to
+  /** Count of low-contrast text nodes WITHOUT a [data-rv-c] ancestor — invisible to
    *  handle-targeted repair (forceContrast targets handles) and to the pixel
-   *  detector (only scans [data-wm-c] rects). The canvas text floor + base-coat are
+   *  detector (only scans [data-rv-c] rects). The canvas text floor + base-coat are
    *  the only paths that reach un-clustered text. Surfaced for the run report
    *  so a no-handle failure class is visible, not silently dropped. */
   contrastNoHandle: number;
@@ -120,8 +120,8 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   // 1c) Content visible — no significant cluster has opacity near-zero.
   // Catches the model using opacity:0 to hide content (bypasses hideRefusal).
   let invisibleCount = 0;
-  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-    if (el.hasAttribute('data-webmorph-ui')) continue;
+  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+    if (el.hasAttribute('data-revueon-ui')) continue;
     const rect = el.getBoundingClientRect();
     if (rect.width < 50 || rect.height < 50) continue;
     if (parseFloat(getComputedStyle(el).opacity) < 0.1) invisibleCount++;
@@ -138,7 +138,7 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   const movedDead: string[] = [];
   if (movedHandles && movedHandles.size) {
     for (const h of movedHandles) {
-      const el = document.querySelector<HTMLElement>(`[data-wm-c="${h}"]`);
+      const el = document.querySelector<HTMLElement>(`[data-rv-c="${h}"]`);
       if (!el) { movedDead.push(h); continue; }
       const cs = getComputedStyle(el);
       const r = el.getBoundingClientRect();
@@ -166,8 +166,8 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
 
   // 4) Contrast sane. Collect the specific cluster handles that carry flagged
   // low-contrast text so forceContrast can fix exactly those. `noHandle` counts the
-  // failing text WITHOUT a [data-wm-c] ancestor — invisible to handle-targeted repair
-  // (forceContrast) and to the pixel detector (only scans [data-wm-c]); the canvas text
+  // failing text WITHOUT a [data-rv-c] ancestor — invisible to handle-targeted repair
+  // (forceContrast) and to the pixel detector (only scans [data-rv-c]); the canvas text
   // floor + base-coat are the only paths that reach it. Surfaced for the run report.
   const contrastFlags = new Set<string>();
   const contrastTargetBgs = new Map<string, string>();
@@ -297,9 +297,9 @@ function findOverflowTargets(): string[] {
   const innerW = window.innerWidth || 1280;
   const seen = new Set<string>();
   const targets: string[] = [];
-  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-    if (!(el instanceof HTMLElement) || el.hasAttribute('data-webmorph-ui')) continue;
-    const h = el.getAttribute('data-wm-c')!;
+  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+    if (!(el instanceof HTMLElement) || el.hasAttribute('data-revueon-ui')) continue;
+    const h = el.getAttribute('data-rv-c')!;
     if (seen.has(h)) continue;
     const r = el.getBoundingClientRect();
     if (r.right > innerW + 4 || r.width > innerW + 4) { seen.add(h); targets.push(h); }
@@ -317,9 +317,9 @@ function findOverflowTargets(): string[] {
 function findBleedTargets(): string[] {
   const seen = new Set<string>();
   const targets: string[] = [];
-  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-    if (!(el instanceof HTMLElement) || el.hasAttribute('data-webmorph-ui')) continue;
-    const h = el.getAttribute('data-wm-c')!;
+  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+    if (!(el instanceof HTMLElement) || el.hasAttribute('data-revueon-ui')) continue;
+    const h = el.getAttribute('data-rv-c')!;
     if (seen.has(h)) continue;
     const cs = getComputedStyle(el);
     if (cs.overflowX === 'visible' && el.clientWidth > 0 && el.scrollWidth > el.clientWidth + 8) {
@@ -341,9 +341,9 @@ function findBleedTargets(): string[] {
 function findSqueezeTargets(): string[] {
   const seen = new Set<string>();
   const targets: string[] = [];
-  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-    if (!(el instanceof HTMLElement) || el.hasAttribute('data-webmorph-ui')) continue;
-    const h = el.getAttribute('data-wm-c')!;
+  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+    if (!(el instanceof HTMLElement) || el.hasAttribute('data-revueon-ui')) continue;
+    const h = el.getAttribute('data-rv-c')!;
     if (seen.has(h)) continue;
     // Only check clusters with substantial text content
     if ((el.textContent || '').trim().length < 40) continue;
@@ -478,15 +478,15 @@ function checkRepeatedAccent(before: LayoutFingerprint): boolean {
   for (const r of before.regions) if (!beforeBg.has(r.handle)) beforeBg.set(r.handle, r.paint.split('|')[0]);
 
   const counts = new Map<string, number>();
-  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-    if (el.hasAttribute('data-webmorph-ui')) continue;
-    const h = el.getAttribute('data-wm-c')!;
+  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+    if (el.hasAttribute('data-revueon-ui')) continue;
+    const h = el.getAttribute('data-rv-c')!;
     counts.set(h, (counts.get(h) ?? 0) + 1);
   }
 
   for (const [h, count] of counts) {
     if (count <= 3) continue;  // 2-3 members is a pair, not a "repeated cluster"
-    const rep = document.querySelector(`[data-wm-c="${h}"]`);
+    const rep = document.querySelector(`[data-rv-c="${h}"]`);
     if (!rep) continue;
     const afterC = parseColor(getComputedStyle(rep).backgroundColor);
     if (!afterC || colorfulness(afterC) < 0.35) continue; // not colorful after apply
@@ -504,8 +504,8 @@ function checkRepeatedAccent(before: LayoutFingerprint): boolean {
 function measureAccentAreaFraction(): number {
   const vpArea = (window.innerWidth || 1280) * (window.innerHeight || 800);
   let sum = 0;
-  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-    if (el.hasAttribute('data-webmorph-ui')) continue;
+  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+    if (el.hasAttribute('data-revueon-ui')) continue;
     const bg = parseColor(getComputedStyle(el).backgroundColor);
     if (!bg || colorfulness(bg) < 0.35) continue;
     const r = el.getBoundingClientRect();
@@ -535,8 +535,8 @@ export function accentFractionWithCanvas(clusterAccentArea: number, canvasBg: st
 function measureFramedClusterFraction(): number {
   const seen = new Set<string>();
   let total = 0, framed = 0;
-  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-    const h = el.getAttribute('data-wm-c')!;
+  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+    const h = el.getAttribute('data-rv-c')!;
     if (seen.has(h)) continue;
     seen.add(h);
     total++;
@@ -552,7 +552,7 @@ function measureFramedClusterFraction(): number {
 // ── contrast ───────────────────────────────────────────────────────
 
 function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<string, string>, _noHandle: { count: number }): boolean {
-  // sample ONE REPRESENTATIVE PER [data-wm-c] handle (reuses the
+  // sample ONE REPRESENTATIVE PER [data-rv-c] handle (reuses the
   // findBleedTargets dedupe pattern) instead of a global size-sorted element
   // list. The old code had two compounding bugs:
   //  (a) candidates filtered to textContent.trim().length >= 5 — "MDN" is 3
@@ -564,9 +564,9 @@ function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<s
   // handle sizes are represented, not just large text.
   const seen = new Set<string>();
   const reps: { el: HTMLElement; h: string; fs: number }[] = [];
-  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
-    if (!(el instanceof HTMLElement) || el.hasAttribute('data-webmorph-ui')) continue;
-    const h = el.getAttribute('data-wm-c')!;
+  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
+    if (!(el instanceof HTMLElement) || el.hasAttribute('data-revueon-ui')) continue;
+    const h = el.getAttribute('data-rv-c')!;
     if (seen.has(h)) continue;
     seen.add(h);
     reps.push({ el, h, fs: parseFloat(getComputedStyle(el).fontSize) || 0 });

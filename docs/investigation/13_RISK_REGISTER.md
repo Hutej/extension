@@ -56,7 +56,7 @@
 | M10 | Shadow observer leak (pushed root orphaned after reassign) | `content.ts:1289,1252` | 4 | 2 | P2 |
 | M11 | `noOverflow` delta tolerance hides blow-out | `verify:157` | 3 | 3 | P2 |
 | M12 | `inFlight` second-message dropped silently → popup hangs | `content.ts:1559` | 3 | 2 | P2 |
-| M13 | `webmorphRunInFlight` persists forever after tab crash | `content.ts:407` | 3 | 2 | P2 |
+| M13 | `revueonRunInFlight` persists forever after tab crash | `content.ts:407` | 3 | 2 | P2 |
 | M14 | `captureVisibleTab(undefined)` captures wrong window | `background.ts:56` | 2 | 3 | P2 |
 | M15 | Raw px `fontSize`/`padding` not fluidized → zoom-hostile | `expand:199,214,286`; `laws:442` | 5 | 2 | P2 |
 | M16 | `buildSelector` duplicates `structuralPath` (divergence) | `solve:241` vs `perceive:407` | 3 | 3 | P3 |
@@ -79,7 +79,7 @@
 | L8 | `checkConformance` regex breaks on `data:` URLs with `;` | `verify:686` | 3 | 1 | P3 |
 | L9 | `captureShotAt` destroys user scroll (no save/restore) | `content.ts:222` | 5 | 1 | P3 |
 | L10 | Mixed `browser.*`/`chrome.*` in popup | `popup:25,91` | 2 | 1 | P3 |
-| L11 | Doc drift (`solve.ts:23` data-wm-c debug-only false for v1; `expand:104` 5 vs 6 chars) | `solve:23`, `expand:104` | 5 | 1 | P3 |
+| L11 | Doc drift (`solve.ts:23` data-rv-c debug-only false for v1; `expand:104` 5 vs 6 chars) | `solve:23`, `expand:104` | 5 | 1 | P3 |
 | L12 | `asDecls` coerces numbers to strings (unitless dropped) | `spec:463` | 3 | 1 | P3 |
 | L13 | `sanitizeMarkup` dead | `sanitize` (never called) | 2 | 1 | P3 |
 | L14 | No port auth on keepalive | `background.ts:27` | 2 | 2 | P3 |

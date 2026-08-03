@@ -45,7 +45,7 @@ export interface DomAdapter {
   createElement(tag: string): Node;
   /** move 'to' a destination handle: resolve to a live node, or null for 'floating'. */
   resolveDestination(to: string | undefined): HTMLElement | null;
-  /** extract the handle from a live DOM node (the [data-wm-c] attribute), or null. */
+  /** extract the handle from a live DOM node (the [data-rv-c] attribute), or null. */
   handleOf(node: Node | null): string | null;
 }
 

@@ -29,7 +29,7 @@
 ## F4 — Turbo morph (GitHub) — no route event
 - **What happens:** `turbo:load` reuses DOM nodes without `pushState` → no re-perceive.
 - **Why:** only `pushState`/`replaceState`/`popstate`/`hashchange` are hooked (`content.ts:1546`).
-- **What breaks:** `data-wm-c` stamps sit on recycled nodes; `txnLog` inverses reference recycled node objects → on undo, `insertBefore(inv.parent, inv.node, inv.nextSibling)` throws `NotFoundError` (RC6) → `undoAll` has no try/catch → half-undone broken page.
+- **What breaks:** `data-rv-c` stamps sit on recycled nodes; `txnLog` inverses reference recycled node objects → on undo, `insertBefore(inv.parent, inv.node, inv.nextSibling)` throws `NotFoundError` (RC6) → `undoAll` has no try/catch → half-undone broken page.
 - **Recovery:** none — the user must reload the page (losing the transform).
 - **Root cause:** undo holds live `Node` refs; Turbo morph invalidates them.
 
@@ -71,7 +71,7 @@
 ## F10 — Tab suspended (MV3 tab discarding)
 - **What happens:** the content script is gone; the tab is discarded.
 - **Why:** MV3 discards inactive tabs under memory pressure.
-- **What breaks:** on revival, the page reloads; WebMorph's listener must re-register. **UNVERIFIED** whether suspended-then-revived tabs reliably re-inject the content script.
+- **What breaks:** on revival, the page reloads; Revueon's listener must re-register. **UNVERIFIED** whether suspended-then-revived tabs reliably re-inject the content script.
 - **Recovery:** stored state re-applies on next user action — if the content script re-injects.
 - **Root cause:** reliance on content-script lifecycle.
 

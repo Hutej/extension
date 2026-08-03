@@ -444,7 +444,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
       const canvasParsed = parseColor(canvasTone);
       for (const h of new Set(opts.pixelInvisibleTargets)) {
         const cl = byHandle.get(h);
-        if (!cl) { droppedProps.push(`pixelInvisible(${h}:handle-vanished — cascade-loss: the handle dropped from the live perception, possibly an op removed it or an SPA re-render stripped [data-wm-c])`); continue; }
+        if (!cl) { droppedProps.push(`pixelInvisible(${h}:handle-vanished — cascade-loss: the handle dropped from the live perception, possibly an op removed it or an SPA re-render stripped [data-rv-c])`); continue; }
         if (cl.style.hasBgImage) { droppedProps.push(`pixelInvisible(${h}:image-bg — protected, no pair emitted)`); continue; }
         const effBg = opaqueOr(opts.contrastTargetBgs?.[h]) ?? opaqueOr(specBg.get(h)) ?? opaqueOr(cl.style.background) ?? canvasTone;
         const baseTone = deriveBaseTone(effBg);
@@ -758,7 +758,7 @@ export function deriveBaseTone(canvasBg: string): string {
 
 /**
  * Cascade-proof selector for the deterministic forceContrast pair. The base
- * cluster selector `[data-wm-c="…"]` is specificity (0,1,0); a site rule with a
+ * cluster selector `[data-rv-c="…"]` is specificity (0,1,0); a site rule with a
  * higher-specificity selector + !important beats our pair — the cascade-loss
  * failure class (the pair is emitted but loses the cascade, so the cluster stays
  * invisible). Doubling the attribute selector lifts specificity to (0,2,0) +
@@ -769,7 +769,7 @@ export function deriveBaseTone(canvasBg: string): string {
  *  inline-style fallback (inline + !important beats any stylesheet rule) is the
  *  upgrade path if a real run shows id-level cascade-loss survivors persist.` */
 function forceContrastSelector(handle: string): string {
-  return `[data-wm-c="${handle}"][data-wm-c="${handle}"]`;
+  return `[data-rv-c="${handle}"][data-rv-c="${handle}"]`;
 }
 
 /** Transparent/empty bg is "no surface" — returns null so the effBg `??` chain

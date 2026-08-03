@@ -179,7 +179,7 @@ export function inventoryScrollBehavior(clusters: Cluster[]): ScrollBehaviorProf
     let p: Element | null = el;
     let depth = 0;
     while (p && depth < 24) {
-      const h = p.getAttribute && p.getAttribute('data-wm-c');
+      const h = p.getAttribute && p.getAttribute('data-rv-c');
       if (h) { handle = h; break; }
       p = p.parentElement;
       depth++;

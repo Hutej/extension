@@ -102,19 +102,19 @@ export async function defaultCheckAt(): Promise<ResizeViolation[]> {
   }
 
   // Squeeze: text containers with chars-per-line below the readable measure.
-  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
+  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
     if (!(el instanceof HTMLElement)) continue;
     const cs = getComputedStyle(el);
     const fontSize = parseFloat(cs.fontSize) || 16;
     const cw = el.clientWidth;
     if (cw > 0 && cw / (fontSize * 0.5) < 12) {
-      violations.push({ width: 0, kind: 'squeeze', detail: `${el.getAttribute('data-wm-c')}: ${Math.round(cw / (fontSize * 0.5))}cpl` });
+      violations.push({ width: 0, kind: 'squeeze', detail: `${el.getAttribute('data-rv-c')}: ${Math.round(cw / (fontSize * 0.5))}cpl` });
       break;  // one is enough
     }
   }
 
   // Invisible: text with near-zero contrast against its effective background.
-  for (const el of Array.from(document.querySelectorAll('[data-wm-c]'))) {
+  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
     if (!(el instanceof HTMLElement)) continue;
     const cs = getComputedStyle(el);
     const color = cs.color;
@@ -126,7 +126,7 @@ export async function defaultCheckAt(): Promise<ResizeViolation[]> {
       const textLum = parseLuminance(color);
       const bgLum = parseLuminance(bg);
       if (textLum !== null && bgLum !== null && Math.abs(textLum - bgLum) < 0.1) {
-        violations.push({ width: 0, kind: 'invisible', detail: `${el.getAttribute('data-wm-c')}: text/bg luminance delta ${Math.abs(textLum - bgLum).toFixed(3)}` });
+        violations.push({ width: 0, kind: 'invisible', detail: `${el.getAttribute('data-rv-c')}: text/bg luminance delta ${Math.abs(textLum - bgLum).toFixed(3)}` });
         break;  // one is enough
       }
     }

@@ -1,5 +1,5 @@
 /**
- * popup/main — WebMorph popup UI. Drives the transform via the content script.
+ * popup/main — Revueon popup UI. Drives the transform via the content script.
  * Product-quality — error taxonomy, elapsed timer, metrics, getSiteInfo
  * (no tabs permission needed).
  */
@@ -27,21 +27,21 @@ const disclosureEl = $<HTMLDivElement>('disclosure');
 const disclosureOkBtn = $<HTMLButtonElement>('disclosureOk');
 
 // ── Cloudflare credentials (unified on cloudflare_account_id + cloudflare_api_token) ──
-void browser.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token', 'webmorphConsentShown', 'webmorphOptOutModel']).then((res: Record<string, unknown>) => {
+void browser.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token', 'revueonConsentShown', 'revueonOptOutModel']).then((res: Record<string, unknown>) => {
   if (res.cloudflare_account_id) accountIdEl.value = res.cloudflare_account_id as string;
   if (res.cloudflare_api_token) apiTokenEl.value = res.cloudflare_api_token as string;
   // show disclosure before the first transform.
-  if (!res.webmorphConsentShown) disclosureEl.style.display = 'block';
-  if (res.webmorphOptOutModel) optOutEl.checked = true;
+  if (!res.revueonConsentShown) disclosureEl.style.display = 'block';
+  if (res.revueonOptOutModel) optOutEl.checked = true;
 });
 settingsToggle.addEventListener('click', () => settingsArea.classList.toggle('open'));
 // opt-out toggle
 optOutEl.addEventListener('change', () => {
-  void browser.storage.local.set({ webmorphOptOutModel: optOutEl.checked });
+  void browser.storage.local.set({ revueonOptOutModel: optOutEl.checked });
 });
 // disclosure acknowledgement
 disclosureOkBtn.addEventListener('click', () => {
-  void browser.storage.local.set({ webmorphConsentShown: true });
+  void browser.storage.local.set({ revueonConsentShown: true });
   disclosureEl.style.display = 'none';
 });
 saveKeyBtn.addEventListener('click', async () => {
@@ -132,14 +132,14 @@ transformBtn.addEventListener('click', async () => {
   const tabId = await getTabId();
   if (!tabId) { showStatus('Cannot find the active tab.', 'err'); return; }
   // gate on consent disclosure.
-  const consent = await browser.storage.local.get(['webmorphConsentShown', 'webmorphOptOutModel']);
-  if (!consent.webmorphConsentShown) {
+  const consent = await browser.storage.local.get(['revueonConsentShown', 'revueonOptOutModel']);
+  if (!consent.revueonConsentShown) {
     disclosureEl.style.display = 'block';
     showStatus('Please review and acknowledge the disclosure below first.', 'info');
     return;
   }
   // gate on opt-out — if the user opted out of model calls, only fast paths work.
-  if (consent.webmorphOptOutModel) {
+  if (consent.revueonOptOutModel) {
     const kind = /^(hide|remove|delete|get rid of|move|shift|relocate|push|send)\b/i.test(intent);
     if (!kind) {
       showStatus('Model calls are disabled (opt-out). Only hide/move commands work without AI.', 'err');
@@ -171,7 +171,7 @@ transformBtn.addEventListener('click', async () => {
       const verdict = checks ? `${checks.covered ? '✓' : '✗'}coverage ${checks.changed ? '✓' : '✗'}change ${checks.coherent ? '✓' : '✗'}coherent ${checks.contrastOk ? '✓' : '✗'}contrast ${checks.noOverflow ? '✓' : '✗'}no-overflow` : '';
       showStatus(`✓ Applied: ${res.reasoning || 'Design applied.'}${verdict ? '\n' + verdict : ''}`, 'ok');
       // Hidden JSON for test harness.
-      $('webmorph-result').textContent = JSON.stringify(res);
+      $('revueon-result').textContent = JSON.stringify(res);
       // Metrics.
       metricsEl.innerHTML = [
         `<span>⏱ ${fmtMs(res.wallMs ?? 0)}</span>`,
@@ -220,8 +220,8 @@ async function updateSiteStatus(): Promise<void> {
   // Stale-run warning: if a run is in-flight (the content script set the flag on
   // run start), warn the user. The flag is cleared on completion; a stale timestamp
   // (>120s) means the run aborted without clearing it (SW killed, tab crashed).
-  chrome.storage.local.get(['webmorphRunInFlight'], (res) => {
-    const ts = res.webmorphRunInFlight as number | undefined;
+  chrome.storage.local.get(['revueonRunInFlight'], (res) => {
+    const ts = res.revueonRunInFlight as number | undefined;
     if (ts && Date.now() - ts > 2000) showStatus('⚠ A transform is in progress on this tab…', 'info');
   });
   chrome.tabs.sendMessage(tabId, { action: 'getSiteInfo' }, async (info) => {

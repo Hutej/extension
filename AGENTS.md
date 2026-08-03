@@ -1,24 +1,24 @@
-# WebMorph — AGENTS.md
+# Revueon — AGENTS.md
 
 *(Keep this file SMALL — it is auto-loaded into every prompt. Details live in the files below; read them on demand.)*
 
-This is not just an extension — this is an AI agent that lives in your browser. WebMorph reshapes ANY website in plain English — locally, never the site's backend. Endgame: replace EVERY browser extension. The moat is generality: principles, not recipes.
+This is not just an extension — this is an AI agent that lives in your browser. Revueon reshapes ANY website in plain English — locally, never the site's backend. Endgame: replace EVERY browser extension. The moat is generality: principles, not recipes.
 
 ## Pointers (read `.kiro/steering/product.md` before any work)
 
 - **One architectural rule:** the AI owns design decisions, the Layout IR owns structure, the solver
   owns constraints, the compiler owns CSS. No layer takes over another's responsibility.
-- **Pipeline flag:** `layoutCompiler = 'v1' | 'v2'` (default `v1`; `WM_LAYOUT_COMPILER` env + popup dev
+- **Pipeline flag:** `layoutCompiler = 'v1' | 'v2'` (default `v1`; `RV_LAYOUT_COMPILER` env + popup dev
   toggle). v2 is the Layout IR -> Solver path; the two are not intertwined.
 - **Ponytail ladder:** walk it before every change (below). Stop at the first rung that holds.
 
-## Repo map (root = WebMorph/)
+## Repo map (root = Revueon/)
 
 - `project/` — the real codebase: extension + test harness (WXT, TypeScript strict, MV3, Playwright). All code work happens in `project/src/` and `project/tests/`.
 - `.kiro/steering/product.md` — roadmap with ALL phases + sub-phases and the CURRENT POSITION. **Read before starting any task.**
 - `docs/ARCHITECTURE.md` — engine pipeline, laws/constants, model config, harness gotchas. **Read before touching `project/src/`.**
 - `docs/LAW_0_BROWSER_OWNERSHIP.md` — the governing law for all layout changes: browser owns layout, we hand it constraints. **Read before any layout emission change.**
-- `all-about_webmorph.txt` — background reference; read only when relevant.
+- `all-about_revueon.txt` — background reference; read only when relevant.
 - `roadmap.txt` - if you dont know in which phase you are, you can refer this and you have authority to make changes in it if the step is completed and moving on. User will not specify this in prompt you have to handle it own
   
 ## Absolute rules
@@ -37,7 +37,7 @@ This is not just an extension — this is an AI agent that lives in your browser
 ```
 cd project && node --experimental-strip-types --env-file=.env tests/popup.test.ts
 ```
-`WMGRID=smoke` for 1-site quick test, `WMGRID=full` (default) for 5-site grid.
+`RVGRID=smoke` for 1-site quick test, `RVGRID=full` (default) for 5-site grid.
 
 ## Status updates (required duty)
 

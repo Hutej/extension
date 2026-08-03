@@ -68,7 +68,7 @@ content ──(internal)──► undo/restore ──► {action:'toggle'} from 
    │ perceive()  (perceive/index.ts)       │
    │  walk(depth≤30, 6s cap)               │
    │   └─ descend open shadow roots        │  ◄── STAMPS shadow children
-   │  cluster → stamp data-wm-c            │
+   │  cluster → stamp data-rv-c            │
    │  enrich(role/semantic/layout)         │
    │  serialize → text                     │
    └──────┬───────────────────────────────┘
@@ -79,12 +79,12 @@ content ──(internal)──► undo/restore ──► {action:'toggle'} from 
           │
    ┌──────▼───────────────────────────────┐
    │ compile (expand→packs→laws)           │
-   │  CSS string keyed on data-wm-c        │  ◄── 100% of v1 CSS
+   │  CSS string keyed on data-rv-c        │  ◄── 100% of v1 CSS
    └──────┬───────────────────────────────┘
           │
    ┌──────▼───────────────────────────────┐
    │ execute/applyStyleEverywhere          │
-   │  <style id=webmorph-style>.textContent│  (head + shadow roots)
+   │  <style id=revueon-style>.textContent│  (head + shadow roots)
    │  applyInlineBackstop (inline !imp)    │  ◄── NOT re-applied on reload
    │  executeOps (v1: move/remove/reorder) │  ◄── BEFORE verify (RC3)
    │  txnLog records inverses              │
@@ -157,7 +157,7 @@ content ──(internal)──► undo/restore ──► {action:'toggle'} from 
    │ Content script injected per page (on match)    │
    │  onMessage listener registers                   │
    │  ──── RUN ────►                                  │
-   │   webmorphRunInFlight flag (persists if crash)  │
+   │   revueonRunInFlight flag (persists if crash)  │
    │   perceive → reason → compile → verify → apply  │
    │   ──── persist (chrome.storage.local) ────►     │
    │   startDefense (MutationObserver)               │

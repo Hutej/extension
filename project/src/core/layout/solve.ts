@@ -20,9 +20,9 @@
  *
  * SELECTOR-BASED TARGETING. CSS rules are keyed on the CSS selector derived
  *   from the existing structuralPath (stable attrs: id/data-testid/role/aria-label/
- *   name, falling back to tag + nth-of-type). data-wm-c is a DEBUG label only;
+ *   name, falling back to tag + nth-of-type). data-rv-c is a DEBUG label only;
  *   nothing in the emitted CSS depends on it. Where no usable selector can be
- *   derived, fall back to [data-wm-c] and count those cases.
+ *   derived, fall back to [data-rv-c] and count those cases.
  *
  * v1 scope (all five, no more):
  *   1. validate constraints
@@ -51,18 +51,18 @@ import { assertNoRawPxSizing } from '../laws/index.ts';
 // TYPE and SPACING relative to the viewport, not layout tracks. Layout tracks use
 // container-relative units (fr, minmax, fit-content). The type/spacing clamp() are
 // tokens (provenance: token), not measurements.
-// --wm-content-min replaces the hardcoded 320px content floor (now a token).
-// --wm-content-max is a character-based prose measure (ch = intrinsic, not px).
+// --rv-content-min replaces the hardcoded 320px content floor (now a token).
+// --rv-content-max is a character-based prose measure (ch = intrinsic, not px).
 
 const FLUID_TOKENS = `
-  --wm-step-0: clamp(1rem, 0.95rem + 0.3vw, 1.125rem);
-  --wm-step-2: clamp(1.6rem, 1.3rem + 1.2vw, 2.3rem);
-  --wm-space-s: clamp(8px, 1vw, 12px);
-  --wm-space-m: clamp(16px, 2vw, 24px);
-  --wm-space-l: clamp(24px, 3vw, 40px);
-  --wm-content-min: 320px;
-  --wm-content-max: 65ch;
-  --wm-side-max: 280px;
+  --rv-step-0: clamp(1rem, 0.95rem + 0.3vw, 1.125rem);
+  --rv-step-2: clamp(1.6rem, 1.3rem + 1.2vw, 2.3rem);
+  --rv-space-s: clamp(8px, 1vw, 12px);
+  --rv-space-m: clamp(16px, 2vw, 24px);
+  --rv-space-l: clamp(24px, 3vw, 40px);
+  --rv-content-min: 320px;
+  --rv-content-max: 65ch;
+  --rv-side-max: 280px;
 `;
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -115,13 +115,13 @@ export interface PlacementResult {
   css: string;
   /** Total selector fallbacks (sum of the four split counters, for backward compat). */
   selectorFallback: number;
-  /** NCA selector fell back to [data-wm-grid]. */
+  /** NCA selector fell back to [data-rv-grid]. */
   selectorFallbackNca: number;
-  /** placed-proxy selector fell back to [data-wm-grid]. */
+  /** placed-proxy selector fell back to [data-rv-grid]. */
   selectorFallbackProxy: number;
-  /** display:contents selector fell back to [data-wm-grid]. */
+  /** display:contents selector fell back to [data-rv-grid]. */
   selectorFallbackContents: number;
-  /** per-node CSS selector fell back to [data-wm-c]. */
+  /** per-node CSS selector fell back to [data-rv-c]. */
   selectorFallbackPerNode: number;
   /** Count of proxies placed with grid-column (— was "nodesPlaced" in S7). */
   nodesPlaced: number;
@@ -160,20 +160,20 @@ export interface PlacementResult {
 /** Map a MaxWidth constraint value ('prose'|'full'|'compact'|'side'|'partial') to a CSS value. */
 function maxWidthToken(value?: string): string | null {
   switch (value) {
-    case 'prose': return 'var(--wm-content-max)';   // character-based measure (intrinsic)
+    case 'prose': return 'var(--rv-content-max)';   // character-based measure (intrinsic)
     case 'compact':
-    case 'side': return 'var(--wm-side-max)';
+    case 'side': return 'var(--rv-side-max)';
     case 'full': return 'none';                       // no max — fill parent
-    case 'partial': return 'var(--wm-content-max)';  // a partial-width node → prose measure
+    case 'partial': return 'var(--rv-content-max)';  // a partial-width node → prose measure
     default: return null;
   }
 }
 
 /** Map a Gap constraint value ('s'|'m'|'l') to a CSS token. */
 function gapToken(value?: string): string {
-  if (value === 's') return 'var(--wm-space-s)';
-  if (value === 'l') return 'var(--wm-space-l)';
-  return 'var(--wm-space-m)';  // default
+  if (value === 's') return 'var(--rv-space-s)';
+  if (value === 'l') return 'var(--rv-space-l)';
+  return 'var(--rv-space-m)';  // default
 }
 
 /** Translate a single constraint to CSS declarations. Returns [] for constraints
@@ -210,9 +210,9 @@ function constraintToCss(c: LayoutConstraint): string[] {
 
 // ── Author constraint constants (also emitted as CSS tokens in FLUID_TOKENS) ──
 // the hardcoded 320px content floor is now a named constant, linked to the
-// --wm-content-min token. Both are authorConstraint provenance (the layout
+// --rv-content-min token. Both are authorConstraint provenance (the layout
 // language's requirement), never measurements.
-const CONTENT_MIN_PX = 320;  // == --wm-content-min token
+const CONTENT_MIN_PX = 320;  // == --rv-content-min token
 
 // ── Solve (pure: no DOM access, no model calls) ─────────────────────
 
@@ -326,7 +326,7 @@ export function solve(input: SolveInput): SolveResult {
   }
 
   const gridCols = hasSide
-    ? `minmax(min(${sideMin}px, 100%), var(--wm-side-max)) minmax(0, 1fr)`
+    ? `minmax(min(${sideMin}px, 100%), var(--rv-side-max)) minmax(0, 1fr)`
     : `minmax(min(${contentMin}px, 100%), 1fr)`;
 
   const matchedTargets = placement.size;
@@ -348,7 +348,7 @@ export function solve(input: SolveInput): SolveResult {
 /** Build a CSS selector from a DOM element using the same anchor logic as
  *  structuralPath : nearest stable attribute (id/data-testid/role/
  *  aria-label/name) + nth-of-type chain. Returns null if no usable selector
- *  can be derived (caller falls back to [data-wm-c]). */
+ *  can be derived (caller falls back to [data-rv-c]). */
 function buildSelector(el: HTMLElement): string | null {
   // Find the nearest stable anchor (self or ancestor, excluding body/html).
   let anchor: HTMLElement | null = null;
@@ -491,7 +491,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   // b. Resolve placed handles to live elements. single loop, no double counting.
   const placedEls: Map<string, HTMLElement> = new Map();
   for (const [handle] of placement) {
-    const el = document.querySelector<HTMLElement>(`[data-wm-c="${handle}"]`);
+    const el = document.querySelector<HTMLElement>(`[data-rv-c="${handle}"]`);
     if (el) placedEls.set(handle, el);
     else nodesNotPlaceable.push(handle);
   }
@@ -611,7 +611,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     .filter((id) => slotById.get(id)?.preferredWidth === 'content')
     .map((id) => slotById.get(id)?.minWidth ?? CONTENT_MIN_PX));
   const gridTemplate = hasSide
-    ? `minmax(min(${sideMin}px, 100%), var(--wm-side-max)) minmax(0, 1fr)`
+    ? `minmax(min(${sideMin}px, 100%), var(--rv-side-max)) minmax(0, 1fr)`
     : `minmax(min(${contentMin}px, 100%), 1fr)`;
 
   // g. Emit layout on the NCA, PRESERVING its existing formatting context.
@@ -626,8 +626,8 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   if (ncaSelector && selectorIsUnique(ncaSelector, nca)) {
     ncaCssSelector = ncaSelector;
   } else {
-    nca.setAttribute('data-wm-grid', 'nca');
-    ncaCssSelector = '[data-wm-grid="nca"]';
+    nca.setAttribute('data-rv-grid', 'nca');
+    ncaCssSelector = '[data-rv-grid="nca"]';
     selectorFallbackNca++;
   }
   // detect the NCA's current formatting context. This is a measurement used for
@@ -646,14 +646,14 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   // preserve the existing formatting context.
   if (ncaIsGrid) {
     // Already grid — modify properties, don't replace.
-    ncaDecls.push(`grid-template-columns: ${gridTemplate}`, 'gap: var(--wm-space-m)', 'min-width: 0');
+    ncaDecls.push(`grid-template-columns: ${gridTemplate}`, 'gap: var(--rv-space-m)', 'min-width: 0');
   } else if (ncaIsFlex) {
     // Already flex — use flex properties for multi-column layout.
     // flex-wrap: wrap lets side+content items sit side by side and wrap on narrow containers.
-    ncaDecls.push('flex-wrap: wrap', 'gap: var(--wm-space-m)', 'min-width: 0');
+    ncaDecls.push('flex-wrap: wrap', 'gap: var(--rv-space-m)', 'min-width: 0');
   } else {
     // Block or other — introduce grid (new formatting context only where none exists).
-    ncaDecls.push('display: grid', `grid-template-columns: ${gridTemplate}`, 'gap: var(--wm-space-m)', 'min-width: 0');
+    ncaDecls.push('display: grid', `grid-template-columns: ${gridTemplate}`, 'gap: var(--rv-space-m)', 'min-width: 0');
   }
   if (ncaIsFlexGridItem) ncaDecls.push('max-width: 100%');
   // establish containment for container-query responsiveness. Graceful: skip if
@@ -681,8 +681,8 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     if (sel && selectorIsUnique(sel, el)) {
       cssSelector = sel;
     } else {
-      el.setAttribute('data-wm-grid', `c${intermediatesCollapsed}`);
-      cssSelector = `[data-wm-grid="c${intermediatesCollapsed}"]`;
+      el.setAttribute('data-rv-grid', `c${intermediatesCollapsed}`);
+      cssSelector = `[data-rv-grid="c${intermediatesCollapsed}"]`;
       selectorFallbackContents++;
     }
     if (subgridSupported) {
@@ -704,8 +704,8 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     if (sel && selectorIsUnique(sel, el)) {
       cssSelector = sel;
     } else {
-      el.setAttribute('data-wm-grid', `f${fullWidthEls.indexOf(el)}`);
-      cssSelector = `[data-wm-grid="f${fullWidthEls.indexOf(el)}"]`;
+      el.setAttribute('data-rv-grid', `f${fullWidthEls.indexOf(el)}`);
+      cssSelector = `[data-rv-grid="f${fullWidthEls.indexOf(el)}"]`;
       selectorFallbackContents++;
     }
     const fullDecl = ncaIsFlex ? 'flex: 0 0 100%' : 'grid-column: 1 / -1';
@@ -713,28 +713,28 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   }
 
   // j. Emit placement on proxies. The proxy's box (bg/border/padding) is preserved.
-  // stamp each placed proxy with data-wm-plan-slot for the plan assertion.
+  // stamp each placed proxy with data-rv-plan-slot for the plan assertion.
   // for flex NCA, use flex properties; for grid/block NCA, use grid-column.
   for (const [el, slotId] of placedProxies) {
     const slot = slotById.get(slotId);
     const pw = slot?.preferredWidth ?? 'full';
-    el.setAttribute('data-wm-plan-slot', slotId);
+    el.setAttribute('data-rv-plan-slot', slotId);
     const sel = buildSelector(el);
     let cssSelector: string;
     if (sel && selectorIsUnique(sel, el)) {
       cssSelector = sel;
     } else {
-      el.setAttribute('data-wm-grid', `p${selectorFallbackProxy}`);
-      cssSelector = `[data-wm-grid="p${selectorFallbackProxy}"]`;
+      el.setAttribute('data-rv-grid', `p${selectorFallbackProxy}`);
+      cssSelector = `[data-rv-grid="p${selectorFallbackProxy}"]`;
       selectorFallbackProxy++;
     }
     // flex NCA → flex properties; grid/block NCA → grid-column.
     let decls: string[];
     if (ncaIsFlex) {
       if (pw === 'side' && hasSide) {
-        decls = ['flex: 0 0 min(var(--wm-side-max), 100%)', 'max-width: var(--wm-side-max)'];
+        decls = ['flex: 0 0 min(var(--rv-side-max), 100%)', 'max-width: var(--rv-side-max)'];
       } else if (pw === 'content' && hasSide) {
-        decls = ['flex: 1 1 0', 'min-width: var(--wm-content-min)'];
+        decls = ['flex: 1 1 0', 'min-width: var(--rv-content-min)'];
       } else {
         decls = ['flex: 0 0 100%'];
       }
@@ -751,21 +751,21 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   // viewport measurement, no re-run. The browser resolves it from the container's
   // inline-size. Graceful: only emitted if container-type was set on the NCA.
   if (containerSupported && (ncaCs.containerType !== 'inline-size' && ncaCs.containerType !== 'size' ? false : true)) {
-    blocks.push(`@container (max-width: 600px) {\n  [data-wm-plan-slot] {\n    grid-column: 1 / -1 !important;\n    flex: 0 0 100% !important;\n    max-width: 100% !important;\n  }\n}`);
+    blocks.push(`@container (max-width: 600px) {\n  [data-rv-plan-slot] {\n    grid-column: 1 / -1 !important;\n    flex: 0 0 100% !important;\n    max-width: 100% !important;\n  }\n}`);
   }
 
   // k. Per-node CSS (fluid text + overflow safety) for ALL nodes — placed handles
-  //    get their text sizing on the original [data-wm-c] element (the proxy is
+  //    get their text sizing on the original [data-rv-c] element (the proxy is
   //    structural; the semantic text node carries the font-size token).
   for (const [handle, decls] of perNodeDecls) {
-    const el = document.querySelector<HTMLElement>(`[data-wm-c="${handle}"]`);
+    const el = document.querySelector<HTMLElement>(`[data-rv-c="${handle}"]`);
     if (!el) continue;
     const sel = buildSelector(el);
     let cssSelector: string;
     if (sel && selectorIsUnique(sel, el)) {
       cssSelector = sel;
     } else {
-      cssSelector = `[data-wm-c="${handle}"]`;
+      cssSelector = `[data-rv-c="${handle}"]`;
       selectorFallbackPerNode++;
     }
     blocks.push(`${cssSelector} {\n${decls.map((d) => `  ${d};`).join('\n')}\n}`);
@@ -850,8 +850,8 @@ function isSemanticText(role: string): boolean {
 
 /** Map a role to a fluid clamp() token. page-title → step-2 (display), body → step-0. */
 function fontSizeToken(role: string): string | null {
-  if (role === 'page-title') return 'var(--wm-step-2)';
+  if (role === 'page-title') return 'var(--rv-step-2)';
   if (role === 'article-body' || role === 'metadata' || role === 'listing' ||
-    role === 'comments' || role === 'toc') return 'var(--wm-step-0)';
+    role === 'comments' || role === 'toc') return 'var(--rv-step-0)';
   return null;
 }

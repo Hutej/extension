@@ -2,7 +2,7 @@
 <html>
   <head>
     <meta charset="UTF-8" />
-    <title>WebMorph</title>
+    <title>Revueon</title>
     <style>
       :root { --bg: #0f1117; --surface: #1a1d27; --border: #2a2d3a; --text: #e4e4e7; --muted: #71717a; --accent: #6366f1; --accent-hover: #818cf8; --ok: #22c55e; --err: #ef4444; --warn: #f59e0b; }
       * { box-sizing: border-box; margin: 0; padding: 0; }
@@ -46,7 +46,7 @@
   <body>
     <div class="header">
       <div class="dot"></div>
-      <h1>WebMorph</h1>
+      <h1>Revueon</h1>
     </div>
     <div class="body">
       <span class="settings-toggle" id="settingsToggle">⚙ Cloudflare credentials</span>
@@ -75,11 +75,11 @@
       <div class="metrics" id="metricsEl"></div>
       <div class="site-status" id="siteStatus"></div>
       <div id="disclosure" style="display:none; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-top: 10px; font-size: 11px; line-height: 1.6; color: var(--muted);">
-        <strong style="color: var(--text);">What WebMorph sends to the AI:</strong><br>
-        When you transform a page, WebMorph reads the page's structure (text content, layout, colors, fonts) and sends it to your configured AI model (Cloudflare Workers AI). Form input values, passwords, and credential-shaped strings are redacted before sending. The AI returns a redesigned style that WebMorph applies locally. No page content is stored on any server.<br><br>
+        <strong style="color: var(--text);">What Revueon sends to the AI:</strong><br>
+        When you transform a page, Revueon reads the page's structure (text content, layout, colors, fonts) and sends it to your configured AI model (Cloudflare Workers AI). Form input values, passwords, and credential-shaped strings are redacted before sending. The AI returns a redesigned style that Revueon applies locally. No page content is stored on any server.<br><br>
         <button id="disclosureOk" class="btn-sm" style="width: 100%;">I understand</button>
       </div>
-      <div id="webmorph-result" style="display:none"></div>
+      <div id="revueon-result" style="display:none"></div>
     </div>
 
     <script type="module" src="./main.ts"></script>

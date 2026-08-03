@@ -18,7 +18,7 @@ Legend: **verified** = traced to source; **UNVERIFIED** = not traced to source.
 - **Failure modes:**
   - **DEAD AUTH UI (verified):** `popup/main.ts:25` reads/writes `openai_api_key`; `background.ts:36` reads `cloudflare_account_id`/`cloudflare_api_token`. The saved key is **never read by anything** → every real user fails `invalid_key`. The "OpenAI" label and `sk-...` placeholder are stale (OpenAI disabled, `reason/index.ts:53`). Cloudflare creds only work because the test harness injects them (`background.ts:34`).
   - **`paidCalls ?? 1`** (`popup/main.ts:111`): counts *roles* not HTTP requests; a 5-retry run shows "1 call" while 5 were billed.
-  - **`webmorphRunInFlight` flag persists forever** after a tab crash (the `finally` never runs) → popup shows "⚠ A transform is in progress…" indefinitely (`popup/main.ts:148`).
+  - **`revueonRunInFlight` flag persists forever** after a tab crash (the `finally` never runs) → popup shows "⚠ A transform is in progress…" indefinitely (`popup/main.ts:148`).
   - Mixed `browser.*` and `chrome.*` APIs (`:25` vs `:91`) — works via WXT polyfill but is a maintenance trap.
   - `getTabId` from URL params can target a stale `tabId` if the popup was reopened for a different tab.
 
@@ -26,10 +26,10 @@ Legend: **verified** = traced to source; **UNVERIFIED** = not traced to source.
 
 - **Purpose:** the heart. Message handling, the run pipeline, hard-gate decisions, undo, observers, persistence, v1/v2 fork.
 - **Inputs:** `{action, intent}` messages; the live DOM.
-- **Outputs:** `TransformOutcome` (`content.ts:75`); DOM markers `data-webmorph-applied`/`data-webmorph-failed` (`:133`).
+- **Outputs:** `TransformOutcome` (`content.ts:75`); DOM markers `data-revueon-applied`/`data-revueon-failed` (`:133`).
 - **Dependencies:** almost every `core/*` module.
 - **Callers:** popup/background via `chrome.runtime.onMessage` (`:1557`).
-- **Assumptions:** the DOM is stable during a run; `data-wm-c` survives re-renders; the background SW stays alive.
+- **Assumptions:** the DOM is stable during a run; `data-rv-c` survives re-renders; the background SW stays alive.
 - **Failure modes:**
   - **Second `transform` dropped silently** (`:1559`) — no busy reply → popup hangs.
   - **Crash path zeroes telemetry** (`:1580` `.catch` returns `wallMs:0`).
@@ -55,7 +55,7 @@ Legend: **verified** = traced to source; **UNVERIFIED** = not traced to source.
 
 ## 4. `core/perceive/index.ts` (1489 lines) — DOM perception
 
-- **Purpose:** walk the live DOM, cluster boxes, stamp `data-wm-c`, derive identity handles, role-classify, serialize. The single source of structural identity.
+- **Purpose:** walk the live DOM, cluster boxes, stamp `data-rv-c`, derive identity handles, role-classify, serialize. The single source of structural identity.
 - **Inputs:** none (reads `document`).
 - **Outputs:** `Perception` (clusters, skeleton, canvas, cssVars, composition, shadowRoots).
 - **Dependencies:** `core/laws`, `core/design/packs`, `shared/color`, `./semantic`.
@@ -69,7 +69,7 @@ Legend: **verified** = traced to source; **UNVERIFIED** = not traced to source.
   - **Layout thrashing:** `getBoundingClientRect`+`getComputedStyle` per element; representative re-resolved 3× per cluster; `resolveVarMap` (`:1071`) does a forced reflow per exotic-color var (oklch/Tailwind v4 = dozens).
   - **Mutation race:** a re-render between `walk` and enrichment leaves detached refs → `getComputedStyle`/`getBoundingClientRect` return zeros silently, no try/catch.
   - **`directTextLength`** (`:1459`) counts only text-node children → a `<div><span>text</span></div>` has length 0 → may be invisible to clustering.
-  - **`clearHandles`** (`:1115`) can't remove stamps from shadow trees → stale `data-wm-c` leaks across runs inside shadow roots.
+  - **`clearHandles`** (`:1115`) can't remove stamps from shadow trees → stale `data-rv-c` leaks across runs inside shadow roots.
 
 ## 5. `core/perceive/semantic.ts` (391 lines) — Role classifier
 
@@ -129,7 +129,7 @@ Legend: **verified** = traced to source; **UNVERIFIED** = not traced to source.
 - **Dependencies:** `./ir.ts`, `./assign.ts`, `./languages/documentation.ts`. **Callers:** `solve` ← `content.ts:550`; `computeGridPlacementCss` ← `content.ts:551`.
 - **Assumptions:** CSS-only is safe; selectors are stable; DOM order is correct.
 - **Failure modes:**
-  - **"Zero DOM mutation" is false (verified):** 4 `setAttribute('data-wm-grid',…)` (`:491,:511,:529,:547`) → attribute-observing frameworks (Vue/lit/Svelte) may reconcile them → grid breaks.
+  - **"Zero DOM mutation" is false (verified):** 4 `setAttribute('data-rv-grid',…)` (`:491,:511,:529,:547`) → attribute-observing frameworks (Vue/lit/Svelte) may reconcile them → grid breaks.
   - **`mergeConstraints` validation is theater:** `impossibleNodes` computed but never read by `computeGridPlacementCss` → impossible constraints placed silently.
   - **`display:contents` content-loss** (`:515`): absolute children lose containing block; `<button>`/`<a>` lose click target; `overflow:hidden` clipping lost.
   - **`buildSelector` duplicates `structuralPath`** (`:241-286` vs `perceive:407-451`) with a different joiner → divergence → wrong element targeted.

@@ -7,28 +7,28 @@
 
 ### React
 - **VERIFIED** — `isJsControlledLayout` over-excludes (`exclusions.ts:116`): regex `/(?:width|height|transform)\s*:\s*\d/` matches `width:100%` → any `style={{width:'100%'}}` excluded from relayout.
-- **VERIFIED** — CSS keyed on `data-wm-c` (`perceive:503`) → React re-render drops the attribute → CSS stops matching until the MutationObserver re-stamps. Guaranteed FOUC.
+- **VERIFIED** — CSS keyed on `data-rv-c` (`perceive:503`) → React re-render drops the attribute → CSS stops matching until the MutationObserver re-stamps. Guaranteed FOUC.
 - **INFERRED** — v1 DOM reparenting (`executeOps`) breaks React controlled-component state (the roadmap's S6.3 blocker: moving nodes triggers React reconciliation → content removal).
 - **INFERRED** — styled-components/emotion hashed class names (`sc-1a2b3c`) → `classTokens` (`perceive:722`) has no semantic tokens → classifier falls to geometry → unstable.
 
 ### Vue
-- **VERIFIED** — `setAttribute('data-wm-grid',…)` (`solve:491,511,529,547`): Vue may reconcile attributes it didn't author → overwrites `data-wm-grid` → CSS selector stops matching → grid breaks.
+- **VERIFIED** — `setAttribute('data-rv-grid',…)` (`solve:491,511,529,547`): Vue may reconcile attributes it didn't author → overwrites `data-rv-grid` → CSS selector stops matching → grid breaks.
 - **INFERRED** — `v-bind` class objects produce dynamic classes → `classTokens` churns per render.
 
 ### Angular
-- **INFERRED** — attribute binding may overwrite `data-wm-grid`; content projection templates can exceed `MAX_DEPTH=30` (`perceive:241`).
+- **INFERRED** — attribute binding may overwrite `data-rv-grid`; content projection templates can exceed `MAX_DEPTH=30` (`perceive:241`).
 
 ### Next.js
-- **INFERRED** — App Router Server Components + hydration: `data-wm-c` dropped during hydration → FOUC; RSC streaming may exceed the 6s perception cap.
+- **INFERRED** — App Router Server Components + hydration: `data-rv-c` dropped during hydration → FOUC; RSC streaming may exceed the 6s perception cap.
 
 ### Nuxt / Remix / Astro / Solid / Svelte
-- **INFERRED** — all SPA-style re-render drops `data-wm-c`/`data-wm-grid`; Solid's fine-grained updates and Svelte's class directives churn `classTokens`. Svelte may reconcile `data-wm-grid`.
+- **INFERRED** — all SPA-style re-render drops `data-rv-c`/`data-rv-grid`; Solid's fine-grained updates and Svelte's class directives churn `classTokens`. Svelte may reconcile `data-rv-grid`.
 
 ## Shadow DOM
 
 ### Open shadow DOM
 - **VERIFIED** — stamped (`perceive:253`) but unresolvable (`representativeFor:692` light-tree `document.querySelector`) → `ad-or-void` (`:819`). All web-component sites affected.
-- **VERIFIED** — `clearHandles` (`perceive:1115`) uses `document.querySelectorAll` → can't clear shadow stamps → stale `data-wm-c` leaks across runs.
+- **VERIFIED** — `clearHandles` (`perceive:1115`) uses `document.querySelectorAll` → can't clear shadow stamps → stale `data-rv-c` leaks across runs.
 
 ### Nested shadow DOM
 - **VERIFIED** — same gap; each level stamps but read-back is flat-tree.
@@ -66,7 +66,7 @@
 - **INFERRED** — canvas excluded (`exclusions` canvas/media tag), but dense UI around it hits MAX_DEPTH/MAX_TIME; `isMap`-style heuristics misfire on the canvas wheel handlers (`onwheel` may be set via addEventListener → missed).
 
 ### GitHub
-- **VERIFIED (documented)** — Turbo morph re-renders content (`product.md` S6.3): `data-wm-c` stamps on recycled nodes → `txnLog` inverses reference recycled nodes → undo replays against wrong nodes → `insertBefore` `NotFoundError` (RC6).
+- **VERIFIED (documented)** — Turbo morph re-renders content (`product.md` S6.3): `data-rv-c` stamps on recycled nodes → `txnLog` inverses reference recycled nodes → undo replays against wrong nodes → `insertBefore` `NotFoundError` (RC6).
 
 ### Google Docs
 - **INFERRED** — `contenteditable` excluded; the dense surrounding UI hits the 6s cap → partial.
@@ -81,7 +81,7 @@
 - **VERIFIED (roadmap)** — the v2 pipeline's by-eye gate sites. MDN applies intermittently (Painter timeout 90s historically); Wikipedia + GitHub overflow/collapse on the shell grid (Steps 4-8). These are the architecture-validation sites, not stress sites.
 
 ### Twitter/X, Facebook, LinkedIn
-- **INFERRED** — dense SPAs with heavy virtualization and re-render → `data-wm-c` churn + virtualization missed.
+- **INFERRED** — dense SPAs with heavy virtualization and re-render → `data-rv-c` churn + virtualization missed.
 
 ## Browser features
 
@@ -115,8 +115,8 @@
 | Reddit (infinite scroll) | ❌ scroll breaks | virtualization missed |
 | Maps (Leaflet/MapLibre) | ❌ pan/zoom break | `isMap` misses addEventListener |
 | Carousels (`overflow:clip`) | ❌ relayouted | `isCarousel` misses clip |
-| React SPAs | ⚠ FOUC + over-exclusion | `data-wm-c` churn + `width:100%` excluded |
-| Vue/Svelte | ⚠ grid breaks | `data-wm-grid` reconciled |
+| React SPAs | ⚠ FOUC + over-exclusion | `data-rv-c` churn + `width:100%` excluded |
+| Vue/Svelte | ⚠ grid breaks | `data-rv-grid` reconciled |
 | RTL pages | ⚠ inverted rails | physical coordinates |
 | High-DPI | ⚠ false invisible-text | DPI not normalized |
 | Zoom | ⚠ zoom-hostile type | raw px fontSize/padding |

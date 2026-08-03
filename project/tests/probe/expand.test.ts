@@ -22,7 +22,7 @@ import type { DesignRole } from '../../src/core/perceive/semantic.ts';
 // A minimal Cluster factory (only the fields the engine reads).
 function cl(handle: string, role: DesignRole, conf: number, opts: Partial<Cluster> = {}): Cluster {
   return {
-    handle, selector: `[data-wm-c="${handle}"]`, count: 1, tag: 'div', role: null,
+    handle, selector: `[data-rv-c="${handle}"]`, count: 1, tag: 'div', role: null,
     isNativeControl: false, isCheckboxRadio: false, hasSolidBg: false,
     rect: { x: 0, y: 0, w: 800, h: 200, vx: 0, vy: 0, aboveFold: true }, samples: [], style: { background: '', color: '', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0', display: 'block', hasBgImage: false },
     layout: { display: 'block', flow: 'column', widthRatio: 0.6, isContainer: false, ownedByFlexGrid: false, constraintOwnerHandle: null, parentHandle: null, isPassiveWrapper: false, isOpaqueWrapper: false, depth: 1, position: 'static', flexWrap: false, alignment: 'start', widthSizing: 'auto', centered: false },
@@ -80,13 +80,13 @@ assert(e5.escapeHatchUses.includes('c777777'), 'a raw rule on a relation-targete
 
 // 5) conformance: on-pack CSS passes; an off-scale spacing value violates.
 const spec: DesignSpec = { reasoning: '', pack: 'minimal-editorial', relations: [{ relation: 'typeRank', subject: 'listing', rank: 0 }], rules: [] };
-const onPackCss = '[data-wm-c="c111111"] {\n  padding: 16px !important;\n  font-size: 48px !important;\n  background: #fafaf7 !important;\n}\n';
+const onPackCss = '[data-rv-c="c111111"] {\n  padding: 16px !important;\n  font-size: 48px !important;\n  background: #fafaf7 !important;\n}\n';
 const cOk = checkConformance(onPackCss, spec, [], 1);
 assert(cOk.ok, `on-pack CSS conforms (violations: ${cOk.violations.join('; ')})`);
 
 // 20px is between scale steps 16 and 24 (>2px tolerance) → off-scale.
 // 41px is off the ramp [48,32,17,13] → off-ramp.
-const offScaleCss = '[data-wm-c="c111111"] {\n  padding: 20px !important;\n  font-size: 41px !important;\n}\n';
+const offScaleCss = '[data-rv-c="c111111"] {\n  padding: 20px !important;\n  font-size: 41px !important;\n}\n';
 const cBad = checkConformance(offScaleCss, spec, [], 1);
 assert(!cBad.ok, 'off-scale spacing + off-ramp type → conformance fails');
 assert(cBad.violations.some((v) => v.includes('spacing off-scale')), 'an off-scale spacing violation is reported verbatim');

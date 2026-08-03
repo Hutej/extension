@@ -24,7 +24,7 @@ function layout(over: Partial<ClusterLayout> = {}): ClusterLayout {
 
 function cluster(over: Partial<Cluster>): Cluster {
   return {
-    handle: 'c000000', selector: '[data-wm-c="c000000"]', count: 1, tag: 'div', role: null,
+    handle: 'c000000', selector: '[data-rv-c="c000000"]', count: 1, tag: 'div', role: null,
     isNativeControl: false, isCheckboxRadio: false, hasSolidBg: true, rect: { x: 0, y: 0, w: 100, h: 100, vx: 0, vy: 0, aboveFold: true },
     samples: [], prominence: 1, layout: layout(), widthFractionOfParent: 1,
     emptinessScore: 0, moveSafety: 'safe', sourceOrder: 0,
@@ -63,8 +63,8 @@ function perception(clusters: Cluster[], canvasBg = 'rgb(255,255,255)', regions:
 // ─────────────────────────────── paint (existing guarantees) ───────────────────────────────
 {
   const p = perception([
-    cluster({ handle: 'ccard1', selector: '[data-wm-c="ccard1"]', role: 'article' }),
-    cluster({ handle: 'cbtn01', selector: '[data-wm-c="cbtn01"]', tag: 'button', role: 'button', isNativeControl: true }),
+    cluster({ handle: 'ccard1', selector: '[data-rv-c="ccard1"]', role: 'article' }),
+    cluster({ handle: 'cbtn01', selector: '[data-rv-c="cbtn01"]', tag: 'button', role: 'button', isNativeControl: true }),
   ]);
   const spec: DesignSpec = {
     reasoning: 'test',
@@ -90,7 +90,7 @@ function perception(clusters: Cluster[], canvasBg = 'rgb(255,255,255)', regions:
 
 // ─────────────────────────────── layout (new guarantees) ───────────────────────────────
 {
-  const p = perception([cluster({ handle: 'cmain0', selector: '[data-wm-c="cmain0"]', role: 'main', layout: layout({ isContainer: true }) })]);
+  const p = perception([cluster({ handle: 'cmain0', selector: '[data-rv-c="cmain0"]', role: 'main', layout: layout({ isContainer: true }) })]);
 
   // allowlist: mapped props kept, unknown dropped. The fixed-px maxWidth is
   // converted to a zoom-proof percentage by the geometry law (full-width child
@@ -132,14 +132,14 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
 // ─────────────────────────────── repair: forceContrast ───────────────────────────────
 {
-  const p = perception([cluster({ handle: 'ccard1', selector: '[data-wm-c="ccard1"]' })]);
+  const p = perception([cluster({ handle: 'ccard1', selector: '[data-rv-c="ccard1"]' })]);
   const dark = compileSpec({ reasoning: '', rules: [{ target: 'ccard1', styles: { background: '#111111', color: '#000000' } }] }, p, { forceContrast: true });
   assert.ok(dark.css.includes('color: #f5f5f5'), 'repair: forceContrast lifts text on dark bg');
 }
 
 // ─────────────────────────────── opaque-wrapper neutralization ───────────────────────────────
 {
-  const wrapper = cluster({ handle: 'cwrap0', selector: '[data-wm-c="cwrap0"]', hasSolidBg: true, layout: layout({ isOpaqueWrapper: true }) });
+  const wrapper = cluster({ handle: 'cwrap0', selector: '[data-rv-c="cwrap0"]', hasSolidBg: true, layout: layout({ isOpaqueWrapper: true }) });
   const p = perception([wrapper]);
   p.opaqueWrappers = new Set(['cwrap0']);
   const r = compileSpec({ reasoning: '', canvas: { background: 'linear-gradient(135deg,#3a1c71,#d76d77)', color: '#fff' }, rules: [] }, p);
@@ -178,7 +178,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 // Compiler: a safe hide emits display:none on the correct selector
 {
   const sidebar = cluster({
-    handle: 'cside0', selector: '[data-wm-c="cside0"]',
+    handle: 'cside0', selector: '[data-rv-c="cside0"]',
     tag: 'aside', role: 'complementary',
     rect: { x: 0, y: 0, w: 200, h: 300, vx: 0, vy: 0, aboveFold: true },                // small — not page-scale
     layout: layout({ widthRatio: 0.15, isPassiveWrapper: false, isOpaqueWrapper: false }),
@@ -186,13 +186,13 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   const p = perception([sidebar]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cside0', hide: true }] }, p);
   assert.ok(r.css.includes('display: none'), 'hide: safe cluster emits display:none');
-  assert.ok(r.css.includes('[data-wm-c="cside0"]'), 'hide: correct selector used');
-  assert.ok(!r.css.includes('display: none !important;\n}\n\n[data-wm-c="cside0"] {'), 'hide: not duplicated in style block');
+  assert.ok(r.css.includes('[data-rv-c="cside0"]'), 'hide: correct selector used');
+  assert.ok(!r.css.includes('display: none !important;\n}\n\n[data-rv-c="cside0"] {'), 'hide: not duplicated in style block');
 }
 
 // Compiler: refuses hide on a main/article (primary content)
 {
-  const main = cluster({ handle: 'cmain1', selector: '[data-wm-c="cmain1"]', role: 'main', rect: { x: 0, y: 0, w: 800, h: 600, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.65 }) });
+  const main = cluster({ handle: 'cmain1', selector: '[data-rv-c="cmain1"]', role: 'main', rect: { x: 0, y: 0, w: 800, h: 600, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.65 }) });
   const p = perception([main]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cmain1', hide: true }] }, p);
   assert.ok(!/display\s*:\s*none/.test(r.css), 'hide: primary content (main) refused');
@@ -202,7 +202,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 // Compiler: refuses hide on a page-scale container (wide + tall)
 {
   const bigWrapper = cluster({
-    handle: 'cwide1', selector: '[data-wm-c="cwide1"]',
+    handle: 'cwide1', selector: '[data-rv-c="cwide1"]',
     rect: { x: 0, y: 0, w: 1200, h: 600, vx: 0, vy: 0, aboveFold: true },               // tall + very wide
     layout: layout({ widthRatio: 0.93, isPassiveWrapper: false }),
   });
@@ -214,7 +214,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
 // Compiler: refuses hide on a huge repeated cluster (>40 members — likely content)
 {
-  const manyLinks = cluster({ handle: 'clinks', selector: '[data-wm-c="clinks"]', count: 50, tag: 'a', role: 'link', layout: layout({ widthRatio: 0.1 }) });
+  const manyLinks = cluster({ handle: 'clinks', selector: '[data-rv-c="clinks"]', count: 50, tag: 'a', role: 'link', layout: layout({ widthRatio: 0.1 }) });
   const p = perception([manyLinks]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'clinks', hide: true }] }, p);
   assert.ok(!/display\s*:\s*none/.test(r.css), 'hide: large repeated cluster refused');
@@ -223,7 +223,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
 // Compiler: dropHides option strips all hide rules (used by repair when content blanked)
 {
-  const sidebar = cluster({ handle: 'csd2', selector: '[data-wm-c="csd2"]', role: 'complementary', rect: { x: 0, y: 0, w: 200, h: 300, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.15 }) });
+  const sidebar = cluster({ handle: 'csd2', selector: '[data-rv-c="csd2"]', role: 'complementary', rect: { x: 0, y: 0, w: 200, h: 300, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.15 }) });
   const p = perception([sidebar]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'csd2', hide: true }] }, p, { dropHides: true });
   assert.ok(!/display\s*:\s*none/.test(r.css), 'dropHides: suppresses all hide rules');
@@ -232,7 +232,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 // Compiler: hide and style/layout rules are mutually exclusive on the same target
 // (the hide path skips paint/layout — "hidden — paint/layout on this rule is moot")
 {
-  const sidebar = cluster({ handle: 'csd3', selector: '[data-wm-c="csd3"]', role: 'complementary', rect: { x: 0, y: 0, w: 200, h: 300, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.15 }) });
+  const sidebar = cluster({ handle: 'csd3', selector: '[data-rv-c="csd3"]', role: 'complementary', rect: { x: 0, y: 0, w: 200, h: 300, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.15 }) });
   const p = perception([sidebar]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'csd3', hide: true, styles: { background: '#ff0000' } }] }, p);
   // background should NOT appear — hide is accepted, style block is skipped
@@ -248,7 +248,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   // Canvas sets a text color but NO background; the real page backdrop is dark.
   // Without forceContrast the authored (dark) color ships; with it, the emitted
   // CSS must differ and enforce a readable color for inheriting text.
-  const p = perception([cluster({ handle: 'cbody0', selector: '[data-wm-c="cbody0"]' })], 'rgb(17,17,17)');
+  const p = perception([cluster({ handle: 'cbody0', selector: '[data-rv-c="cbody0"]' })], 'rgb(17,17,17)');
   const specDarkText: DesignSpec = { reasoning: '', canvas: { color: '#222222' }, rules: [] };
   const plain = compileSpec(specDarkText, p);
   const forced = compileSpec(specDarkText, p, { forceContrast: true });
@@ -259,7 +259,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   // A rule that sets a text color but NO background gets its color made readable too.
   const specRuleText: DesignSpec = { reasoning: '', canvas: { background: '#111111' }, rules: [{ target: 'cbody0', styles: { color: '#333333' } }] };
   const forcedRule = compileSpec(specRuleText, p, { forceContrast: true });
-  assert.ok(forcedRule.css.includes('[data-wm-c="cbody0"]') && /\[data-wm-c="cbody0"\] \{[^}]*color: #f5f5f5/.test(forcedRule.css), 'forceContrast: bg-less rule text color made readable against canvas');
+  assert.ok(forcedRule.css.includes('[data-rv-c="cbody0"]') && /\[data-rv-c="cbody0"\] \{[^}]*color: #f5f5f5/.test(forcedRule.css), 'forceContrast: bg-less rule text color made readable against canvas');
 }
 
 // ─────────────────────────────── accent-trim (over-accent repair) ───────────────────────────────
@@ -270,8 +270,8 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 {
   // A prominent single hero band (deliberate accent) + a huge repeated list whose
   // rows each paint the same red (the failure). Areas: hero 1200x120; rows 900x40 x 30.
-  const hero = cluster({ handle: 'chero', selector: '[data-wm-c="chero"]', count: 1, rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, prominence: 5, layout: layout({ widthRatio: 0.94 }) });
-  const rows = cluster({ handle: 'crows', selector: '[data-wm-c="crows"]', count: 30, rect: { x: 0, y: 0, w: 900, h: 40, vx: 0, vy: 0, aboveFold: true }, prominence: 3, layout: layout({ widthRatio: 0.7 }) });
+  const hero = cluster({ handle: 'chero', selector: '[data-rv-c="chero"]', count: 1, rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, prominence: 5, layout: layout({ widthRatio: 0.94 }) });
+  const rows = cluster({ handle: 'crows', selector: '[data-rv-c="crows"]', count: 30, rect: { x: 0, y: 0, w: 900, h: 40, vx: 0, vy: 0, aboveFold: true }, prominence: 3, layout: layout({ widthRatio: 0.7 }) });
   const p = perception([hero, rows]);
   const spec: DesignSpec = {
     reasoning: '',
@@ -281,14 +281,14 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
     ],
   };
   const plain = compileSpec(spec, p);
-  assert.ok(plain.css.includes('[data-wm-c="crows"]') && /\[data-wm-c="crows"\] \{[^}]*background/.test(plain.css), 'without trim: repeated rows keep their accent bg');
+  assert.ok(plain.css.includes('[data-rv-c="crows"]') && /\[data-rv-c="crows"\] \{[^}]*background/.test(plain.css), 'without trim: repeated rows keep their accent bg');
 
   const trimmed = compileSpec(spec, p, { trimAccent: true });
   // Rows (repeated, huge total area) lose the accent bg + coupled color…
-  assert.ok(!/\[data-wm-c="crows"\] \{[^}]*background/.test(trimmed.css), 'trimAccent: repeated rows stripped of accent bg');
+  assert.ok(!/\[data-rv-c="crows"\] \{[^}]*background/.test(trimmed.css), 'trimAccent: repeated rows stripped of accent bg');
   assert.ok(trimmed.droppedProps.some((d) => d === 'trimAccent(crows)'), 'trimAccent: strip logged for repeated cluster');
   // …while the prominent single hero band keeps its accent.
-  assert.ok(/\[data-wm-c="chero"\] \{[^}]*background: #e10000/.test(trimmed.css), 'trimAccent: prominent single hero band keeps its accent');
+  assert.ok(/\[data-rv-c="chero"\] \{[^}]*background: #e10000/.test(trimmed.css), 'trimAccent: prominent single hero band keeps its accent');
   assert.ok(!trimmed.droppedProps.includes('trimAccent(chero)'), 'trimAccent: hero not stripped');
 }
 
@@ -299,7 +299,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 // freezes the px as the ceiling and changes proportion under zoom). A cluster
 // with widthFractionOfParent=1 on a 1280 viewport: 2000px → 156% → capped 100%.
 {
-  const p = perception([cluster({ handle: 'cvp0', selector: '[data-wm-c="cvp0"]', layout: layout({ isContainer: true }) })]);
+  const p = perception([cluster({ handle: 'cvp0', selector: '[data-rv-c="cvp0"]', layout: layout({ isContainer: true }) })]);
 
   let r = compileSpec({ reasoning: '', rules: [{ target: 'cvp0', layout: { width: '2000px' } }] }, p);
   assert.ok(/width: 100% !important/.test(r.css), 'viewport-safe: fixed px width -> zoom-proof % (capped, no frozen px)');
@@ -321,8 +321,8 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 // in BOTH the layout and styles bags — so oversized type can't bleed out of a
 // narrow card, however the model set it.
 {
-  const narrow = cluster({ handle: 'cnar', selector: '[data-wm-c="cnar"]', rect: { x: 0, y: 0, w: 200, h: 80, vx: 0, vy: 0, aboveFold: true } });
-  const wide = cluster({ handle: 'cwid', selector: '[data-wm-c="cwid"]', rect: { x: 0, y: 0, w: 1000, h: 80, vx: 0, vy: 0, aboveFold: true } });
+  const narrow = cluster({ handle: 'cnar', selector: '[data-rv-c="cnar"]', rect: { x: 0, y: 0, w: 200, h: 80, vx: 0, vy: 0, aboveFold: true } });
+  const wide = cluster({ handle: 'cwid', selector: '[data-rv-c="cwid"]', rect: { x: 0, y: 0, w: 1000, h: 80, vx: 0, vy: 0, aboveFold: true } });
   const p = perception([narrow, wide]);
 
   // 4rem (64px) on a 200px block -> clamped to fit its container (ceil 200*0.15=30px).
@@ -346,13 +346,13 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 {
   // Brief's case: a rule paints a dark bg with dark text; forceContrast + the
   // flagged handle must emit readable (light) text on that handle.
-  const dark = cluster({ handle: 'cdark', selector: '[data-wm-c="cdark"]' });
+  const dark = cluster({ handle: 'cdark', selector: '[data-rv-c="cdark"]' });
   const r = compileSpec(
     { reasoning: '', rules: [{ target: 'cdark', styles: { background: '#111111', color: '#000000' } }] },
     perception([dark]),
     { forceContrast: true, contrastTargets: ['cdark'] },
   );
-  assert.ok(/\[data-wm-c="cdark"\] \{\s*color: #f5f5f5 !important;\s*\}/.test(r.css), 'Fix2: targeted block forces light text on a flagged dark-bg handle');
+  assert.ok(/\[data-rv-c="cdark"\] \{\s*color: #f5f5f5 !important;\s*\}/.test(r.css), 'Fix2: targeted block forces light text on a flagged dark-bg handle');
   assert.ok(!r.css.includes('color: #000000'), 'Fix2: the dark authored text color is overridden');
 
   // Stronger case that ONLY the targeted path can fix: the handle has a dark
@@ -360,7 +360,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   // rule-level floor (white canvas -> dark text) would leave it dark-on-dark;
   // the targeted path reads the handle's OWN painted bg and forces light text.
   const origDark = cluster({
-    handle: 'corig', selector: '[data-wm-c="corig"]',
+    handle: 'corig', selector: '[data-rv-c="corig"]',
     style: { background: 'rgb(17,17,17)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: false },
   });
   const r2 = compileSpec(
@@ -368,15 +368,15 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
     perception([origDark]), // canvas bg defaults to white
     { forceContrast: true, contrastTargets: ['corig'] },
   );
-  assert.ok(/\[data-wm-c="corig"\] \{\s*color: #f5f5f5 !important;\s*\}/.test(r2.css), 'Fix2: targeted contrast uses the handle ORIGINAL dark bg to pick light text');
+  assert.ok(/\[data-rv-c="corig"\] \{\s*color: #f5f5f5 !important;\s*\}/.test(r2.css), 'Fix2: targeted contrast uses the handle ORIGINAL dark bg to pick light text');
 }
 
 // ─────────────────────────────── targeted overflow repair (Task 3) ───────────────────────────────
 // clampTargets strips growth-sizing on ONLY the offending clusters; every other
 // cluster's layout survives intact (vs the blanket dropLayout recolor collapse).
 {
-  const offender = cluster({ handle: 'cbad', selector: '[data-wm-c="cbad"]', layout: layout({ isContainer: true }) });
-  const innocent = cluster({ handle: 'cgood', selector: '[data-wm-c="cgood"]', layout: layout({ isContainer: true }) });
+  const offender = cluster({ handle: 'cbad', selector: '[data-rv-c="cbad"]', layout: layout({ isContainer: true }) });
+  const innocent = cluster({ handle: 'cgood', selector: '[data-rv-c="cgood"]', layout: layout({ isContainer: true }) });
   const p = perception([offender, innocent]);
   const spec: DesignSpec = {
     reasoning: '',
@@ -387,15 +387,15 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   };
   const r = compileSpec(spec, p, { clampTargets: ['cbad'] });
   // Offender: growth-sizing (grid-template-columns) stripped; its non-growth gap survives.
-  const badBlock = r.css.slice(r.css.indexOf('[data-wm-c="cbad"]'), r.css.indexOf('[data-wm-c="cbad"]') + 200);
+  const badBlock = r.css.slice(r.css.indexOf('[data-rv-c="cbad"]'), r.css.indexOf('[data-rv-c="cbad"]') + 200);
   assert.ok(!badBlock.includes('grid-template-columns'), 'targeted: offender grid-template-columns stripped');
   assert.ok(r.droppedProps.some((d) => d === 'gridTemplateColumns(dropSizing)'), 'targeted: offender strip logged');
   // Innocent cluster: full layout intact. The fixed-px maxWidth is converted to a
   // zoom-proof percentage by the geometry law (a full-width child floored at the
   // room law: 0.92 × 1.0 = 92%), NOT stripped by the clamp — the gap + display survive.
-  assert.ok(/\[data-wm-c="cgood"\] \{[^}]*max-width: 92%/.test(r.css), 'targeted: innocent cluster max-width converted to zoom-proof % (room-floored), not stripped');
-  assert.ok(/\[data-wm-c="cgood"\] \{[^}]*gap: 20px/.test(r.css), 'targeted: innocent cluster gap intact');
-  assert.ok(/\[data-wm-c="cgood"\] \{[^}]*display: grid/.test(r.css), 'targeted: innocent cluster display intact');
+  assert.ok(/\[data-rv-c="cgood"\] \{[^}]*max-width: 92%/.test(r.css), 'targeted: innocent cluster max-width converted to zoom-proof % (room-floored), not stripped');
+  assert.ok(/\[data-rv-c="cgood"\] \{[^}]*gap: 20px/.test(r.css), 'targeted: innocent cluster gap intact');
+  assert.ok(/\[data-rv-c="cgood"\] \{[^}]*display: grid/.test(r.css), 'targeted: innocent cluster display intact');
 }
 
 // ─────────────────────────────── Mech 1: completeness contract ───────────────────────────────
@@ -460,13 +460,13 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 // (b) Targeted repair: wordBreakTargets emits overflow-wrap:break-word on the bleeding cluster.
 {
   // Prevention REMOVED: text-bearing cluster narrowed -> NO overflow-wrap emitted
-  const textCluster = cluster({ handle: 'ctxt', selector: '[data-wm-c="ctxt"]', samples: ['some text content'] });
+  const textCluster = cluster({ handle: 'ctxt', selector: '[data-rv-c="ctxt"]', samples: ['some text content'] });
   const pText = perception([textCluster]);
   const rNarrow = compileSpec({ reasoning: '', rules: [{ target: 'ctxt', layout: { maxWidth: '300px' } }] }, pText);
   assert.ok(!rNarrow.css.includes('overflow-wrap'), 'word-break: narrowing a text container does NOT emit overflow-wrap (prevention removed — it was destroying prose)');
 
   // Non-text cluster narrowed -> also NO overflow-wrap
-  const imgCluster = cluster({ handle: 'cimg', selector: '[data-wm-c="cimg"]', samples: [], tag: 'img', role: 'img' });
+  const imgCluster = cluster({ handle: 'cimg', selector: '[data-rv-c="cimg"]', samples: [], tag: 'img', role: 'img' });
   const pImg = perception([imgCluster]);
   const rImg = compileSpec({ reasoning: '', rules: [{ target: 'cimg', layout: { maxWidth: '300px' } }] }, pImg);
   assert.ok(!rImg.css.includes('overflow-wrap'), 'word-break: non-text container also gets no preventive overflow-wrap');
@@ -488,8 +488,8 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 // trimAccent in vivid mode strips repeated accents (absolute law) but keeps all
 // non-repeated accents (no area budget). Restrained mode keeps the area budget.
 {
-  const hero = cluster({ handle: 'chero', selector: '[data-wm-c="chero"]', count: 1, rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, prominence: 5, layout: layout({ widthRatio: 0.94 }) });
-  const rows = cluster({ handle: 'crows', selector: '[data-wm-c="crows"]', count: 30, rect: { x: 0, y: 0, w: 900, h: 40, vx: 0, vy: 0, aboveFold: true }, prominence: 3, layout: layout({ widthRatio: 0.7 }) });
+  const hero = cluster({ handle: 'chero', selector: '[data-rv-c="chero"]', count: 1, rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, prominence: 5, layout: layout({ widthRatio: 0.94 }) });
+  const rows = cluster({ handle: 'crows', selector: '[data-rv-c="crows"]', count: 30, rect: { x: 0, y: 0, w: 900, h: 40, vx: 0, vy: 0, aboveFold: true }, prominence: 3, layout: layout({ widthRatio: 0.7 }) });
   const p = perception([hero, rows]);
   const spec: DesignSpec = {
     reasoning: '', paletteMode: 'vivid',
@@ -501,9 +501,9 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
   // Vivid + trimAccent: repeated rows stripped (absolute law), hero kept (no area budget)
   const trimmed = compileSpec(spec, p, { trimAccent: true, paletteMode: 'vivid' });
-  assert.ok(!/\[data-wm-c="crows"\] \{[^}]*background/.test(trimmed.css), 'vivid: repeated accent stripped (absolute law)');
+  assert.ok(!/\[data-rv-c="crows"\] \{[^}]*background/.test(trimmed.css), 'vivid: repeated accent stripped (absolute law)');
   assert.ok(trimmed.droppedProps.some((d) => d === 'trimAccent(crows)'), 'vivid: repeated strip logged');
-  assert.ok(/\[data-wm-c="chero"\] \{[^}]*background: #e10000/.test(trimmed.css), 'vivid: single hero accent kept (no area budget)');
+  assert.ok(/\[data-rv-c="chero"\] \{[^}]*background: #e10000/.test(trimmed.css), 'vivid: single hero accent kept (no area budget)');
 
   // Restrained (default) + trimAccent: repeated stripped + area budget enforced
   const specRestraint: DesignSpec = { reasoning: '', rules: [
@@ -511,8 +511,8 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
     { target: 'crows', styles: { background: '#e10000', color: '#fff' } },
   ] };
   const trimmedR = compileSpec(specRestraint, p, { trimAccent: true });
-  assert.ok(!/\[data-wm-c="crows"\] \{[^}]*background/.test(trimmedR.css), 'restrained: repeated accent stripped (absolute law)');
-  assert.ok(/\[data-wm-c="chero"\] \{[^}]*background: #e10000/.test(trimmedR.css), 'restrained: hero kept (under area budget)');
+  assert.ok(!/\[data-rv-c="crows"\] \{[^}]*background/.test(trimmedR.css), 'restrained: repeated accent stripped (absolute law)');
+  assert.ok(/\[data-rv-c="chero"\] \{[^}]*background: #e10000/.test(trimmedR.css), 'restrained: hero kept (under area budget)');
 }
 
 // ─────────────────────────────── Fix 3: columnCount clamp (pure) ───────────────────────────────
@@ -552,7 +552,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
 // ─────────────────────────────── Fix 3: columnCount clamp in compiler ───────────────────────────────
 {
-  const narrow = cluster({ handle: 'cnar', selector: '[data-wm-c="cnar"]', rect: { x: 0, y: 0, w: 150, h: 80, vx: 0, vy: 0, aboveFold: true } });
+  const narrow = cluster({ handle: 'cnar', selector: '[data-rv-c="cnar"]', rect: { x: 0, y: 0, w: 150, h: 80, vx: 0, vy: 0, aboveFold: true } });
   const p = perception([narrow]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cnar', layout: { columnCount: '2' } }] }, p);
   // 150px / 120 = 1 → clamped to 1
@@ -562,7 +562,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
 // ─────────────────────────────── Fix 3: grid normalization in compiler ───────────────────────────────
 {
-  const grid = cluster({ handle: 'cgrd', selector: '[data-wm-c="cgrd"]', rect: { x: 0, y: 0, w: 600, h: 400, vx: 0, vy: 0, aboveFold: true }, layout: layout({ isContainer: true }) });
+  const grid = cluster({ handle: 'cgrd', selector: '[data-rv-c="cgrd"]', rect: { x: 0, y: 0, w: 600, h: 400, vx: 0, vy: 0, aboveFold: true }, layout: layout({ isContainer: true }) });
   const p = perception([grid]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cgrd', layout: { gridTemplateColumns: '1fr 2fr' } }] }, p);
   assert.ok(r.css.includes('minmax(0, 1fr)'), 'compile: grid 1fr → minmax(0, 1fr)');
@@ -572,8 +572,8 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
 // ─────────────────────────────── Fix 1+2: composition rules ───────────────────────────────
 {
-  const main = cluster({ handle: 'cmain', selector: '[data-wm-c="cmain"]', role: 'main', rect: { x: 0, y: 0, w: 620, h: 2400, vx: 0, vy: 0, aboveFold: true }, layout: layout({ isContainer: true, widthRatio: 0.48 }) });
-  const sidebar = cluster({ handle: 'cside', selector: '[data-wm-c="cside"]', role: 'complementary', rect: { x: 0, y: 0, w: 300, h: 2400, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.23 }) });
+  const main = cluster({ handle: 'cmain', selector: '[data-rv-c="cmain"]', role: 'main', rect: { x: 0, y: 0, w: 620, h: 2400, vx: 0, vy: 0, aboveFold: true }, layout: layout({ isContainer: true, widthRatio: 0.48 }) });
+  const sidebar = cluster({ handle: 'cside', selector: '[data-rv-c="cside"]', role: 'complementary', rect: { x: 0, y: 0, w: 300, h: 2400, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.23 }) });
   const p = perception([main, sidebar]);
 
   // validateSpec parses composition
@@ -610,11 +610,11 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 {
   // A white-bg region NOT addressed by any rule, on a dark canvas → base-coated
   const header = cluster({
-    handle: 'chdr', selector: '[data-wm-c="chdr"]', role: 'banner',
+    handle: 'chdr', selector: '[data-rv-c="chdr"]', role: 'banner',
     rect: { x: 0, y: 0, w: 1280, h: 64, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 1.0 }),
     style: { background: 'rgb(255,255,255)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: false },
   });
-  const main = cluster({ handle: 'cmain', selector: '[data-wm-c="cmain"]', role: 'main', rect: { x: 0, y: 0, w: 800, h: 600, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.62 }) });
+  const main = cluster({ handle: 'cmain', selector: '[data-rv-c="cmain"]', role: 'main', rect: { x: 0, y: 0, w: 800, h: 600, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.62 }) });
   const p = perception([header, main], 'rgb(255,255,255)', [
     { role: 'banner', handle: 'chdr', widthRatio: 1.0, order: 0, rect: { w: 1280, h: 64 } },
     { role: 'main', handle: 'cmain', widthRatio: 0.62, order: 1, rect: { w: 800, h: 600 } },
@@ -629,13 +629,13 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   const r = compileSpec(spec, p);
   assert.ok(r.baseCoatCount >= 1, 'baseCoat: white header on dark canvas base-coated');
   // The base coat block should paint the header with a dark tone
-  const hdrBlock = r.css.slice(r.css.indexOf('[data-wm-c="chdr"]'), r.css.indexOf('[data-wm-c="chdr"]') + 200);
+  const hdrBlock = r.css.slice(r.css.indexOf('[data-rv-c="chdr"]'), r.css.indexOf('[data-rv-c="chdr"]') + 200);
   assert.ok(hdrBlock.includes('background:'), 'baseCoat: header gets a background');
   assert.ok(!hdrBlock.includes('rgb(255,255,255)'), 'baseCoat: header NOT left white');
 
   // Luminance-compatible region → NOT base-coated (cream region on cream canvas)
   const creamHeader = cluster({
-    handle: 'chdr2', selector: '[data-wm-c="chdr2"]', role: 'banner',
+    handle: 'chdr2', selector: '[data-rv-c="chdr2"]', role: 'banner',
     rect: { x: 0, y: 0, w: 1280, h: 64, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 1.0 }),
     style: { background: 'rgb(250,245,235)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: false },
   });
@@ -672,7 +672,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 {
   // Image cluster: model sets background + backgroundImage → BOTH dropped
   const thumb = cluster({
-    handle: 'cthumb', selector: '[data-wm-c="cthumb"]',
+    handle: 'cthumb', selector: '[data-rv-c="cthumb"]',
     style: { background: 'rgb(20,20,20)', color: 'rgb(255,255,255)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '14px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: true },
   });
   const pImg = perception([thumb]);
@@ -681,7 +681,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
       rules: [{ target: 'cthumb', styles: { background: '#ff0000', backgroundImage: 'url("x.png")', filter: 'sepia(0.4)', borderRadius: '8px' } }] },
     pImg,
   );
-  const thumbBlock = rImg.css.slice(rImg.css.indexOf('[data-wm-c="cthumb"]'), rImg.css.indexOf('[data-wm-c="cthumb"]') + 300);
+  const thumbBlock = rImg.css.slice(rImg.css.indexOf('[data-rv-c="cthumb"]'), rImg.css.indexOf('[data-rv-c="cthumb"]') + 300);
   assert.ok(!/background:\s*#ff0000/.test(thumbBlock), 'image: solid background NOT emitted over a content image');
   assert.ok(!/background-image:\s*url/.test(thumbBlock), 'image: replacement backgroundImage NOT emitted over a content image');
   assert.ok(thumbBlock.includes('filter:'), 'image: non-background treatment (filter) still allowed');
@@ -689,7 +689,7 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
   assert.ok(rImg.droppedProps.some((d) => d.includes('imageBg')), 'image: background drop is logged');
 
   // Non-image cluster: background IS emitted (shorthand, nukes gradients — correct)
-  const plain = cluster({ handle: 'cplain', selector: '[data-wm-c="cplain"]' });
+  const plain = cluster({ handle: 'cplain', selector: '[data-rv-c="cplain"]' });
   const rPlain = compileSpec(
     { reasoning: '', canvas: { background: '#0a0a0a', color: '#f5f5f5' },
       rules: [{ target: 'cplain', styles: { background: '#ff0000' } }] },
@@ -699,17 +699,17 @@ assert.strictEqual(validateSpec({ rules: [] }).ok, false, 'validateSpec rejects 
 
   // base-coat skips image clusters (a thumbnail is not a "clashing strip" to repaint)
   const thumb2 = cluster({
-    handle: 'cthumb2', selector: '[data-wm-c="cthumb2"]', rect: { x: 0, y: 0, w: 320, h: 180, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.25 }),
+    handle: 'cthumb2', selector: '[data-rv-c="cthumb2"]', rect: { x: 0, y: 0, w: 320, h: 180, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.25 }),
     style: { background: 'rgb(255,255,255)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '14px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: true },
   });
-  const main = cluster({ handle: 'cmain2', selector: '[data-wm-c="cmain2"]', role: 'main', rect: { x: 0, y: 0, w: 800, h: 600, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.62 }) });
+  const main = cluster({ handle: 'cmain2', selector: '[data-rv-c="cmain2"]', role: 'main', rect: { x: 0, y: 0, w: 800, h: 600, vx: 0, vy: 0, aboveFold: true }, layout: layout({ widthRatio: 0.62 }) });
   const pBase = perception([thumb2, main], 'rgb(255,255,255)');
   const rBase = compileSpec(
     { reasoning: '', canvas: { background: '#0a0a0a', color: '#f5f5f5' },
       rules: [{ target: 'cmain2', styles: { background: '#111', color: '#f5f5f5' } }] }, // thumb2 NOT addressed
     pBase,
   );
-  const thumb2Block = rBase.css.slice(rBase.css.indexOf('[data-wm-c="cthumb2"]'), rBase.css.indexOf('[data-wm-c="cthumb2"]') + 200);
+  const thumb2Block = rBase.css.slice(rBase.css.indexOf('[data-rv-c="cthumb2"]'), rBase.css.indexOf('[data-rv-c="cthumb2"]') + 200);
   assert.ok(!/background:\s*#/.test(thumb2Block), 'image: base-coat does NOT paint over a content-image cluster');
 }
 
@@ -816,7 +816,7 @@ console.log('pixel.test OK — void + invisible-text + squeeze + recolor detecto
 // Compile-level: a fixed px width is converted to a zoom-proof percentage (the
 // percentage geometry law) — no frozen px, no frozen px ceiling in the output.
 {
-  const p = perception([cluster({ handle: 'cvp0', selector: '[data-wm-c="cvp0"]', layout: layout({ isContainer: true }) })]);
+  const p = perception([cluster({ handle: 'cvp0', selector: '[data-rv-c="cvp0"]', layout: layout({ isContainer: true }) })]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cvp0', layout: { width: '2000px' } }] }, p);
   assert.ok(/width: 100% !important/.test(r.css), 'fluid: compile converts fixed px width to a zoom-proof %');
   assert.ok(!/(^|[\s{;])width\s*:\s*2000px/.test(r.css), 'fluid: no raw px width in emitted CSS');
@@ -848,7 +848,7 @@ console.log('accent.test OK — canvas-held color counted (vivid canvas = accent
 // is refused by the compiler — the "sleeps in the washroom" narrow-column failure
 // must be impossible to emit, not repaired after.
 {
-  const text = cluster({ handle: 'cmeas', selector: '[data-wm-c="cmeas"]', samples: ['x'.repeat(200)] });
+  const text = cluster({ handle: 'cmeas', selector: '[data-rv-c="cmeas"]', samples: ['x'.repeat(200)] });
   const p = perception([text]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cmeas', layout: { maxWidth: '60px' } }] }, p);
   // 60px / (16*0.5) = 7.5 cpl < 12 -> refused
@@ -903,8 +903,8 @@ console.log('gradient.test OK — gradient stops extracted + readable text picke
 {
   // A wide child (fraction 0.9 of a 1000px parent): a 400px maxWidth -> 40% of
   // parent, but the room floor (0.92 * 0.9 = 82.8%) raises it to 83%.
-  const parent = cluster({ handle: 'cpar', selector: '[data-wm-c="cpar"]', rect: { x: 0, y: 0, w: 1000, h: 600, vx: 0, vy: 0, aboveFold: true }, widthFractionOfParent: 1 });
-  const child = cluster({ handle: 'cchild', selector: '[data-wm-c="cchild"]', rect: { x: 0, y: 0, w: 900, h: 400, vx: 0, vy: 0, aboveFold: true }, widthFractionOfParent: 0.9, layout: layout({ parentHandle: 'cpar' }) });
+  const parent = cluster({ handle: 'cpar', selector: '[data-rv-c="cpar"]', rect: { x: 0, y: 0, w: 1000, h: 600, vx: 0, vy: 0, aboveFold: true }, widthFractionOfParent: 1 });
+  const child = cluster({ handle: 'cchild', selector: '[data-rv-c="cchild"]', rect: { x: 0, y: 0, w: 900, h: 400, vx: 0, vy: 0, aboveFold: true }, widthFractionOfParent: 0.9, layout: layout({ parentHandle: 'cpar' }) });
   const p = perception([parent, child]);
   const r = compileSpec({ reasoning: '', rules: [{ target: 'cchild', layout: { maxWidth: '400px' } }] }, p);
   // 400/1000 = 40%; floor 0.92*0.9*100 = 82.8 -> 83% (room law raises the wide child).
@@ -912,7 +912,7 @@ console.log('gradient.test OK — gradient stops extracted + readable text picke
   assert.ok(!/max-width: 400px/.test(r.css), 'geometry: no frozen px maxWidth (zoom-hostile)');
 
   // A narrow child (fraction 0.2): the model value is kept (no room floor).
-  const sidebar = cluster({ handle: 'cside', selector: '[data-wm-c="cside"]', rect: { x: 0, y: 0, w: 200, h: 600, vx: 0, vy: 0, aboveFold: true }, widthFractionOfParent: 0.2, layout: layout({ parentHandle: 'cpar' }) });
+  const sidebar = cluster({ handle: 'cside', selector: '[data-rv-c="cside"]', rect: { x: 0, y: 0, w: 200, h: 600, vx: 0, vy: 0, aboveFold: true }, widthFractionOfParent: 0.2, layout: layout({ parentHandle: 'cpar' }) });
   const p2 = perception([parent, sidebar]);
   const r2 = compileSpec({ reasoning: '', rules: [{ target: 'cside', layout: { maxWidth: '200px' } }] }, p2);
   // 200/1000 = 20% (narrow child, fraction < 0.7 -> no room floor, kept as 20%).
@@ -927,7 +927,7 @@ console.log('geometry.test OK — cluster widths converted to zoom-proof % (room
 {
   // A content-less, image-less cluster the model frames with big padding + border.
   const emptyBox = cluster({
-    handle: 'cvoid', selector: '[data-wm-c="cvoid"]', rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, samples: [],
+    handle: 'cvoid', selector: '[data-rv-c="cvoid"]', rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, samples: [],
     layout: layout({ widthRatio: 0.94 }),
     style: { background: 'rgb(255,255,255)', color: 'rgb(0,0,0)', border: 'none', borderRadius: '0px', boxShadow: 'none', fontFamily: 'sans-serif', fontSize: '16px', fontWeight: '400', padding: '0px', display: 'block', hasBgImage: false },
   });
@@ -941,7 +941,7 @@ console.log('geometry.test OK — cluster widths converted to zoom-proof % (room
   assert.ok(r.droppedProps.some((d) => d.includes('voidGrowth')), 'void: growth refusal logged');
 
   // A text-BEARING cluster keeps its framing (it has content to show).
-  const textBox = cluster({ handle: 'ctxt2', selector: '[data-wm-c="ctxt2"]', rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, samples: ['Hello world content here'] });
+  const textBox = cluster({ handle: 'ctxt2', selector: '[data-rv-c="ctxt2"]', rect: { x: 0, y: 0, w: 1200, h: 120, vx: 0, vy: 0, aboveFold: true }, samples: ['Hello world content here'] });
   const p2 = perception([textBox]);
   const r2 = compileSpec({ reasoning: '', canvas: { background: '#0a0a0a', color: '#f5f5f5' },
     rules: [{ target: 'ctxt2', styles: { padding: '40px', border: '4px solid #fff' } }] }, p2);

@@ -262,7 +262,7 @@ export interface InvisibleBreakdown {
  * handle vanished from perception). A pair whose emitted bg != live effective bg =
  * wrong-bg (we painted readable text against the WRONG surface). A cluster spanning
  * multiple bgs = multi-bg (one pair can't cover both). The classes are mutually
- * exclusive in priority order: no-handle is detected upstream (no [data-wm-c]); here
+ * exclusive in priority order: no-handle is detected upstream (no [data-rv-c]); here
  * the survivors all have handles, so the classes are wrong-bg / cascade-loss / multi-bg.
  */
 export function classifyInvisibleFailures(
@@ -287,7 +287,7 @@ export function classifyInvisibleFailures(
       // the cascade to a site !important rule (the pair was emitted but didn't win).
       // Distinguish by whether the handle is in the live map at all.
       cls = live ? 'cascade-loss' : 'cascade-loss';
-      evidence = live ? `no emitted pair won for ${h} (cascade-loss: site rule beat [data-wm-c], or handle-target mismatch; live eff bg=${live})` : `handle ${h} not in live perception (compile silently skipped — cascade-loss)`;
+      evidence = live ? `no emitted pair won for ${h} (cascade-loss: site rule beat [data-rv-c], or handle-target mismatch; live eff bg=${live})` : `handle ${h} not in live perception (compile silently skipped — cascade-loss)`;
     } else if (live && emitted && !sameColor(emitted, live)) {
       cls = 'wrong-bg';
       evidence = `pair derived from ${emitted} but text sits on ${live} — readable against the WRONG surface`;

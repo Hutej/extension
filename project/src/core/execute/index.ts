@@ -9,8 +9,8 @@
 
 import { STYLE_ELEMENT_ID } from '../laws';
 
-const ESCAPE_UI_ID = 'webmorph-escape-ui';
-const SHADOW_STYLE_ID = 'webmorph-shadow-style';
+const ESCAPE_UI_ID = 'revueon-escape-ui';
+const SHADOW_STYLE_ID = 'revueon-shadow-style';
 let observer: MutationObserver | null = null;
 let shadowObservers: MutationObserver[] = [];
 // circuit-breaker for the style re-insert loop. An unbounded loop is a CPU
@@ -26,7 +26,7 @@ export function applyStyle(css: string): void {
   if (!el) {
     el = document.createElement('style');
     el.id = STYLE_ELEMENT_ID;
-    el.setAttribute('data-webmorph-ui', 'style');
+    el.setAttribute('data-revueon-ui', 'style');
   }
   el.textContent = css;
   document.head.appendChild(el);
@@ -45,7 +45,7 @@ function injectShadowStyle(root: ShadowRoot, css: string): void {
   root.querySelector(`#${SHADOW_STYLE_ID}`)?.remove();
   const style = document.createElement('style');
   style.id = SHADOW_STYLE_ID;
-  style.setAttribute('data-webmorph-ui', 'style');
+  style.setAttribute('data-revueon-ui', 'style');
   style.textContent = css;
   root.appendChild(style);
 }
@@ -74,7 +74,7 @@ export function startDefense(css: string): void {
           stopDefense();
           defenseAttempts++;
           if (defenseAttempts > MAX_DEFENSE_ATTEMPTS) {
-            console.warn(`[WebMorph] Defense surrendered after ${MAX_DEFENSE_ATTEMPTS} re-insert attempts — page is stripping styles too aggressively.`);
+            console.warn(`[Revueon] Defense surrendered after ${MAX_DEFENSE_ATTEMPTS} re-insert attempts — page is stripping styles too aggressively.`);
             return; // surrender, don't re-insert or re-observe
           }
           applyStyle(css);
@@ -102,7 +102,7 @@ function observeShadowRoot(root: ShadowRoot, css: string): void {
           obs.disconnect();
           const attempts = (shadowDefenseAttempts.get(root) ?? 0) + 1;
           if (attempts > MAX_DEFENSE_ATTEMPTS) {
-            console.warn(`[WebMorph] Shadow defense surrendered after ${MAX_DEFENSE_ATTEMPTS} attempts on a shadow root.`);
+            console.warn(`[Revueon] Shadow defense surrendered after ${MAX_DEFENSE_ATTEMPTS} attempts on a shadow root.`);
             return; // surrender
           }
           shadowDefenseAttempts.set(root, attempts);
@@ -133,8 +133,8 @@ export function ensureEscapeUI(onToggle: () => void): void {
   if (document.getElementById(ESCAPE_UI_ID)) return;
   const btn = document.createElement('button');
   btn.id = ESCAPE_UI_ID;
-  btn.setAttribute('data-webmorph-ui', 'true');
-  btn.textContent = 'WebMorph: On/Off';
+  btn.setAttribute('data-revueon-ui', 'true');
+  btn.textContent = 'Revueon: On/Off';
   btn.style.cssText = [
     'position:fixed', 'top:10px', 'right:10px', 'z-index:2147483647',
     'padding:10px 18px', 'background:#111', 'color:#fff', 'border:2px solid #fff',

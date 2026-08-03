@@ -8,7 +8,7 @@
 ## RC1 — Web-component / YouTube sites get no redesign
 
 - **Symptom:** YouTube (and any web-component-heavy site) clusters are classified as `ad-or-void`; the redesign does nothing visible to the feed.
-- **Evidence:** `perceive/index.ts:253-256` walks open shadow roots and `:523` stamps `data-wm-c` on shadow children. But `representativeFor` (`:692`), `findScrollables` (`:376`), `enrichSemantic` (`:815`) all resolve via light-tree `document.querySelector(cluster.selector)` → shadow-stamped clusters return `null` → `if (!el)` at `:819` defaults to `ad-or-void`/0 (except pre/code). `solve.ts:380` and `exclusions.ts:31` also use `document.querySelector`. Re-verified by read.
+- **Evidence:** `perceive/index.ts:253-256` walks open shadow roots and `:523` stamps `data-rv-c` on shadow children. But `representativeFor` (`:692`), `findScrollables` (`:376`), `enrichSemantic` (`:815`) all resolve via light-tree `document.querySelector(cluster.selector)` → shadow-stamped clusters return `null` → `if (!el)` at `:819` defaults to `ad-or-void`/0 (except pre/code). `solve.ts:380` and `exclusions.ts:31` also use `document.querySelector`. Re-verified by read.
 - **Root cause:** The architecture never modeled the **composed tree**. The walk descends into shadow roots; every read-back is flat-tree only. One missing `composedPath`/`deepSelector` abstraction.
 - **Why it exists:** The DOM walk was written for a flat document; shadow-DOM support was bolted onto `walk` (`:253`) without updating the resolvers. The roadmap's P5 (structural identity) fixed *handles* but not *resolution*.
 - **User impact:** The product's headline target ("reshape ANY website") silently fails on the most popular web-component site and every lit/polymer/web-component app. No error signal — the user sees a "successful" transform that changed nothing.
@@ -114,7 +114,7 @@
 ## RC9 — `display:contents` causes content loss on mixed proxies
 
 - **Symptom:** Absolute children reposition; button click targets shrink; overflow clipping lost; contentIntact gate fails on all sites.
-- **Evidence:** `solve.ts:515` emitted `display: contents` on mixed proxies. A proxy with `position:relative` → absolute children lose their containing block; a `<button>`/`<a>` → padding click-target gone; `overflow:hidden` → clipping lost. The `[data-wm-c]` region on the proxy vanished from the contentIntact fingerprint → false gate failures on all 3 sites (Step 9: 22/45/63 calls per site).
+- **Evidence:** `solve.ts:515` emitted `display: contents` on mixed proxies. A proxy with `position:relative` → absolute children lose their containing block; a `<button>`/`<a>` → padding click-target gone; `overflow:hidden` → clipping lost. The `[data-rv-c]` region on the proxy vanished from the contentIntact fingerprint → false gate failures on all 3 sites (Step 9: 22/45/63 calls per site).
 - **Root cause:** **`display:contents` dissolves the box** — it preserves the *children* but not the box's *positioning, clipping, and hit-testing* properties. The CSS-only grid approach needs to flatten intermediates; `display:contents` was chosen without modeling its box-dissolution side effects.
 - **Why it exists:** The CSS-only grid approach needs to flatten intermediates; `display:contents` was chosen without modeling its box-dissolution side effects.
 - **User impact:** Overlapping/repositioned absolute elements; unclickable padded areas; content spilling out of clipped containers; contentIntact gate false-positives on every mixed proxy.
