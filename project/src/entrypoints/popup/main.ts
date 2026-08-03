@@ -26,20 +26,20 @@ const optOutEl = $<HTMLInputElement>('optOutModel');
 const disclosureEl = $<HTMLDivElement>('disclosure');
 const disclosureOkBtn = $<HTMLButtonElement>('disclosureOk');
 
-// ── Cloudflare credentials (B1: unified on cloudflare_account_id + cloudflare_api_token) ──
+// ── Cloudflare credentials (unified on cloudflare_account_id + cloudflare_api_token) ──
 void browser.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token', 'webmorphConsentShown', 'webmorphOptOutModel']).then((res: Record<string, unknown>) => {
   if (res.cloudflare_account_id) accountIdEl.value = res.cloudflare_account_id as string;
   if (res.cloudflare_api_token) apiTokenEl.value = res.cloudflare_api_token as string;
-  // B5: show disclosure before the first transform.
+  // show disclosure before the first transform.
   if (!res.webmorphConsentShown) disclosureEl.style.display = 'block';
   if (res.webmorphOptOutModel) optOutEl.checked = true;
 });
 settingsToggle.addEventListener('click', () => settingsArea.classList.toggle('open'));
-// B5: opt-out toggle
+// opt-out toggle
 optOutEl.addEventListener('change', () => {
   void browser.storage.local.set({ webmorphOptOutModel: optOutEl.checked });
 });
-// B5: disclosure acknowledgement
+// disclosure acknowledgement
 disclosureOkBtn.addEventListener('click', () => {
   void browser.storage.local.set({ webmorphConsentShown: true });
   disclosureEl.style.display = 'none';
@@ -57,7 +57,7 @@ saveKeyBtn.addEventListener('click', async () => {
   credStatusEl.textContent = 'Validating credentials…';
   credStatusEl.style.color = 'var(--muted)';
   try {
-    // B1: Validate credentials with a minimal model call (1 token max) to the
+    // Validate credentials with a minimal model call (1 token max) to the
     // Cloudflare Workers AI endpoint. A 200 = both account ID and token are valid.
     // A 401/403 = invalid token or wrong account. This catches bad credentials at
     // save time, not silently at transform time.
@@ -131,14 +131,14 @@ transformBtn.addEventListener('click', async () => {
   if (!intent) { showStatus('Enter a request first.', 'err'); return; }
   const tabId = await getTabId();
   if (!tabId) { showStatus('Cannot find the active tab.', 'err'); return; }
-  // B5: gate on consent disclosure.
+  // gate on consent disclosure.
   const consent = await browser.storage.local.get(['webmorphConsentShown', 'webmorphOptOutModel']);
   if (!consent.webmorphConsentShown) {
     disclosureEl.style.display = 'block';
     showStatus('Please review and acknowledge the disclosure below first.', 'info');
     return;
   }
-  // B5: gate on opt-out — if the user opted out of model calls, only fast paths work.
+  // gate on opt-out — if the user opted out of model calls, only fast paths work.
   if (consent.webmorphOptOutModel) {
     const kind = /^(hide|remove|delete|get rid of|move|shift|relocate|push|send)\b/i.test(intent);
     if (!kind) {
@@ -181,7 +181,7 @@ transformBtn.addEventListener('click', async () => {
         `<span>📊 ${res.clusters ?? '?'} clusters</span>`,
       ].join('');
       metricsEl.className = 'metrics show';
-      // B3: surface perception truncation if it happened.
+      // surface perception truncation if it happened.
       if (res.perceptionTruncated && (res.perceptionTruncated.walk || res.perceptionTruncated.serialize)) {
         const parts: string[] = [];
         if (res.perceptionTruncated.walk) parts.push('page was too large to fully perceive');
@@ -249,5 +249,5 @@ async function updateSiteStatus(): Promise<void> {
   });
 }
 
-// B7: void the floating promise at module load.
+// void the floating promise at module load.
 void updateSiteStatus();

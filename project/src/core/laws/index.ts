@@ -4,12 +4,12 @@ import { parseColor, luminance } from '../../shared/color.ts';
  * core/laws — browser-safety knowledge encoded as compiler guardrails.
  *
  * These are the hard-won priors from BROWSER_LAWS.md / CAPABILITY_JOURNAL.md,
- * distilled to the subset that the Phase-1 restyle compiler actually enforces.
+ * distilled to the subset that the restyle compiler actually enforces.
  * They are REFERENCE, not scripture: the compiler is the single place that
  * guarantees safety, so every rule that matters lives here as data the engine
  * reads — never as scattered special-cases.
  *
- * Phase 1 includes paint AND layout: color, type, borders, radius, shadow,
+ * includes paint AND layout: color, type, borders, radius, shadow,
  * backdrop, safe inner spacing, widths, grid/flex arrangement, and type scale.
  * Reversible structural DOM operations (remove/move/reorder/wrap) live in
  * core/ops, validated here against these same geometry laws before execution.

@@ -70,7 +70,7 @@ export const AI_CONFIG = {
  * into the role prompts so the model needs minimal runtime re-teaching.
  */
 
-// B3: DEBUG = false — was true, shipping page content to the console in production.
+// DEBUG = false — was true, shipping page content to the console in production.
 // Gate all content-bearing logs behind this. The test harness enables it via WM_DEBUG.
 const DEBUG = (process.env.WM_DEBUG ?? 'false') === 'true';
 export function logDebug(...args: unknown[]): void {

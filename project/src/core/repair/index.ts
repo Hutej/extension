@@ -46,9 +46,9 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // missed, and pixel-squeeze below the readable measure. Merged into the
   // deterministic repair so paint-2 targets what the USER sees, not just DOM flags.
   const pixelInvisible = pixel?.invisibleText ?? [];
-  // A6: squeeze repair DELETED — pixelSqueeze no longer triggers a repair.
+  // squeeze repair DELETED — pixelSqueeze no longer triggers a repair.
   // If content is squeezed, a min-width or WrapOnOverflow constraint is missing.
-  // Phase-1 hard void law (MIN_CONTRAST_RATIO is the pattern): a pixel void is
+  // hard void law (MIN_CONTRAST_RATIO is the pattern): a pixel void is
   // "addressed" ONLY if a structural op (remove/move/reorder/wrap) targets it. Voids
   // CSS can't collapse (empty/decorative containers) must be removed, not decorated.
   // Untouched voids force a bounded reReason naming exactly those ids — advisory no
@@ -70,8 +70,8 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // repairs (padding/sizing/layout) run ONLY for overflow/overlap failures — they
   // can never reduce accent, so they must not be spent on a coherence failure.
 
-  // S7.3h: forceContrast runs BEFORE contentIntact. With CSS-only placement
-  // (S7.1), collapse is no longer caused by reparenting, so drop-hides should
+  // forceContrast runs BEFORE contentIntact. With CSS-only placement
+  // , collapse is no longer caused by reparenting, so drop-hides should
   // rarely fire. Contrast (invisible text) is more fundamental than layout — you
   // can't fix layout on text the user can't see. The old ordering let drop-hides
   // pre-empt forceContrast, burning repair cycles on layout before visibility.
@@ -88,7 +88,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // silently failed (the all-"unknown"-class invisible-survivors run). The
   // deterministic backstop IS the guarantee; the Critic is reserved for failures a
   // deterministic pass cannot fix (voids, flat layout, reflow) — see the tiers below.
-  // (Phase-1 broken-guarantee root cause: the backstop was gated behind a Critic.)
+  // (broken-guarantee root cause: the backstop was gated behind a Critic.)
 
   // Contrast: force a readable text color — the canvas body floor PLUS the
   // specific handles the sampler flagged (dark text on a dark painted block).
@@ -103,7 +103,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // Content collapsed (but not fully blanked) — regions shrank to near-zero.
   // Try dropping hides first (display:none causes collapse), then sizing
   // (maxHeight/height constraints), then all layout (flex/grid collapse).
-  // S7.3h: runs AFTER forceContrast — collapse is a layout issue, contrast is
+  // runs AFTER forceContrast — collapse is a layout issue, contrast is
   // visibility. With CSS-only placement, this rarely fires (no reparenting).
   if (!c.contentIntact) {
     if (!prev.dropHides) return { action: 'recompile', options: { ...prev, dropHides: true }, reason: 'content collapsed — drop hides first' };
@@ -132,9 +132,9 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
     return { action: 'recompile', options: { ...prev, trimAccent: true }, reason: `trim accent (${why})` };
   }
 
-  // A6: squeeze repair DELETED. If content is squeezed, a min-width or
+  // squeeze repair DELETED. If content is squeezed, a min-width or
   // WrapOnOverflow constraint is missing — fix the constraint, not the symptom.
-  // A6: clip overflow repair DELETED. Bleed = over-constrained layout.
+  // clip overflow repair DELETED. Bleed = over-constrained layout.
   // Overflow / overlap: word-break for text bleeds, then targeted clamp on
   // geometric overflow, then blanket dropLayout (last resort).
   // Overflow-specific repairs run ONLY when !noOverflow — when !noOverlap
@@ -158,7 +158,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   // ── Regenerative tier: quality failures a deterministic pass can't fix
   // (flat / still-incoherent after trim / over-framed / under-covered / no reshape).
   // The caller gates on the wall-clock budget (canReReason); no call-count cap.
-  // Phase-1 hard void law: untouched voids (no structural op targets them) are a
+  // hard void law: untouched voids (no structural op targets them) are a
   // HARD failure — CSS cannot collapse an empty/decorative container; an op must.
   // This fires BEFORE the generic quality tier so a void run can't pass by being
   // otherwise-pretty. One bounded reReason names the untouched ids.
@@ -175,7 +175,7 @@ export function planRepair(verify: VerifyResult, prev: CompileOptions, reReasons
   return { action: 'keepBest', options: prev, reason: 'no further repair' };
 }
 
-/** Phase-1 hard void law critique — names the untouched void ids and demands a
+/** hard void law critique — names the untouched void ids and demands a
  *  structural op on each. CSS cannot collapse an empty/decorative container; only a
  *  remove/move/reorder/wrap op reclaims the space. A recolor that decorates a void is
  *  a failure. Mirrors the reflowSkipped critique's "you MUST emit an op" language. */
@@ -232,7 +232,7 @@ function critiqueFor(verify: VerifyResult, pixel?: PixelVerifyResult | null): st
   }
   // Reflow forcing: the perception flagged a side-rail (sidebar/nav beside main
   // content) that calls for a structural reflow, and the Architect left it at the
-  // same width+position with no op on it. This is the exact failure mode Phase 2
+  // same width+position with no op on it. This is the exact failure mode
   // exists to kill — the model reshaped OTHER things but skipped the warranted
   // reflow. Force the Critic to address it explicitly.
   if (verify.reflowSkippedHandles.length > 0) {
@@ -241,4 +241,4 @@ function critiqueFor(verify: VerifyResult, pixel?: PixelVerifyResult | null): st
   return parts.join(' ALSO: ') || 'The previous design failed quality checks. Review the page perception and produce a complete, coherent redesign.';
 }
 
-// B8: bestNonBroken deleted — imported by content.ts, never called.
+// bestNonBroken deleted — imported by content.ts, never called.

@@ -21,7 +21,7 @@
 import type { DesignOp, OpKind } from '../spec';
 import type { Cluster, Perception } from '../perceive';
 
-// A7: DOM mutation policy — the closed list of reasons a mutation is permitted.
+// DOM mutation policy — the closed list of reasons a mutation is permitted.
 // Default: do not move DOM nodes. Restructuring is permitted ONLY when the
 // transformation is genuinely inexpressible in CSS. Any mutation must carry a
 // recorded reason from this list, or it does not execute.
@@ -46,7 +46,7 @@ export interface ValidatedOp {
   consent?: boolean;
   /** The live-DOM execution reads this hint (e.g. wrap display, move floating). */
   hint?: string;
-  /** A7: the recorded reason from the closed list, or null if none was provided
+  /** the recorded reason from the closed list, or null if none was provided
    *  (the op will be refused — default is no mutation). */
   reason?: string;
 }
@@ -61,7 +61,7 @@ export interface OpValidationResult {
  *  content — refuse. The empty-capsule / dead-band failures score ~0.9+. */
 export const REMOVE_EMPTINESS_FLOOR = 0.6;
 
-/** HARD SAFETY RULE (Phase 2, permanent): a destructive op (remove) is FORBIDDEN
+/** HARD SAFETY RULE (, permanent): a destructive op (remove) is FORBIDDEN
  *  on any role below the confidence threshold — the classifier is < 0.5 sure what
  *  this region is, so collapsing it risks removing content it misread. A confident
  *  ad-or-void stays removable (subject to the emptiness floor below). */
@@ -85,7 +85,7 @@ export function validateOps(ops: DesignOp[] | undefined, perception: Perception)
     const cl = byHandle.get(op.target);
     if (!cl) { refused.push(`${op.kind}(${op.target}:no-such-handle)`); continue; }
 
-    // A7: DOM mutation policy — default is no mutation. Any op must carry a
+    // DOM mutation policy — default is no mutation. Any op must carry a
     // recorded reason from the closed list, or it does not execute.
     if (!op.reason || !MUTATION_REASONS.has(op.reason)) {
       refused.push(`${op.kind}(${op.target}:no-mutation-reason — Law 0 default is no DOM mutation)`);

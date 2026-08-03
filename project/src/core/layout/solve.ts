@@ -1,5 +1,5 @@
 /**
- * core/layout/solve — the v1 responsive solver. Phase 2.5, Step 2 + Step 3 + Step 7.
+ * core/layout/solve — the v1 responsive solver.
  *
  * Behind the runtime flag `layoutCompiler = 'v2'`. PARALLEL PATH — never
  * intertwined with the v1 compile path.
@@ -8,7 +8,7 @@
  * structure, the SOLVER owns constraints, the compiler owns CSS. The solver
  * satisfies constraints; it does not decide what the layout becomes.
  *
- * S7.1 — CSS-ONLY RELAYOUT. No DOM mutation. No wrapper elements. No node moves.
+ * CSS-ONLY RELAYOUT. No DOM mutation. No wrapper elements. No node moves.
  *   - Find the nearest common ancestor (NCA) of all slot-assigned nodes
  *   - Emit display: grid + the slot grid template on the NCA
  *   - For every element strictly between the NCA and a placed node, emit
@@ -18,7 +18,7 @@
  *   - Zero DOM mutation → nothing for a framework's MutationObserver to reconcile
  *   - Undo becomes "remove the stylesheet"
  *
- * S7.2 — SELECTOR-BASED TARGETING. CSS rules are keyed on the CSS selector derived
+ * SELECTOR-BASED TARGETING. CSS rules are keyed on the CSS selector derived
  *   from the existing structuralPath (stable attrs: id/data-testid/role/aria-label/
  *   name, falling back to tag + nth-of-type). data-wm-c is a DEBUG label only;
  *   nothing in the emitted CSS depends on it. Where no usable selector can be
@@ -47,11 +47,11 @@ import { DOCUMENTATION_SLOTS } from './languages/documentation.ts';
 import { assertNoRawPxSizing } from '../laws/index.ts';
 
 // ── Fluid token set (from ARCHITECTURE.md, applied at semantic text levels only) ──
-// A4: viewport units (vw) in clamp() are the only remaining vw use — they scale
+// viewport units (vw) in clamp() are the only remaining vw use — they scale
 // TYPE and SPACING relative to the viewport, not layout tracks. Layout tracks use
 // container-relative units (fr, minmax, fit-content). The type/spacing clamp() are
 // tokens (provenance: token), not measurements.
-// A4: --wm-content-min replaces the hardcoded 320px content floor (now a token).
+// --wm-content-min replaces the hardcoded 320px content floor (now a token).
 // --wm-content-max is a character-based prose measure (ch = intrinsic, not px).
 
 const FLUID_TOKENS = `
@@ -95,11 +95,11 @@ export interface SolveResult {
   perNodeDecls: Map<string, string[]>;
   rulesEmitted: number;
   matchedTargets: number;
-  // B8: impossibleNodes deleted — populated but never read downstream.
+  // impossibleNodes deleted — populated but never read downstream.
   droppedOptionals: { handle: string; kind: string; reason: string }[];
 }
 
-/** S11.3: the solver's emit-time plan — what the CSS intends, asserted at verify time. */
+/** the solver's emit-time plan — what the CSS intends, asserted at verify time. */
 export interface SolverPlan {
   /** Number of grid tracks (1 or 2). */
   trackCount: number;
@@ -115,43 +115,43 @@ export interface PlacementResult {
   css: string;
   /** Total selector fallbacks (sum of the four split counters, for backward compat). */
   selectorFallback: number;
-  /** S8.5: NCA selector fell back to [data-wm-grid]. */
+  /** NCA selector fell back to [data-wm-grid]. */
   selectorFallbackNca: number;
-  /** S8.5: placed-proxy selector fell back to [data-wm-grid]. */
+  /** placed-proxy selector fell back to [data-wm-grid]. */
   selectorFallbackProxy: number;
-  /** S8.5: display:contents selector fell back to [data-wm-grid]. */
+  /** display:contents selector fell back to [data-wm-grid]. */
   selectorFallbackContents: number;
-  /** S8.5: per-node CSS selector fell back to [data-wm-c]. */
+  /** per-node CSS selector fell back to [data-wm-c]. */
   selectorFallbackPerNode: number;
-  /** Count of proxies placed with grid-column (S8.1 — was "nodesPlaced" in S7). */
+  /** Count of proxies placed with grid-column (— was "nodesPlaced" in S7). */
   nodesPlaced: number;
   /** Handles that could NOT be placed (element not found in DOM). */
   nodesNotPlaceable: string[];
   /** Number of mixed proxies collapsed with display:contents (the only display:contents use). */
   intermediatesCollapsed: number;
-  /** S10.1: count of mixed proxies emitted with subgrid (replaces display:contents). */
+  /** count of mixed proxies emitted with subgrid (replaces display:contents). */
   subgridProxies: number;
-  /** S11.1: count of multi-slot proxies placed as single-track grid items (not earning subgrid). */
+  /** count of multi-slot proxies placed as single-track grid items (not earning subgrid). */
   singleTrackProxies: number;
-  /** S11.2: total children of subgrid proxies that received explicit grid-column. */
+  /** total children of subgrid proxies that received explicit grid-column. */
   subgridChildAssignments: number;
-  /** S10.1: the emitted grid-template-columns string (for logging/verification). */
+  /** the emitted grid-template-columns string (for logging/verification). */
   gridTemplateColumns: string;
-  /** S11.3: the solver's emit-time plan (asserted at verify time). */
+  /** the solver's emit-time plan (asserted at verify time). */
   plan: SolverPlan;
   /** Always 0 with the proxy algorithm (no intermediate chain collapse). */
   intermediatesSkipped: number;
   /** Reason each proxy was rejected (unused with proxy algorithm; kept for compat). */
   skippedReasons: string[];
-  /** S8.1: count of proxies rejected as "mixed" (subtree spans >1 non-overflow slot). */
+  /** count of proxies rejected as "mixed" (subtree spans >1 non-overflow slot). */
   mixedProxies: number;
-  /** S8.1: count of distinct proxy elements placed. */
+  /** count of distinct proxy elements placed. */
   proxyCount: number;
-  /** S8.1: diagnostic — NCA tag + proxy slot summary (for dev logging). */
+  /** diagnostic — NCA tag + proxy slot summary (for dev logging). */
   diagnostics: string;
 }
 
-// ── A2: Constraint → CSS translation layer ──────────────────────────
+// ── Constraint → CSS translation layer ──────────────────────────
 // Every emitted declaration must originate from a constraint in the IR or from
 // a design token. This function is the explicit translation: one constraint kind
 // at a time. Where a declaration has no corresponding constraint, the constraint
@@ -209,7 +209,7 @@ function constraintToCss(c: LayoutConstraint): string[] {
 }
 
 // ── Author constraint constants (also emitted as CSS tokens in FLUID_TOKENS) ──
-// A4: the hardcoded 320px content floor is now a named constant, linked to the
+// the hardcoded 320px content floor is now a named constant, linked to the
 // --wm-content-min token. Both are authorConstraint provenance (the layout
 // language's requirement), never measurements.
 const CONTENT_MIN_PX = 320;  // == --wm-content-min token
@@ -225,7 +225,7 @@ export function solve(input: SolveInput): SolveResult {
   for (const s of DOCUMENTATION_SLOTS) slotById.set(s.id, s);
 
   // ── 1. Validate constraints (detect impossible + dropped optionals) ──
-  // B8: impossibleNodes removed — populated but never read downstream.
+  // impossibleNodes removed — populated but never read downstream.
   const droppedOptionals: { handle: string; kind: string; reason: string }[] = [];
   for (const node of ir.nodes) {
     const current = currentConstraints(ir.byHandle.get(node.handle)!);
@@ -238,7 +238,7 @@ export function solve(input: SolveInput): SolveResult {
   }
 
   // ── 2. Build placement map ───────────────────────────────────────────
-  // S7.1: CSS-only placement. No wrappers, no moves. Each top-level slot-assigned
+  // CSS-only placement. No wrappers, no moves. Each top-level slot-assigned
   // node gets a grid-column based on its slot's preferredWidth. A node whose parent
   // is in the SAME slot is NOT placed (it flows within its parent, which is placed).
   // Skip position:fixed (viewport-relative, can't be a grid item) and position:absolute
@@ -256,7 +256,7 @@ export function solve(input: SolveInput): SolveResult {
   for (const node of ir.nodes) {
     const slotId = assignment.handleToSlot.get(node.handle) ?? 'overflow';
     if (slotId === 'overflow' || excluded.has(node.handle)) continue;
-    // S7.1: skip fixed AND absolute — neither participates in grid layout.
+    // skip fixed AND absolute — neither participates in grid layout.
     if (node.authoredLayout.position === 'fixed' || node.authoredLayout.position === 'absolute') continue;
     // Skip if parent is in the SAME slot — the parent carries this node.
     if (node.computedRelationships.parent && allSlotHandles.has(node.computedRelationships.parent)) {
@@ -291,13 +291,13 @@ export function solve(input: SolveInput): SolveResult {
   }
 
   // ── 4. Build per-node declarations (constraint-driven + fluid text) ──
-  // A2: every emitted declaration originates from a constraint in the IR (slot
+  // every emitted declaration originates from a constraint in the IR (slot
   // constraints) or from a design token (fluid text). No captured-rect values.
   const perNodeDecls = new Map<string, string[]>();
   for (const node of ir.nodes) {
     if (excluded.has(node.handle)) continue;
     const decls: string[] = [];
-    // A2: translate slot constraints to CSS. The slot defines what the layout
+    // translate slot constraints to CSS. The slot defines what the layout
     // language requires for this role (StackVertically, MaxWidth, FillParent, etc.).
     const slotId = assignment.handleToSlot.get(node.handle) ?? 'overflow';
     const slot = slotById.get(slotId);
@@ -317,7 +317,7 @@ export function solve(input: SolveInput): SolveResult {
       const ft = fontSizeToken(node.semantic.role);
       if (ft) decls.push(`font-size: ${ft}`);
     }
-    // A4: measured heights → height: auto (intrinsic).
+    // measured heights → height: auto (intrinsic).
     if (node.authoredLayout.intrinsicSizing === 'fixed') {
       decls.push('max-width: 100%');
     }
@@ -343,10 +343,10 @@ export function solve(input: SolveInput): SolveResult {
   };
 }
 
-// ── DOM-grounded CSS emission (S7.1 + S7.2) ────────────────────────
+// ── DOM-grounded CSS emission  ────────────────────────
 
 /** Build a CSS selector from a DOM element using the same anchor logic as
- *  structuralPath (Phase 5): nearest stable attribute (id/data-testid/role/
+ *  structuralPath : nearest stable attribute (id/data-testid/role/
  *  aria-label/name) + nth-of-type chain. Returns null if no usable selector
  *  can be derived (caller falls back to [data-wm-c]). */
 function buildSelector(el: HTMLElement): string | null {
@@ -435,7 +435,7 @@ function nearestCommonAncestor(els: HTMLElement[]): HTMLElement | null {
   return null;
 }
 
-// S8.1: deterministic slot priority for proxy slot assignment (no model input).
+// deterministic slot priority for proxy slot assignment (no model input).
 const SLOT_PRIORITY = ['masthead', 'toc', 'nav-local', 'main', 'footer'];
 function slotPriority(slotId: string): number {
   const i = SLOT_PRIORITY.indexOf(slotId);
@@ -445,24 +445,24 @@ function slotPriority(slotId: string): number {
 /** Execute the placement against the live DOM and emit all structural CSS.
  *  Zero DOM mutation — only CSS (and data-* attribute stamps for targeting) is emitted.
  *
- *  S8.1 — PROXY PLACEMENT. For each placed handle, the PLACEMENT PROXY is the
+ *  PROXY PLACEMENT. For each placed handle, the PLACEMENT PROXY is the
  *  NCA's direct child that is an ancestor-or-self of the handle. We place the
  *  PROXY with grid-column — its background, border and padding are preserved,
  *  nothing is collapsed. A proxy whose subtree spans >1 non-overflow slot is
- *  "mixed": it gets subgrid (S10.1, replacing display:contents) and its children
+ *  "mixed": it gets subgrid (, replacing display:contents) and its children
  *  are recursed. That is the ONLY use of subgrid. Two handles sharing a proxy:
  *  keep one, it takes the highest-priority slot (SLOT_PRIORITY — no randomness).
  *
- *  S8.3 — template from ACTUALLY placed proxies (not the intended set).
+ *  template from ACTUALLY placed proxies (not the intended set).
  *  min-width:0 propagated up the NCA ancestor chain to body. min-height:100vh
  *  DELETED (compiler was making a design decision). overflow-x:clip BANNED.
  *
- *  S8.5 — selectorFallback split into 4 counters (NCA, proxy, contents, perNode).
+ *  selectorFallback split into 4 counters (NCA, proxy, contents, perNode).
  *  nodesNotPlaceable reconciled (no double counting). */
 export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   const { placement, perNodeDecls } = result;
   const blocks: string[] = [];
-  // S8.5: split selectorFallback into 4 counters.
+  // split selectorFallback into 4 counters.
   let selectorFallbackNca = 0;
   let selectorFallbackProxy = 0;
   let selectorFallbackContents = 0;
@@ -488,7 +488,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   // a. :root fluid tokens
   blocks.push(`:root {${FLUID_TOKENS}\n}`);
 
-  // b. Resolve placed handles to live elements. S8.5: single loop, no double counting.
+  // b. Resolve placed handles to live elements. single loop, no double counting.
   const placedEls: Map<string, HTMLElement> = new Map();
   for (const [handle] of placement) {
     const el = document.querySelector<HTMLElement>(`[data-wm-c="${handle}"]`);
@@ -523,7 +523,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     return slots;
   };
 
-  // S11.1: a proxy earns subgrid ONLY if its descendants span both a side-track
+  // a proxy earns subgrid ONLY if its descendants span both a side-track
   // slot AND a content slot (two different slot KINDS, not just two slot IDs).
   // A proxy spanning two content slots (e.g. main + comments) does NOT earn
   // subgrid — it goes to a single track. This stops track inheritance.
@@ -539,15 +539,15 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     return hasSide && hasContent;
   };
 
-  // e. S8.1: BFS proxy placement. Level 0 = NCA's direct children containing placed handles.
+  // e. BFS proxy placement. Level 0 = NCA's direct children containing placed handles.
   //     Non-mixed proxy (≤1 non-overflow slot) → place with grid-column.
-  //     Mixed proxy (>1 non-overflow slot) → subgrid (S10.1) + recurse on children.
+  //     Mixed proxy (>1 non-overflow slot) → subgrid  + recurse on children.
   //     Non-handle children (no placed handle in subtree) get grid-column: 1/-1 so they
   //     don't auto-place into a narrow side track and squeeze content.
   let singleTrackProxies = 0;
   let subgridChildAssignments = 0;
   const placedProxies = new Map<HTMLElement, string>();  // proxy el → assigned slotId
-  const contentsEls: HTMLElement[] = [];  // earned-subgrid proxies (S11.1)
+  const contentsEls: HTMLElement[] = [];  // earned-subgrid proxies 
   const fullWidthEls: HTMLElement[] = [];  // non-handle grid items → full width
   const seenEls = new Set<HTMLElement>();  // dedup across BFS levels
 
@@ -568,7 +568,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
       if (placedProxies.has(candidate) || contentsEls.includes(candidate)) continue;
       const slots = nonOverflowSlotsUnder(candidate);
       if (!earnsSubgrid(slots)) {
-        // S11.1: does NOT earn subgrid — place as a single-track grid item.
+        // does NOT earn subgrid — place as a single-track grid item.
         // Assign the highest-priority non-overflow slot (deterministic; "keep one"
         // when multiple handles share this proxy). Multi-slot proxies that don't
         // span side+content (e.g. two content slots) go here — no track inheritance.
@@ -579,8 +579,8 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
         placedProxies.set(candidate, slotId);
         if (slots.size > 1) singleTrackProxies++;
       } else {
-        // S11.1: EARNS subgrid — spans both a side track and a content track.
-        // S11.2: every child gets explicit grid-column (derived from its slot).
+        // EARNS subgrid — spans both a side track and a content track.
+        // every child gets explicit grid-column (derived from its slot).
         contentsEls.push(candidate);
         mixedProxies++;
         for (const child of candidate.children) {
@@ -599,8 +599,8 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     currentLevel = nextLevel;
   }
 
-  // f. S8.3: compute grid-template-columns from the ACTUALLY placed proxies.
-  // (slotById was constructed before the BFS — S11.1.)
+  // f. compute grid-template-columns from the ACTUALLY placed proxies.
+  // (slotById was constructed before the BFS.)
   const placedSlots = new Set<string>();
   for (const slotId of placedProxies.values()) placedSlots.add(slotId);
   const hasSide = [...placedSlots].some((id) => slotById.get(id)?.preferredWidth === 'side');
@@ -614,9 +614,9 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     ? `minmax(min(${sideMin}px, 100%), var(--wm-side-max)) minmax(0, 1fr)`
     : `minmax(min(${contentMin}px, 100%), 1fr)`;
 
-  // g. A3: Emit layout on the NCA, PRESERVING its existing formatting context.
-  // A5: Establish container containment for container-query responsiveness.
-  // Today we impose display: grid unconditionally — A3 forbids that. If the NCA
+  // g. Emit layout on the NCA, PRESERVING its existing formatting context.
+  // Establish container containment for container-query responsiveness.
+  // Today we impose display: grid unconditionally — forbids that. If the NCA
   // already has a working flex or grid context, modify its properties. If block,
   // introduce grid (new context). Overwriting display: flex with display: grid
   // is flattening; changing gap/justify-content/align-items/flex-wrap/flex-direction
@@ -630,20 +630,20 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     ncaCssSelector = '[data-wm-grid="nca"]';
     selectorFallbackNca++;
   }
-  // A3: detect the NCA's current formatting context. This is a measurement used for
+  // detect the NCA's current formatting context. This is a measurement used for
   // a DECISION (which properties to emit), not emitted as a value — allowed per Law 0.
   const ncaCs = getComputedStyle(nca);
   const ncaDisplay = ncaCs.display;
   const ncaIsGrid = ncaDisplay.includes('grid');
   const ncaIsFlex = ncaDisplay.includes('flex');
-  // S8.3: if the NCA's parent is a flex/grid container, the NCA is a flex/grid item
+  // if the NCA's parent is a flex/grid container, the NCA is a flex/grid item
   // and needs max-width:100% to avoid blowing out the parent.
   const ncaParentCs = nca.parentElement ? getComputedStyle(nca.parentElement) : null;
   const ncaIsFlexGridItem = ncaParentCs != null &&
     (ncaParentCs.display.includes('flex') || ncaParentCs.display.includes('grid'));
 
   const ncaDecls: string[] = [];
-  // A3: preserve the existing formatting context.
+  // preserve the existing formatting context.
   if (ncaIsGrid) {
     // Already grid — modify properties, don't replace.
     ncaDecls.push(`grid-template-columns: ${gridTemplate}`, 'gap: var(--wm-space-m)', 'min-width: 0');
@@ -656,7 +656,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     ncaDecls.push('display: grid', `grid-template-columns: ${gridTemplate}`, 'gap: var(--wm-space-m)', 'min-width: 0');
   }
   if (ncaIsFlexGridItem) ncaDecls.push('max-width: 100%');
-  // A5: establish containment for container-query responsiveness. Graceful: skip if
+  // establish containment for container-query responsiveness. Graceful: skip if
   // the NCA already has containment (don't override) or if containment is unsupported.
   const containerSupported = typeof CSS !== 'undefined' && CSS.supports('container-type', 'inline-size');
   if (containerSupported && ncaCs.containerType !== 'inline-size' && ncaCs.containerType !== 'size') {
@@ -664,17 +664,17 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   }
   blocks.push(`${ncaCssSelector} {\n${ncaDecls.map((d) => `  ${d};`).join('\n')}\n}`);
 
-  // S10.1: subgrid support check. Chrome 117+ supports subgrid (this is an MV3
-  // Chrome extension — no fallback needed in practice). A3: subgrid is a grid-only
+  // subgrid support check. Chrome 117+ supports subgrid (this is an MV3
+  // Chrome extension — no fallback needed in practice). subgrid is a grid-only
   // feature — skip for flex NCA context (flex has no subgrid equivalent).
   const subgridSupported = typeof CSS !== 'undefined' && CSS.supports('grid-template-columns', 'subgrid') && !ncaIsFlex;
   let subgridProxies = 0;
 
-  // i. S10.1: emit subgrid on mixed proxies (replaces display:contents). The box
+  // i. emit subgrid on mixed proxies (replaces display:contents). The box
   //    survives — background, border, padding, containing block, clipping and click
   //    targets all intact — and children participate in the NCA's column tracks.
   //    Fallback: grid-column: 1 / -1 (full-width grid item, no dissolution).
-  //    A3: for flex NCA, mixed proxies are full-width flex items.
+  //    for flex NCA, mixed proxies are full-width flex items.
   for (const el of contentsEls) {
     const sel = buildSelector(el);
     let cssSelector: string;
@@ -697,7 +697,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
 
   // i.2. Full-width items: children of the NCA or subgrid'd proxies that contain NO
   //      placed handles. Without explicit placement they'd auto-place into the narrow
-  //      side track, squeezing content. A3: flex NCA → flex: 0 0 100%.
+  //      side track, squeezing content. flex NCA → flex: 0 0 100%.
   for (const el of fullWidthEls) {
     const sel = buildSelector(el);
     let cssSelector: string;
@@ -713,8 +713,8 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   }
 
   // j. Emit placement on proxies. The proxy's box (bg/border/padding) is preserved.
-  // S11.3: stamp each placed proxy with data-wm-plan-slot for the plan assertion.
-  // A3: for flex NCA, use flex properties; for grid/block NCA, use grid-column.
+  // stamp each placed proxy with data-wm-plan-slot for the plan assertion.
+  // for flex NCA, use flex properties; for grid/block NCA, use grid-column.
   for (const [el, slotId] of placedProxies) {
     const slot = slotById.get(slotId);
     const pw = slot?.preferredWidth ?? 'full';
@@ -728,7 +728,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
       cssSelector = `[data-wm-grid="p${selectorFallbackProxy}"]`;
       selectorFallbackProxy++;
     }
-    // A3: flex NCA → flex properties; grid/block NCA → grid-column.
+    // flex NCA → flex properties; grid/block NCA → grid-column.
     let decls: string[];
     if (ncaIsFlex) {
       if (pw === 'side' && hasSide) {
@@ -746,7 +746,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     blocks.push(`${cssSelector} {\n${decls.map((d) => `  ${d};`).join('\n')}\n}`);
   }
 
-  // A5: container query — when the NCA container is narrow, collapse all placed
+  // container query — when the NCA container is narrow, collapse all placed
   // proxies to full-width. This is the browser-native responsive collapse: no
   // viewport measurement, no re-run. The browser resolves it from the container's
   // inline-size. Graceful: only emitted if container-type was set on the NCA.
@@ -774,14 +774,14 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   const selectorFallback = selectorFallbackNca + selectorFallbackProxy + selectorFallbackContents + selectorFallbackPerNode;
   const css = blocks.join('\n\n');
 
-  // B10 + C2: Law 0 assertion — reject any raw px in a sizing property in the
+  // Law 0 assertion — reject any raw px in a sizing property in the
   // emitted CSS. This is the single real gate; the old assertNoMeasurementLengths
   // mock (a hand-built provenance map that checked itself) was deleted — it was
   // documentation, not enforcement. assertNoRawPxSizing on the actual CSS catches
   // real leaks from every emission path.
   assertNoRawPxSizing(css);
 
-  // S11.3: build the emit-time plan — what the CSS INTENDS, asserted at verify time.
+  // build the emit-time plan — what the CSS INTENDS, asserted at verify time.
   const trackCount = hasSide ? 2 : 1;
   const slotToTrack: Record<string, number> = {};
   for (const slotId of placedSlots) {
@@ -794,7 +794,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   const expectedColumns = (track1Used ? 1 : 0) + (track2Used ? 1 : 0) || 1;
   const plan: SolverPlan = { trackCount, slotToTrack, expectedColumns };
 
-  // S8.5: nodesPlaced = handles placed (every found handle gets a proxy by
+  // nodesPlaced = handles placed (every found handle gets a proxy by
   // construction — the BFS always terminates at the handle's non-mixed element).
   // matched = nodesPlaced + nodesNotPlaceable.length, exactly.
   const proxySummary = [...placedProxies.entries()].map(([el, s]) => `${el.tagName.toLowerCase()}→${s}`).join(', ');
@@ -830,7 +830,7 @@ function mergeConstraints(
   for (const [, candidates] of byKind) {
     const priorityRank: Record<ConstraintPriority, number> = { required: 0, preferred: 1, optional: 2 };
     candidates.sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority]);
-    // B8: impossibleNodes removed — the conflict is logged in droppedOptionals.
+    // impossibleNodes removed — the conflict is logged in droppedOptionals.
     const winner = candidates[0];
     for (let i = 1; i < candidates.length; i++) {
       if (candidates[i].priority === 'optional') {

@@ -1,5 +1,5 @@
-/** core/perceive/dynamism — D5 (fixed/sticky/scroll behaviour) +
- *  D10 (safety flags: animations, transitions, will-change, virtualization,
+/** core/perceive/dynamism — (fixed/sticky/scroll behaviour) +
+ *  (safety flags: animations, transitions, will-change, virtualization,
  *  lazy-load, contain, iframes, closed shadow roots, !important).
  *
  *  Law 0: measurements inform decisions but never become output. No
@@ -83,7 +83,7 @@ function nearestScrollContainerHandle(el: HTMLElement, clusterOf: Map<HTMLElemen
   return null;
 }
 
-// ── D5.1 — fixed/sticky inventory ──────────────────────────────────────
+// ── fixed/sticky inventory ──────────────────────────────────────
 
 /** Inventory every position:fixed and position:sticky element. The single
  *  biggest cause of broken transformations: a sticky header overlays content
@@ -140,7 +140,7 @@ export function inventoryFixedSticky(clusters: Cluster[]): FixedStickyItem[] {
   return out;
 }
 
-// ── D5.2 — scroll behaviour ────────────────────────────────────────────
+// ── scroll behaviour ────────────────────────────────────────────
 
 /** Scroll containers (with scroll-snap), in-page anchor targets, the primary
  *  navigation region, and whether the page likely uses scroll-driven behaviour
@@ -227,7 +227,7 @@ export function inventoryScrollBehavior(clusters: Cluster[]): ScrollBehaviorProf
   return { scrollContainers, anchorTargets, primaryNav, primaryNavLinks, scrollDrivenLikely };
 }
 
-// ── D10 — safety flags per region ───────────────────────────────────────
+// ── safety flags per region ───────────────────────────────────────
 
 /** Whether a cluster's representative element has a non-trivial CSS transition
  *  active. `transitionProperty: all` or `none` is trivial; anything else
@@ -351,10 +351,10 @@ export function flagSafety(clusters: Cluster[]): RegionSafety[] {
   return out;
 }
 
-// ── Top-level entry: the full SafetyProfile (D5 + D10) ───────────────────
+// ── Top-level entry: the full SafetyProfile  ───────────────────
 
-/** Build the full dynamism + safety profile: fixed/sticky inventory (D5.1),
- *  scroll behaviour (D5.2), and per-region safety flags (D10). The single
+/** Build the full dynamism + safety profile: fixed/sticky inventory ,
+ *  scroll behaviour , and per-region safety flags . The single
  *  function the perception pipeline calls to enrich a Perception. */
 export function buildSafetyProfile(clusters: Cluster[]): SafetyProfile {
   const fixedSticky = inventoryFixedSticky(clusters);

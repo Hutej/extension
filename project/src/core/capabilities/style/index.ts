@@ -1,5 +1,5 @@
 /**
- * capabilities/style — the Phase-1 primitive of the engine.
+ * capabilities/style — the primitive of the engine.
  *
  * Turns one open-ended declaration bag into a list of SAFE CSS declarations,
  * enforcing the browser laws that make an arbitrary AI spec trustworthy:

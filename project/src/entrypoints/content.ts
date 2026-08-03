@@ -12,7 +12,7 @@
 
 import { perceive, serializePerception, serializePainterPerception, serializeV2Painter, clearHandles, clearRoleCache, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
 import { compileSpec, deriveBaseTone, type CompileOptions } from '@/core/compile';
-import { expandIntents } from '@/core/compile/expand.ts';
+import { transformIntent } from '@/core/compile/transform.ts';
 import { sanitizeCss } from '@/core/sanitize';
 import { verifyStyle, checkConformance, type VerifyResult, type ConformanceResult } from '@/core/verify';
 import { pixelVerify, classifyInvisibleFailures, type PixelVerifyResult, type InvisibleBreakdown, type PixelInput, type ClusterRect } from '@/core/verify/pixel';
@@ -33,11 +33,11 @@ import { detectExclusions } from '@/core/layout/exclusions';
 import { assignSlots } from '@/core/layout/assign';
 import { solve, computeGridPlacementCss, type SolverPlan } from '@/core/layout/solve';
 
-/** B5/C3: Redact sensitive data from a string before sending it to the model.
+/** Redact sensitive data from a string before sending it to the model.
  *  Collects form input values and credential-shaped strings, then replaces them
  *  with [REDACTED] in the serialized perception.
  *
- *  C3 safety: redaction is restricted to TEXT CONTENT and FORM VALUES only.
+ *  safety: redaction is restricted to TEXT CONTENT and FORM VALUES only.
  *  It must never touch handles, selectors, class names, CSS variable names or
  *  any structural field — a redacted selector produces a silent no-op transform.
  *  The old ≥40-char rule matched any long alphanumeric string (handles, CSS var
@@ -92,7 +92,7 @@ export interface RoleCall {
   ms: number;
   promptTokens?: number;
   completionTokens?: number;
-  /** B3: true HTTP request count (including retries). Surface this — the UI
+  /** true HTTP request count (including retries). Surface this — the UI
    *  reported 1 paid call when up to 5 HTTP requests were made. */
   httpRequests: number;
 }
@@ -102,24 +102,24 @@ export interface Ledger {
   serializeChars: number;
   serializeCharsBefore: number;  // pre-budget char count (demote/drop tail to fit the budget)
   roleCalls: RoleCall[];          // per-role calls (architect/painter/critic) — observability
-  compileMs?: number;   // B3: optional — v2 reports only when measured
+  compileMs?: number;   // optional — v2 reports only when measured
   applyMs?: number;
   verifyMs?: number;
-  pixelVerifyMs?: number;   // B3: optional — v2 doesn't separate this from verifyMs
-  persistMs?: number;      // B3: optional — v2 reports only when measured
-  unaccountedMs?: number;  // B3: optional — computed from real stages, not invented
+  pixelVerifyMs?: number;   // optional — v2 doesn't separate this from verifyMs
+  persistMs?: number;      // optional — v2 reports only when measured
+  unaccountedMs?: number;  // optional — computed from real stages, not invented
   totalMs: number;
-  paidCalls: number;        // total HTTP requests across roles (B3: includes retries)
+  paidCalls: number;        // total HTTP requests across roles (includes retries)
   repairRounds: number;     // Critic repair rounds used
   paintCount: number;     // visible repaints (the ≤2 contract)
   opsExecuted: number;      // structural DOM ops executed (remove/move/reorder/wrap)
   opsRefused: number;       // ops refused by guard laws (logged with reasons)
   opsRefusedReasons: string[]; // the `kind(handle:reason)` refusal strings (observability)
-  /** Phase-2 — escape-hatch metric: handles the model gave raw rules for (the
+  /** escape-hatch metric: handles the model gave raw rules for (the
    *  vocabulary-gap metric). Fraction > ~0.20 = a loud pivot-failure flag. */
   escapeHatchUses?: string[];
   escapeHatchFraction?: number;
-  /** Phase-2 — conformance to the declared pack (ok + violation count). The
+  /** conformance to the declared pack (ok + violation count). The
    *  violations are listed verbatim on TransformOutcome.conformance. */
   conformanceOk?: boolean;
   conformanceViolations?: number;
@@ -133,18 +133,18 @@ export interface TransformOutcome {
   spec?: DesignSpec;
   verify?: VerifyResult;
   pixel?: { passed: boolean; voids: number; invisibleText: number; squeeze: number; captureFailed?: boolean };
-  /** S11.3: placement diagnostics for the report. */
+  /** placement diagnostics for the report. */
   placement?: { placed: number; proxies: number; subgridProxies: number; singleTrackProxies: number; subgridChildAssignments: number; notPlaceable: number; gridTemplate: string; mixedProxies: number; plan?: SolverPlan; planHonoured?: boolean };
-  /** Phase-1: the per-failure-class breakdown of SURVIVING invisible-text clusters
+  /** the per-failure-class breakdown of SURVIVING invisible-text clusters
    *  (still invisible after the final paint). null when none survived. Each record
    *  names the root-cause class {no-handle, wrong-bg, cascade-loss, multi-bg} + the
    *  evidence — so the run report proves WHY the deterministic guarantee held or
    *  which class still leaks, instead of asserting a guarantee the count contradicts. */
   invisibleBreakdown?: { records: { handle: string; cls: string; evidence: string }[]; byClass: Record<string, number> } | null;
-  /** Phase-1: count of low-contrast text nodes WITHOUT a [data-wm-c] ancestor —
+  /** count of low-contrast text nodes WITHOUT a [data-wm-c] ancestor —
    *  invisible to handle-targeted repair and the pixel detector. */
   contrastNoHandle?: number;
-  /** Phase-2: conformance to the declared pack (spacing ∈ scale, type ∈ ramp,
+  /** conformance to the declared pack (spacing ∈ scale, type ∈ ramp,
    *  colors ∈ relationships, family consistency). The violations are listed
    *  verbatim in the end report. null when the spec declared no system. */
   conformance?: ConformanceResult;
@@ -156,8 +156,8 @@ export interface TransformOutcome {
   wallMs?: number;       // total transform wall-clock
   model?: string;        // which model served the request
   usage?: unknown;       // token usage
-  paidCalls?: number;    // total HTTP model requests used (B3: includes retries)
-  /** B3: whether the perception was truncated — a partial perception can ship
+  paidCalls?: number;    // total HTTP model requests used (includes retries)
+  /** whether the perception was truncated — a partial perception can ship
    *  a partial redesign as a success. Surfaced so the caller can warn. */
   perceptionTruncated?: { walk: boolean; serialize: boolean };
   paintCount?: number;   // visible repaints
@@ -170,7 +170,7 @@ const FAILED = 'webmorphFailed';
 let inFlight: Promise<TransformOutcome> | null = null;
 let activeShadowRoots: ShadowRoot[] = [];
 let lastAppliedCss = '';   // last applied CSS — for immediate shadow-root injection on dynamic content
-// S7.1: the v2 structural CSS (grid + display:contents). Stored separately so
+// the v2 structural CSS (grid + display:contents). Stored separately so
 // restyleDynamic can re-apply it alongside re-compiled Painter CSS.
 let activeStructuralCss = '';
 
@@ -197,7 +197,7 @@ function markFailed(msg: string): void {
   document.documentElement.dataset[FAILED] = msg.slice(0, 80);
 }
 
-// ── Core Phase-1 run ───────────────────────────────────────────────
+// ── Core run ───────────────────────────────────────────────
 
 /** Build ClusterRect[] from the current [data-wm-c] elements for the pixel
  *  detectors. One representative per handle, with the rendered rect + text + font
@@ -260,7 +260,7 @@ async function captureShotAt(y: number): Promise<PixelInput> {
  *  detector compares it to captures[0] (the scrollY=0 after-shot). */
 async function captureAndPixelVerify(before?: PixelInput): Promise<{ result: PixelVerifyResult; ms: number }> {
   const tc = performance.now();
-  // S7.3g: use document.body.scrollHeight (matching the test harness) so the
+  // use document.body.scrollHeight (matching the test harness) so the
   // verify pass captures at the SAME scroll positions. document.documentElement
   // and document.body can differ (margins/overflow), causing the verify to miss
   // invisible text that the test harness catches — sticky headers are always at
@@ -282,7 +282,7 @@ async function captureAndPixelVerify(before?: PixelInput): Promise<{ result: Pix
   return { result, ms: Math.round(performance.now() - tc) };
 }
 
-/** S11.3: assert the solver's emit-time plan against the rendered DOM — deterministic,
+/** assert the solver's emit-time plan against the rendered DOM — deterministic,
  *  no pixels. Checks: (1) the number of distinct VISUAL column x-positions among
  *  non-full-width placed proxies === plan.expectedColumns; (2) for each slot in the
  *  plan, at least one proxy with that slot has the expected grid-column-start.
@@ -318,7 +318,7 @@ function assertPlanHonoured(plan: SolverPlan): boolean {
   return true;
 }
 
-/** Phase-1 instrument: classify each SURVIVING invisible-text cluster (still
+/** instrument: classify each SURVIVING invisible-text cluster (still
  *  invisible after paint N) into its failure class — {no-handle, wrong-bg,
  *  cascade-loss, multi-bg} — so the run report names the ROOT CAUSE of every
  *  invisible cluster, not just the count. The repair comment promises the
@@ -351,7 +351,7 @@ function classifyInvisible(invisible: string[]): InvisibleBreakdown | null {
       const rightBg = effectiveBgAt(r.right - 8, r.top + r.height / 2);
       if (leftBg && rightBg && leftBg !== rightBg) multiBg.add(h);
     }
-    // DIAG (Phase-1): capture the cluster's computed color + the first text-bearing
+    // DIAG : capture the cluster's computed color + the first text-bearing
     // descendant's tag/computed-color, so the harness's INVISIBLE-TEXT breakdown
     // shows WHY the forced color isn't reaching the text (root-causes `unknown`).
     if (colorDiag.size < 5) {
@@ -401,7 +401,7 @@ const liveDom: DomAdapter = {
   removeChild(parent, node) { parent.removeChild(node); },
   createElement(tag) { return document.createElement(tag); },
   resolveDestination(to) { return to ? document.querySelector<HTMLElement>(`[data-wm-c="${to}"]`) : null; },
-  // B2: extract the handle from a live DOM node for handle-based inverse resolution.
+  // extract the handle from a live DOM node for handle-based inverse resolution.
   handleOf(node) { return node instanceof HTMLElement ? node.getAttribute('data-wm-c') : null; },
 };
 
@@ -504,7 +504,7 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
     // DOM marker is never set, so the harness waits the full timeout. Catch it,
     // log it loudly, mark failed, and return a clean error outcome so the popup
     // gets a real error message (not a "Cannot reach the page" lie) and the
-    // harness sees the failed marker. The Phase-2 conformance block + the expander
+    // harness sees the failed marker. The conformance block + the engine
     // are the prime throw risks (a malformed packOverrides can spread a non-object).
     const msg = (err as Error)?.message || 'Transform crashed (internal error).';
     logDebug(`RUN CRASHED: ${msg}` + (err && (err as Error).stack ? `\n${(err as Error).stack}` : ''));
@@ -518,7 +518,7 @@ async function runStyle(intent: string, restyleOnly = false): Promise<TransformO
 
 async function runStyleImpl(intent: string, restyleOnly = false): Promise<TransformOutcome> {
   const t0 = Date.now();
-  // B4: global abort — one time budget enforced across the whole pipeline.
+  // global abort — one time budget enforced across the whole pipeline.
   // Per-call timeouts exist, but runs can still exceed designMaxMs when verify +
   // persist + repair all add up. This check leaves the page untouched on abort.
   const budgetExceeded = (): boolean => Date.now() - t0 > AI_CONFIG.designMaxMs;
@@ -531,7 +531,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   stopDynamicDefense();
   activeSpec = null;
   // Clear any stale style from a previous transform or reapplyStored before the
-  // new transform begins — ensures the before-capture (A1) sees the true original
+  // new transform begins — ensures the before-capture  sees the true original
   // AND no stale style survives a model failure (the dense-news-page discrepancy).
   removeStyleEverywhere(activeShadowRoots);
   lastAppliedCss = '';
@@ -540,12 +540,12 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   let perception = perceive();
   activeShadowRoots = perception.shadowRoots;
   const serialized = serializePerception(perception);
-  // B5: redact sensitive data (form values, credentials) before sending to the model.
+  // redact sensitive data (form values, credentials) before sending to the model.
   const serializedRedacted = redactSensitiveData(serialized);
   const serializeChars = serializedRedacted.length;
-  // B3: flag serialization truncation (budget hit → demoted/dropped entries).
+  // flag serialization truncation (budget hit → demoted/dropped entries).
   if (perception.truncated) perception.truncated.serialize = lastSerializeBudget.before > lastSerializeBudget.after;
-  // Phase 2 — the Painter decides surface (not layout), so it gets a TRIMMED
+  // the Painter decides surface (not layout), so it gets a TRIMMED
   // perception: header + role/group inventory, no per-cluster geometry/colors
   // (work item B — cuts Painter prompt ~40% + its wall-clock). The Architect keeps
   // the full serialization (it needs geometry for reflow). Logged for the ledger.
@@ -573,7 +573,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const u = res.usage as { prompt_tokens?: number; completion_tokens?: number } | undefined;
     roleCalls.push({ role, ms: res.callMs, promptTokens: u?.prompt_tokens, completionTokens: u?.completion_tokens, httpRequests: res.httpRequests ?? 1 });
   };
-  // B3: paidCalls = sum of actual HTTP requests (including retries), not just
+  // paidCalls = sum of actual HTTP requests (including retries), not just
   //  the number of role calls. The UI was reporting 1 call when up to 5 were made.
   const paidCalls = (): number => roleCalls.reduce((s, c) => s + c.httpRequests, 0);
   // A Critic repair round fits only if the remaining wall-clock clears the per-call
@@ -595,7 +595,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     for (const h of new Set(targets)) {
       const el = document.querySelector<HTMLElement>(`[data-wm-c="${h}"]`);
       if (!el) continue;
-      // S7.3g: skip content images (url()) but NOT gradients. A gradient bg can
+      // skip content images (url()) but NOT gradients. A gradient bg can
       // make text invisible; the inline backstop (inline+!important) overrides it
       // with a readable solid pair. Content images are preserved.
       if (/url\(/i.test(getComputedStyle(el).backgroundImage)) continue;
@@ -611,20 +611,20 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     }
   };
 
-  // S4 — v2 path: solver structural CSS + Painter aesthetic CSS. One paid call
+  // v2 path: solver structural CSS + Painter aesthetic CSS. One paid call
   // (Painter only). The solver handles the page shell (grid + slot wrappers); the
   // Painter handles the surface (colors, fonts, surfaces). Behind layoutCompiler=v2.
-  // S4.1: Painter gets a v2 payload (role/slot only, no geometry).
-  // S4.3: verify + deterministic repair + hard gates, same as v1.
+  // Painter gets a v2 payload (role/slot only, no geometry).
+  // verify + deterministic repair + hard gates, same as v1.
   if (AI_CONFIG.layoutCompiler === 'v2' && !restyleOnly) {
-    // S7.1: CSS-only relayout. No DOM mutation, nothing for txnLog to undo.
+    // CSS-only relayout. No DOM mutation, nothing for txnLog to undo.
     // Undo = removeStyleEverywhere (the stylesheet carries the grid + display:contents).
     // Clean up any stale data-wm-grid / data-wm-plan-slot debug attributes from a prior transform.
     document.querySelectorAll('[data-wm-grid]').forEach((el) => el.removeAttribute('data-wm-grid'));
     document.querySelectorAll('[data-wm-plan-slot]').forEach((el) => el.removeAttribute('data-wm-plan-slot'));
     removeStyleEverywhere(activeShadowRoots);
 
-    // S4.1: compute IR + slots BEFORE the Painter so the payload has slot info.
+    // compute IR + slots BEFORE the Painter so the payload has slot info.
     // The solver + assignment are free (synchronous, no model calls).
     const v2IR = extractLayoutIR(perception);
     const v2ExcludedRaw = detectExclusions(perception.clusters);
@@ -632,7 +632,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     for (const [h] of v2ExcludedRaw) v2ExcludedSet.add(h);
     const v2Assignment = assignSlots(v2IR.nodes);
 
-    // S4.1: v2 Painter payload — role/slot only, no geometry/rects/widths/positions.
+    // v2 Painter payload — role/slot only, no geometry/rects/widths/positions.
     const v2Serialized = redactSensitiveData(serializeV2Painter(perception, v2Assignment));
     logDebug(`v2 painter payload: ${v2Serialized.length}chars (v1 painter=${painterSerialized.length}chars, full=${serializeChars}chars)`);
 
@@ -645,13 +645,13 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     }
     const v2Spec = v2PaintRes.spec;
 
-    // B4: global abort after the model call — leaves the page untouched.
+    // global abort after the model call — leaves the page untouched.
     if (budgetExceeded()) {
       rollbackFailed('global time budget exceeded');
       return { ok: false, kind: 'timeout', message: 'The design exceeded the time budget and was rolled back.', paidCalls: paidCalls(), wallMs: Date.now() - t0 };
     }
 
-    // Solver (free): placement data + grid template. S7.1: CSS-only, no DOM mutation.
+    // Solver (free): placement data + grid template. CSS-only, no DOM mutation.
     const v2SolveResult = solve({ ir: v2IR, assignment: v2Assignment, excluded: v2ExcludedSet });
     const v2Placement = computeGridPlacementCss(v2SolveResult);
     logDebug(`v2 solver: ${v2SolveResult.matchedTargets} matched, ${v2Placement.nodesPlaced} placed (proxies=${v2Placement.proxyCount}), ${v2Placement.nodesNotPlaceable.length} not placeable, ${v2Placement.intermediatesCollapsed} mixed-proxy (${v2Placement.subgridProxies} subgrid, ${v2Placement.singleTrackProxies} singleTrack, ${v2Placement.subgridChildAssignments} childAssign, mixed=${v2Placement.mixedProxies}), selectorFallback=${v2Placement.selectorFallback} (nca=${v2Placement.selectorFallbackNca} proxy=${v2Placement.selectorFallbackProxy} contents=${v2Placement.selectorFallbackContents} perNode=${v2Placement.selectorFallbackPerNode}), ${v2SolveResult.rulesEmitted} CSS rules`);
@@ -674,9 +674,9 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const v2ModelAddressed = new Set<string>();
     for (const rule of v2Spec.rules) if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide) v2ModelAddressed.add(rule.target);
     if (v2Spec.composition) for (const rule of v2Spec.composition) if (rule.styles || rule.layout || rule.hide) v2ModelAddressed.add(rule.target);
-    if (v2Spec.intents?.length) for (const h of expandIntents(v2Spec, perception).expandedTargets) v2ModelAddressed.add(h);
+    if (v2Spec.relations?.length) for (const h of transformIntent(v2Spec, perception).expandedTargets) v2ModelAddressed.add(h);
 
-    // S8.1: display:contents'd elements with [data-wm-c] have their box dissolved.
+    // display:contents'd elements with [data-wm-c] have their box dissolved.
     // Their content is visible in the children (now grid items), but the handle's
     // region collapses. Exempt these handles from the contentIntact check so a
     // real structural reshape isn't falsely flagged as content collapse.
@@ -687,9 +687,9 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     document.documentElement.dataset['webmorphPaintCount'] = '1';
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
-    // S4.3: verify (DOM + pixel) — the safety net v2 was missing.
+    // verify (DOM + pixel) — the safety net v2 was missing.
     const v2VerifyMs = performance.now();
-    // S7.1: no moved handles — CSS-only placement, zero DOM mutation.
+    // no moved handles — CSS-only placement, zero DOM mutation.
     let v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), new Set(), reflowOpportunity);
     let v2Px = await captureAndPixelVerify(beforeTop);
     let v2Pixel = v2Px.result;
@@ -697,7 +697,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     logDebug(`v2 paint1: checks=${JSON.stringify(v2Verify.checks)} pixel(passed=${v2Pixel.passed} voids=${v2Pixel.voids.length} invisible=${v2Pixel.invisibleText.length} squeeze=${v2Pixel.squeeze.length}) change=${v2Verify.changeScore.toFixed(3)}`);
     if (v2Verify.details.length) logDebug(`v2 paint1 details: ${v2Verify.details.join(' | ')}`);
 
-    // S4.3: deterministic repair (free — no paid reReason). forceContrast + squeeze
+    // deterministic repair (free — no paid reReason). forceContrast + squeeze
     // repairs from planRepair, recompiled + re-applied as paint 2. Runs BEFORE the
     // hard gate so repair can fix what's fixable; the hard gate is the FINAL check.
     if (!v2Verify.checks.notBlank) {
@@ -725,7 +725,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
         const v2Compiled2 = compileSpec(v2Spec, perception, v2Options);
         v2CombinedCss = sanitizeCss(v2StructuralCss + '\n' + sanitizeCss(v2Compiled2.css).css).css;
         applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
-        // S7.3g: apply inline backstop to ALL contrast targets (DOM + pixel), not
+        // apply inline backstop to ALL contrast targets (DOM + pixel), not
         // just pixel-invisible. The CSS forceContrast rules (specificity 0,2,0) don't
         // beat id-level site !important; inline styles do. Without this, clusters with
         // id-level !important survive forceContrast and become invisible after re-apply.
@@ -740,10 +740,10 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
         v2Pixel = v2Px.result;
         v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
         logDebug(`v2 paint2(repair): checks=${JSON.stringify(v2Verify.checks)} pixel(passed=${v2Pixel.passed} voids=${v2Pixel.voids.length} invisible=${v2Pixel.invisibleText.length} squeeze=${v2Pixel.squeeze.length})`);
-        // S8: repair regression guard — if paint2 broke a hard gate that paint1
+        // repair regression guard — if paint2 broke a hard gate that paint1
         // passed, the repair made things worse. Revert to paint1 CSS + state.
         // The repair is supposed to help (fix contrast), not hurt (break overflow).
-        // S11.4: layoutReshaped removed from regression guard (demoted to advisory).
+        // layoutReshaped removed from regression guard (demoted to advisory).
         // planHonoured is structural (same CSS at paint1/paint2) — not in the guard.
         const p1Gates = v2Paint1Verify.checks.notBlank && v2Paint1Verify.checks.contentIntact &&
           v2Paint1Verify.checks.contentVisible && v2Paint1Verify.checks.noOverflow &&
@@ -770,7 +770,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     }
     const v2VerifyMsTotal = Math.round(performance.now() - v2VerifyMs);
 
-    // S10.2: capture the transformed frame at verify time (CSS still applied).
+    // capture the transformed frame at verify time (CSS still applied).
     // Stored in chrome.storage.local for the harness to read and save to disk.
     // This is the ONLY screenshot that shows the transformed state — the post-
     // marker screenshot is taken after rollback (CSS gone) on hard-gate failure.
@@ -783,17 +783,17 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       });
     } catch { /* best effort — don't block the gate */ }
 
-    // S4.3: HARD GATES (the final check, AFTER repair). These FAIL the run and
+    // HARD GATES (the final check, AFTER repair). These FAIL the run and
     // roll back: overflow, hidden content, horizontal scrolling, element overlap.
-    // S11.3: planHonoured is a HARD gate — the solver's emit-time plan (trackCount,
+    // planHonoured is a HARD gate — the solver's emit-time plan (trackCount,
     // slotToTrack, expectedColumns) must match the rendered DOM. Catches the
     // track-inheritance defect: if all content auto-places into track 1 despite
     // the plan saying 2 columns, planHonoured fails.
-    // S11.4: layoutReshaped is DEMOTED to advisory (logged, not gated). It went
+    // layoutReshaped is DEMOTED to advisory (logged, not gated). It went
     // green on a one-column MDN page — a width-delta proxy, not a structural truth.
     // usesRoom stays a hard gate.
     // movedAlive is N/A for v2 (zero moves → vacuously true) — NOT in the gate.
-    // S9.4: squeeze is a HARD gate. S10.3a: captureFailed is a HARD gate.
+    // squeeze is a HARD gate. captureFailed is a HARD gate.
     const v2PlanHonoured = assertPlanHonoured(v2Placement.plan);
     logDebug(`v2 plan: trackCount=${v2Placement.plan.trackCount} expectedColumns=${v2Placement.plan.expectedColumns} slotToTrack=${JSON.stringify(v2Placement.plan.slotToTrack)} honoured=${v2PlanHonoured}`);
     const v2HardGates = v2Verify.checks.notBlank && v2Verify.checks.contentIntact &&
@@ -831,7 +831,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     markApplied(v2Id);
 
     const v2TotalMs = Date.now() - t0;
-    // B7: v2ModelMs removed — unused variable (lint: no-unused-vars).
+    // v2ModelMs removed — unused variable (lint: no-unused-vars).
     logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] verify=${v2VerifyMsTotal}ms total=${v2TotalMs}ms paidCalls=${paidCalls()} placed=${v2Placement.nodesPlaced} subgrid=${v2Placement.subgridProxies} singleTrack=${v2Placement.singleTrackProxies} childAssign=${v2Placement.subgridChildAssignments} notPlaceable=${v2Placement.nodesNotPlaceable.length} selectorFallback=${v2Placement.selectorFallback} planCols=${v2Placement.plan.expectedColumns} planHonoured=${v2PlanHonoured} paints=${v2PaintCount}`);
 
     return {
@@ -879,7 +879,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     // retry was tried but pushed large pages past the hard budget (a timeout wastes
     // the paid call); shipping the recolor + honest failure is the lesser evil.
   }
-  // B4: global abort after the design calls — leaves the page untouched.
+  // global abort after the design calls — leaves the page untouched.
   if (budgetExceeded() && (!archRes.ok || !paintRes.ok)) {
     rollbackFailed('global time budget exceeded');
     return { ok: false, kind: 'timeout', message: 'The design exceeded the time budget and was rolled back.', paidCalls: paidCalls(), wallMs: Date.now() - t0 };
@@ -895,15 +895,14 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   logDebug(`architect=${archRes.ok ? 'ok' : (restyleOnly ? 'skipped' : 'FAIL')} painter=${paintRes.ok ? 'ok' : 'FAIL'} merged rules=${spec.rules.length} composition=${spec.composition?.length ?? 0} clusters=${perception.clusters.length}`);
   logDebug(`paletteMode=${spec.paletteMode ?? 'restrained(default)'} rules=${spec.rules.length}`);
 
-  // Phase 2 evidence dump — the model's intents + pack + overrides + the expander's
-  // resolved rules/composition/escape-hatch. This is the missing observability next
-  // to the already-logged conformance + escape-hatch aggregate; it lets a run be
-  // diagnosed by LAYER (model intents vs expander mapping) without a debugger.
+  // Evidence dump — the model's relations + pack + overrides + the engine's
+  // resolved rules/composition/escape-hatch. Lets a run be diagnosed by LAYER
+  // (model relations vs engine mapping) without a debugger.
   {
-    const exp = expandIntents(spec, perception);
-    logDebug(`PHASE2 EVIDENCE pack=${spec.pack ?? 'default'} packOverrides=${spec.packOverrides ? JSON.stringify(spec.packOverrides).slice(0, 400) : 'none'}`);
-    logDebug(`PHASE2 INTENTS (${spec.intents?.length ?? 0}): ${(spec.intents ?? []).map((i) => JSON.stringify({ target: i.target, emphasis: i.emphasis, density: i.density, placement: i.placement, measure: i.measure, aesthetic: i.aesthetic })).join(' | ')}`);
-    logDebug(`PHASE2 EXPANDED rules=${exp.rules.length} composition=${exp.composition.length} ops=${exp.ops.length} escapeHatch=${exp.escapeHatchUses.length}/${exp.expandedTargets.length}=${(exp.escapeHatchFraction * 100).toFixed(0)}%${exp.notes.length ? ` notes=${exp.notes.slice(0, 6).join('; ')}` : ''}`);
+    const exp = transformIntent(spec, perception);
+    logDebug(`EVIDENCE pack=${spec.pack ?? 'default'} packOverrides=${spec.packOverrides ? JSON.stringify(spec.packOverrides).slice(0, 400) : 'none'}`);
+    logDebug(`RELATIONS (${spec.relations?.length ?? 0}): ${(spec.relations ?? []).map((r) => JSON.stringify(r)).join(' | ')}`);
+    logDebug(`RESOLVED rules=${exp.rules.length} composition=${exp.composition.length} ops=${exp.ops.length} escapeHatch=${exp.escapeHatchUses.length}/${exp.expandedTargets.length}=${(exp.escapeHatchFraction * 100).toFixed(0)}%${exp.notes.length ? ` notes=${exp.notes.slice(0, 6).join('; ')}` : ''}`);
   }
 
 
@@ -958,16 +957,13 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     }
   }
   if (spec.ops) for (const op of spec.ops) modelAddressed.add(op.target);
-  // Phase 2 — the intents expand to per-handle rules. Count the expander's resolved
-  // targets as model-addressed too, or the coverage gate undercounts (modelCov) and
-  // the escape-hatch denominator is wrong: the raw escape-hatch rules ÷ pre-expansion
-  // spec.rules reads ~100% (a false pivot-failure flag) when the model emitted 8 raw
-  // overrides on top of 111 intent-expanded rules. A role/group intent that fanned
-  // out to 60 handles counts all 60 as model work, not 0. The expander is pure + free
-  // (0 model calls); resolving the targets once here (the same call compileSpec makes
-  // internally) keeps the coverage gate honest for BOTH paints' verify passes.
-  if (spec.intents?.length) {
-    for (const h of expandIntents(spec, perception).expandedTargets) modelAddressed.add(h);
+  // The relations resolve to per-handle rules. Count the engine's resolved
+  // targets as model-addressed too, or the coverage gate undercounts (modelCov)
+  // and the escape-hatch denominator is wrong. The engine is pure + free
+  // (0 model calls); resolving the targets once here keeps the coverage gate
+  // honest for BOTH paints' verify passes.
+  if (spec.relations?.length) {
+    for (const h of transformIntent(spec, perception).expandedTargets) modelAddressed.add(h);
   }
 
   let options: CompileOptions = { paletteMode: spec.paletteMode };
@@ -975,7 +971,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   let lastVerify: VerifyResult | null = null;
   let lastPixel: PixelVerifyResult | null = null;
   let lastBreakdown: InvisibleBreakdown | null = null;
-  let lastCompiled: ReturnType<typeof compileSpec> | null = null;   // Phase 2 — escape-hatch + conformance inputs
+  let lastCompiled: ReturnType<typeof compileSpec> | null = null;   // escape-hatch + conformance inputs
   let compileMsTotal = 0, applyMsTotal = 0, verifyMsTotal = 0, pixelVerifyMsTotal = 0;
 
   // Batched repair: apply once (paint 1) → verify (DOM + pixel) → compute ALL
@@ -994,7 +990,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     applyStyleEverywhere(sanitized, activeShadowRoots);
     // Inline forceContrast backstop: forces the readable pair onto each invisible
     // cluster's own element, beating id-level site !important that defeats the CSS
-    // rule (the cascade-loss class). S7.3g: applied to ALL contrast targets (DOM +
+    // rule (the cascade-loss class). applied to ALL contrast targets (DOM +
     // pixel), not just pixel-invisible — id-level !important survivors need inline.
     const allContrastTargetsV1 = [...new Set([...(opts.pixelInvisibleTargets ?? []), ...(opts.contrastTargets ?? [])])];
     applyInlineBackstop(curSpec, allContrastTargetsV1, opts.contrastTargetBgs);
@@ -1010,7 +1006,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     verifyMsTotal += performance.now() - tcVerify;
     const px = await captureAndPixelVerify(restyleOnly ? undefined : beforeTop);
     pixelVerifyMsTotal += px.ms;
-    // Phase-1 instrument: classify each surviving invisible-text cluster into its
+    // instrument: classify each surviving invisible-text cluster into its
     // root-cause class so the run report names WHY each is still invisible, not just
     // the count. The breakdown is logged per-paint and carried on the outcome.
     const breakdown = classifyInvisible(px.result.invisibleText);
@@ -1135,21 +1131,21 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   const finalPaintCount = paintCount;
   if (finalPaintCount > 2) logDebug(`PAINT BUDGET EXCEEDED: ${finalPaintCount} > 2 (visible repair theater)`);
 
-  // Phase 2 — conformance: a free, deterministic check that the emitted CSS
-  // follows its own declared design system (the pack the expander resolved).
+  // conformance: a free, deterministic check that the emitted CSS
+  // follows its own declared design system (the pack the engine resolved).
   // The first constructive verification. Computed on the final applied CSS +
   // the spec + the escape-hatch from the last compile. The violations are
   // logged VERBATIM (calibrate before promoting to a hard gate next phase);
   // the escape-hatch FRACTION > ~20% is a loud pivot-failure flag (the model is
-  // dodging the intent DSL) — logged + surfaced even when the design applies.
+  // dodging the relation language) — logged + surfaced even when the design applies.
   let conformance: ConformanceResult | null = null;
   if (lastCompiled && lastVerify) {
     const escapeHatchUses = lastCompiled.escapeHatchUses ?? [];
-    // Total targets = every handle a rule/composition/op targeted OR the intents
-    // expanded to. modelAddressed (built above) already folds in the expander's
+    // Total targets = every handle a rule/composition/op targeted OR the relations
+    // expanded to. modelAddressed (built above) already folds in the engine's
     // resolved targets, so this is the honest denominator for the escape-hatch
     // fraction (raw-ruled handles ÷ all model-targeted handles). >20% = the model
-    // is dodging the intent DSL — a pivot-failure flag.
+    // is dodging the relation language — a pivot-failure flag.
     const totalTargets = Math.max(1, modelAddressed.size);
     // Conformance is a CONSTRUCTIVE signal, not a hard gate this phase — it must
     // never break the transform. A malformed packOverrides (the model emits
@@ -1161,7 +1157,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       conformance = checkConformance(lastCompiled.css || '', spec, escapeHatchUses, totalTargets);
       lastVerify.conformance = conformance;
       logDebug(`CONFORMANCE pack=${conformance.packId} ok=${conformance.ok} violations=${conformance.violations.length} escapeHatch=${escapeHatchUses.length}/${totalTargets} (${(conformance.escapeHatchFraction * 100).toFixed(0)}%)${conformance.violations.length ? `\n  violations:\n` + conformance.violations.slice(0, 20).map((v) => `    - ${v}`).join('\n') : ''}${lastCompiled.expandNotes?.length ? `\n  expand notes: ${lastCompiled.expandNotes.slice(0, 8).join('; ')}` : ''}`);
-      if (conformance.escapeHatchFraction > 0.20) logDebug(`ESCAPE-HATCH FRACTION >20%: ${(conformance.escapeHatchFraction * 100).toFixed(0)}% of targets used raw rules — the model is dodging the intent DSL (a pivot-failure flag even if the design applies)`);
+      if (conformance.escapeHatchFraction > 0.20) logDebug(`ESCAPE-HATCH FRACTION >20%: ${(conformance.escapeHatchFraction * 100).toFixed(0)}% of targets used raw rules — the model is dodging the relation language (a pivot-failure flag even if the design applies)`);
     } catch (err) {
       logDebug(`CONFORMANCE skipped (threw — a malformed packOverrides?): ${(err as Error)?.message}`);
     }
@@ -1232,7 +1228,7 @@ function failVerify(spec: DesignSpec, verify: VerifyResult): TransformOutcome {
   return { ok: false, message: 'Result failed checks: ' + verify.details.slice(0, 3).join('; '), spec, reasoning: spec.reasoning, verify };
 }
 
-// S6.1: fixture mode — inlined at build time, 'off' (default) → dead branch in production.
+// fixture mode — inlined at build time, 'off' (default) → dead branch in production.
 const FIXTURE_MODE = (process.env.WM_FIXTURES ?? 'off') as 'off' | 'record' | 'replay';
 
 // ponytail: djb2 — 4-line non-crypto hash for stale-fixture detection (not security).
@@ -1244,7 +1240,7 @@ function djb2(s: string): string {
 
 function askForSpec(role: Role, intent: string, perception: string, critique?: string, timeoutMs?: number): Promise<SpecResponse> {
   return new Promise((resolve) => {
-    // S6.1: fixture replay — return stored response, zero network. The harness
+    // fixture replay — return stored response, zero network. The harness
     // injects the fixture via chrome.storage.local before the transform.
     if (FIXTURE_MODE === 'replay') {
       const key = 'webmorph_fixture_' + role;
@@ -1274,7 +1270,7 @@ function askForSpec(role: Role, intent: string, perception: string, critique?: s
       clearTimeout(t);
       if (chrome.runtime.lastError || !response) resolve({ ok: false, message: chrome.runtime.lastError?.message || 'No response from design engine.' });
       else {
-        // S6.1: fixture record — store the raw response via chrome.storage.local
+        // fixture record — store the raw response via chrome.storage.local
         // for the harness to read and write to disk.
         if (FIXTURE_MODE === 'record' && response?.ok) {
           void chrome.storage.local.set({ ['webmorph_fixture_' + role]: { hash: djb2(perception), response } });
@@ -1285,7 +1281,7 @@ function askForSpec(role: Role, intent: string, perception: string, critique?: s
   });
 }
 
-// A8: resize-invariance harness — wired, NOT YET RUN. This is a legitimate
+// resize-invariance harness — wired, NOT YET RUN. This is a legitimate
 // hard gate once validated against real sites. A layout built from constraints
 // survives a viewport change with no pipeline re-run. Call after the final
 // hard-gate check to validate the transform is resize-invariant.
@@ -1307,7 +1303,7 @@ async function reapplyStored(): Promise<boolean> {
     if (!state.style) return false;
   }
   if (!state.enabled || !state.style?.css) return false;
-  clearRoleCache();  // S10.3b: invalidate stale roles from the previous route
+  clearRoleCache();  // invalidate stale roles from the previous route
   clearHandles();
   let perception = perceive();
   activeShadowRoots = perception.shadowRoots;
@@ -1327,7 +1323,7 @@ async function reapplyStored(): Promise<boolean> {
   }
   txnLog.clear(); // fresh session — the log is session-only
   const opts = state.style.compileOptions ?? { paletteMode: state.style.spec.paletteMode };
-  // S7.3g: for v2, use the stored combined CSS directly (the exact CSS from paint2).
+  // for v2, use the stored combined CSS directly (the exact CSS from paint2).
   // Re-compilation with a fresh perception can produce slightly different forceContrast
   // text colors (stale contrastTargetBgs vs fresh cl.style.background), causing text
   // to become invisible after undo-fidelity toggle. The stored CSS is authoritative.
@@ -1371,12 +1367,12 @@ async function toggleSiteState(): Promise<void> {
  *  DOM), then strip the CSS. The escape hatch stays instant and absolute —
  *  ops are undone BEFORE the style tag is removed, so the page returns to its
  *  pre-transform state in one synchronous pass. The log is session-only.
- *  B2: returns { undone, failed } from the undo for the structural assertion. */
+ *  returns { undone, failed } from the undo for the structural assertion. */
 function undoOpsAndCss(): { undone: number; failed: number } {
   stopDynamicDefense();
   activeSpec = null; activeOps = []; activeStructuralCss = '';
   const undoResult = txnLog.undoAll(liveDom);
-  // S7.1: clean up data-wm-grid / data-wm-plan-slot debug attributes from CSS-only placement.
+  // clean up data-wm-grid / data-wm-plan-slot debug attributes from CSS-only placement.
   document.querySelectorAll('[data-wm-grid]').forEach((el) => el.removeAttribute('data-wm-grid'));
   document.querySelectorAll('[data-wm-plan-slot]').forEach((el) => el.removeAttribute('data-wm-plan-slot'));
   removeStyleEverywhere(activeShadowRoots); removeEscapeUI();
@@ -1384,7 +1380,7 @@ function undoOpsAndCss(): { undone: number; failed: number } {
   return undoResult;
 }
 
-/** B2: structural invariant — after any failed transform, the DOM must be
+/** structural invariant — after any failed transform, the DOM must be
  *  structurally identical to its pre-transform state. Encoded as an assertion,
  *  not a comment: no WebMorph-injected elements or attributes may remain. */
 function assertDomClean(undoResult: { undone: number; failed: number }): void {
@@ -1398,11 +1394,11 @@ function assertDomClean(undoResult: { undone: number; failed: number }): void {
       gridAttrs > 0 ? `${gridAttrs} grid attr(s) still present` : '',
       undoResult.failed > 0 ? `${undoResult.failed} undo(s) failed` : '',
     ].filter(Boolean).join('; ');
-    console.error(`[WebMorph] B2 INVARIANT VIOLATION: DOM not clean after failed transform: ${issues}`);
+    console.error(`[WebMorph] INVARIANT VIOLATION: DOM not clean after failed transform: ${issues}`);
   }
 }
 
-/** B2: rollback a failed transform — undo ops, strip CSS, assert DOM clean,
+/** rollback a failed transform — undo ops, strip CSS, assert DOM clean,
  *  mark failed. Every failure path calls this instead of just stripping CSS. */
 function rollbackFailed(msg: string): void {
   const ur = undoOpsAndCss();
@@ -1434,7 +1430,7 @@ function restyleDynamic(): void {
   const { ops: revalidated } = validateOps(activeSpec.ops, perception);
   if (revalidated.length) { executeOps(revalidated, false); activeOps = revalidated; }
   const compiled = compileSpec(activeSpec, perception, activeOpts);
-  // S7.1: prepend the stored structural CSS (grid + display:contents) so the
+  // prepend the stored structural CSS (grid + display:contents) so the
   // grid layout survives dynamic re-style (MutationObserver re-apply path).
   const painterCss = sanitizeCss(compiled.css).css;
   const css = activeStructuralCss ? sanitizeCss(activeStructuralCss + '\n' + painterCss).css : painterCss;
@@ -1507,7 +1503,7 @@ function onRouteChange(): void {
 
 async function handleRouteChange(): Promise<void> {
   if (inFlight) return; // a transform is running — it will handle the current page
-  clearRoleCache();  // S10.3b: invalidate stale roles on SPA navigation
+  clearRoleCache();  // invalidate stale roles on SPA navigation
   stopDynamicDefense();
   activeSpec = null;
   removeStyleEverywhere(activeShadowRoots);

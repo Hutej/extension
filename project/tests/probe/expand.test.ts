@@ -1,24 +1,25 @@
 /**
- * Self-check for core/compile/expand — the deterministic expander, + the
- * conformance check. One runnable check (ponytail rule: non-trivial logic
- * leaves the smallest thing that fails if the logic breaks). Run:
+ * Self-check for core/compile/transform — the deterministic transformation
+ * engine, + the conformance check. One runnable check (ponytail rule:
+ * non-trivial logic leaves the smallest thing that fails if the logic
+ * breaks). Run:
  *   node --experimental-strip-types tests/probe/expand.test.ts
  *
- * Builds a tiny synthetic perception + spec and checks:
- *  - a role-targeted intent fans out to every member of that role.
- *  - a `topbar` placement produces a reorder op + a full-width composition.
- *  - a `collapse`/`hidden` on a low-confidence role is REFUSED (hard-safety rule).
- *  - a `collapse` on a high-confidence ad-or-void produces a remove op.
+ * Tests:
+ *  - a role-targeted relation fans out to every member of that role.
+ *  - a widthFraction relation produces a composition width.
+ *  - a hide on a low-confidence role is REFUSED (hard-safety rule).
+ *  - a hide on a high-confidence role produces a hide rule.
  *  - the escape-hatch fraction is computed.
  *  - conformance: an on-pack CSS passes; an off-scale spacing value violates.
  */
-import { expandIntents } from '../../src/core/compile/expand.ts';
+import { transformIntent } from '../../src/core/compile/transform.ts';
 import { checkConformance } from '../../src/core/verify/index.ts';
 import type { DesignSpec } from '../../src/core/spec/index.ts';
 import type { Perception, Cluster } from '../../src/core/perceive/index.ts';
 import type { DesignRole } from '../../src/core/perceive/semantic.ts';
 
-// A minimal Cluster factory (only the fields the expander reads).
+// A minimal Cluster factory (only the fields the engine reads).
 function cl(handle: string, role: DesignRole, conf: number, opts: Partial<Cluster> = {}): Cluster {
   return {
     handle, selector: `[data-wm-c="${handle}"]`, count: 1, tag: 'div', role: null,
@@ -56,34 +57,29 @@ const assert = (cond: boolean, msg: string) => { if (!cond) { console.log(`✗ $
 const p1 = perception([
   cl('c111111', 'listing', 0.8), cl('c222222', 'listing', 0.8), cl('c333333', 'article-body', 0.9),
 ]);
-const e1 = expandIntents({ reasoning: '', pack: 'minimal-editorial', intents: [{ target: 'listing', emphasis: 'hero' }], rules: [] }, p1);
+const e1 = transformIntent({ reasoning: '', pack: 'minimal-editorial', relations: [{ relation: 'sizeRatio', subject: 'listing', reference: 'body', ratio: 1.5 }], rules: [] }, p1);
 assert(e1.rules.length === 2, `role target fans out to every member (got ${e1.rules.length} rules for 2 listings)`);
 assert(e1.rules.some((r) => r.target === 'c111111') && e1.rules.some((r) => r.target === 'c222222'), 'both listing handles got a rule');
-assert(!e1.rules.some((r) => r.target === 'c333333'), 'the article-body was NOT targeted by the listing intent');
+assert(!e1.rules.some((r) => r.target === 'c333333'), 'the article-body was NOT targeted by the listing relation');
 
-// 2) topbar placement → a reorder op + a full-width composition.
+// 2) widthFraction relation → a composition width.
 const p2 = perception([cl('c444444', 'nav-local', 0.9), cl('c555555', 'article-body', 0.9)]);
-const e2 = expandIntents({ reasoning: '', pack: 'minimal-editorial', intents: [{ target: 'c444444', placement: 'topbar' }], rules: [] }, p2);
-assert(e2.ops.some((o) => o.kind === 'reorder' && o.target === 'c444444'), 'topbar → a reorder op on the rail');
-assert(e2.composition.some((r) => r.target === 'c444444' && r.layout?.width === '100%'), 'topbar → full-width composition on the rail');
+const e2 = transformIntent({ reasoning: '', pack: 'minimal-editorial', relations: [{ relation: 'widthFraction', subject: 'c444444', reference: 'c555555', fraction: 1.0 }], rules: [] }, p2);
+assert(e2.composition.some((r) => r.target === 'c444444' && r.layout?.width === '100%'), 'widthFraction 1.0 → 100% width composition');
 
-// 3) collapse on a low-confidence role is REFUSED (hard-safety rule).
+// 3) hide on a low-confidence role is REFUSED (hard-safety rule).
 const p3 = perception([cl('c666666', 'ad-or-void', 0.3), cl('c777777', 'ad-or-void', 0.8)]);
-const e3 = expandIntents({ reasoning: '', pack: 'minimal-editorial', intents: [{ target: 'c666666', placement: 'collapse' }, { target: 'c777777', placement: 'collapse' }], rules: [] }, p3);
-assert(!e3.ops.some((o) => o.kind === 'remove' && o.target === 'c666666'), 'collapse on low-confidence role REFUSED (no remove op)');
-assert(e3.ops.some((o) => o.kind === 'remove' && o.target === 'c777777'), 'collapse on high-confidence ad-or-void → remove op');
-assert(e3.notes.some((n) => n.includes('REFUSED')), 'a refusal note was emitted for the low-confidence collapse');
+const e3 = transformIntent({ reasoning: '', pack: 'minimal-editorial', relations: [{ relation: 'hide', subject: 'c666666' }, { relation: 'hide', subject: 'c777777' }], rules: [] }, p3);
+assert(!e3.rules.some((r) => r.target === 'c666666' && r.hide), 'hide on low-confidence role REFUSED (no hide rule)');
+assert(e3.rules.some((r) => r.target === 'c777777' && r.hide), 'hide on high-confidence ad-or-void → hide rule');
+assert(e3.notes.some((n) => n.includes('REFUSED')), 'a refusal note was emitted for the low-confidence hide');
 
-// 4) hidden on a low-confidence role is REFUSED.
-const e4 = expandIntents({ reasoning: '', pack: 'minimal-editorial', intents: [{ target: 'c666666', emphasis: 'hidden' }], rules: [] }, p3);
-assert(!e4.rules.some((r) => r.target === 'c666666' && r.hide), 'hidden on low-confidence role REFUSED (no hide rule)');
+// 4) escape-hatch: a raw rule on a handle the relations also targeted is counted.
+const e5 = transformIntent({ reasoning: '', pack: 'minimal-editorial', relations: [{ relation: 'emphasisRank', subject: 'c777777', rank: 2 }], rules: [{ target: 'c777777', styles: { color: '#f00' } }] }, p3);
+assert(e5.escapeHatchUses.includes('c777777'), 'a raw rule on a relation-targeted handle is counted as escape-hatch');
 
-// 5) escape-hatch: a raw rule on a handle the intents also targeted is counted.
-const e5 = expandIntents({ reasoning: '', pack: 'minimal-editorial', intents: [{ target: 'c777777', emphasis: 'normal' }], rules: [{ target: 'c777777', styles: { color: '#f00' } }] }, p3);
-assert(e5.escapeHatchUses.includes('c777777'), 'a raw rule on an intent-targeted handle is counted as escape-hatch');
-
-// 6) conformance: on-pack CSS passes; an off-scale spacing value violates.
-const spec: DesignSpec = { reasoning: '', pack: 'minimal-editorial', intents: [{ target: 'listing', emphasis: 'hero' }], rules: [] };
+// 5) conformance: on-pack CSS passes; an off-scale spacing value violates.
+const spec: DesignSpec = { reasoning: '', pack: 'minimal-editorial', relations: [{ relation: 'typeRank', subject: 'listing', rank: 0 }], rules: [] };
 const onPackCss = '[data-wm-c="c111111"] {\n  padding: 16px !important;\n  font-size: 48px !important;\n  background: #fafaf7 !important;\n}\n';
 const cOk = checkConformance(onPackCss, spec, [], 1);
 assert(cOk.ok, `on-pack CSS conforms (violations: ${cOk.violations.join('; ')})`);
@@ -96,9 +92,9 @@ assert(!cBad.ok, 'off-scale spacing + off-ramp type → conformance fails');
 assert(cBad.violations.some((v) => v.includes('spacing off-scale')), 'an off-scale spacing violation is reported verbatim');
 assert(cBad.violations.some((v) => v.includes('type off-ramp')), 'an off-ramp type violation is reported verbatim');
 
-// 7) a spec with no intents/pack (raw-only) → conformance ok with no violations.
+// 6) a spec with no relations/pack (raw-only) → conformance ok with no violations.
 const cRaw = checkConformance('body { padding: 99px !important; }', { reasoning: '', rules: [] } as DesignSpec, [], 1);
 assert(cRaw.ok, 'a raw-only spec (no declared system) → conformance ok (no system to check against)');
 
-console.log(failures === 0 ? '\n✓ expand + conformance self-check PASS' : `\n✗ expand + conformance self-check FAIL: ${failures} assertion(s)`);
+console.log(failures === 0 ? '\n✓ transform + conformance self-check PASS' : `\n✗ transform + conformance self-check FAIL: ${failures} assertion(s)`);
 process.exit(failures === 0 ? 0 : 1);

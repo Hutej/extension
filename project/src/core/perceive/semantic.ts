@@ -1,6 +1,6 @@
 /**
  * core/perceive/semantic — the deterministic semantic-role classifier + designer
- * signals. Phase 1 of the semantic-graph pivot.
+ * signals. of the semantic-graph pivot.
  *
  * The senior-dev diagnosis: the model designs geometric rectangles, not meaning —
  * it must rediscover what the page IS on every run → run-to-run variance. The fix:
@@ -52,16 +52,16 @@ export interface ClusterSignals {
   fontSize: number;               // px
   isNativeControl: boolean;
   hasSolidBg: boolean;
-  /** Phase 2 — the cluster IS or CONTAINS a code block: a <pre>/<code>/syntax-
+  /** the cluster IS or CONTAINS a code block: a <pre>/<code>/syntax-
    *  highlight element, or a class/id token like 'code'/'syntax'/'highlight'.
    *  A text-less+image-less code container must classify as article-body, never
    *  ad-or-void (the MDN code-example trap). Universal convention, not a site recipe. */
   codeHint: boolean;
-  /** Phase 2 — the cluster sits inside article flow (a main/article ancestor). A
+  /** the cluster sits inside article flow (a main/article ancestor). A
    *  text-less+image-less block with real height in article flow is content, not a
    *  void — it classifies as article-body, never ad-or-void. */
   inArticleFlow: boolean;
-  /** Phase 5/X2 — TOC signal: the cluster is a table-of-contents — a nav/aside/ol/ul
+  /** TOC signal: the cluster is a table-of-contents — a nav/aside/ol/ul
    *  whose links are predominantly same-page fragment anchors (href^="#") pointing
    *  at headings in the main content. Detected in gatherSignals (needs DOM); scored
    *  here. Principled: no site names, no selectors. */
@@ -387,7 +387,7 @@ export function summarizeComposition(
 export function hash(str: string): string {
   let h = 2166136261;
   for (let i = 0; i < str.length; i++) { h ^= str.charCodeAt(i); h = Math.imul(h, 16777619); }
-  // B8: .slice(-6) removed — drops the most significant digit for values >= 36^6.
+  // .slice(-6) removed — drops the most significant digit for values >= 36^6.
   // Modulo 36^6 ensures the value fits in 6 base36 digits, matching perceive/index.ts.
   return ((h >>> 0) % 2176782336).toString(36).padStart(6, '0');
 }

@@ -18,7 +18,7 @@ import { buildLayoutDeclarations } from '../capabilities/structure/index.ts';
 import { isSafeValue, MAX_HIDDEN_WIDTH_RATIO, MAX_HIDDEN_HEIGHT_PX, MAX_HIDDEN_MEMBERS, MAX_ACCENT_FRACTION, assertNoRawPxSizing, MIN_CHARS_PER_LINE, MIN_CONTENT_WIDTH_FRACTION } from '../laws/index.ts';
 import { parseColor, colorfulness, pickReadableText, extractGradientStops, pickReadableTextForGradient } from '../../shared/color.ts';
 import { validateOps, type ValidatedOp } from '../ops/index.ts';
-import { expandIntents } from './expand.ts';
+import { transformIntent } from './transform.ts';
 
 export interface CompileOptions {
   forceContrast?: boolean;
@@ -33,7 +33,7 @@ export interface CompileOptions {
   pixelInvisibleTargets?: string[]; // pixel-invisible clusters: force a readable bg+text PAIR (not just text) — guards hasBgImage
   wordBreakTargets?: string[]; // targeted bleed repair: overflow-wrap on ONLY these bleeding clusters
   collapseTargets?: string[]; // targeted collapse repair: drop layout on ONLY these collapsed regions (preserves the rest of the design)
-  paletteMode?: 'restrained' | 'vivid'; // declared palette intent — vivid lifts the area cap
+  paletteMode?: 'restrained' | 'vivid'; // declared palette mode — vivid lifts the area cap
 }
 
 const ACCENT_STRIP_KEYS = ['background', 'backgroundColor', 'backgroundImage', 'color'];
@@ -43,24 +43,24 @@ export interface CompileResult {
   rulesEmitted: number;
   invalidTargets: string[];
   droppedProps: string[];
-  baseCoatCount: number;       // A6: always 0 now (base-coat deleted) — kept for compat
-  /** A6: forceContrast is a last-resort safety net, reported — never silent.
+  baseCoatCount: number;       // always 0 now (base-coat deleted) — kept for compat
+  /** forceContrast is a last-resort safety net, reported — never silent.
    *  Each handle where forceContrast applied a readable pair is listed here so
    *  the run report names the colour-constraint failures. */
   forceContrastReport: string[];
   /** Structural ops accepted by the guard laws (content.ts executes them live).
    *  Refused ops are in droppedProps as `kind(target:reason)`. */
   ops: ValidatedOp[];
-  /** Phase 2 — handles the model ALSO gave raw rules for (the escape hatch).
+  /** Handles the model ALSO gave raw rules for (the escape hatch).
    *  Logged loudly; the count + the FRACTION = the vocabulary-gap metric. */
   escapeHatchUses?: string[];
   escapeHatchFraction?: number;
-  /** Phase 2 — every handle the intents resolved to (the expander's allTargets).
-   *  The model coverage gate + the escape-hatch denominator count these — Phase 2
-   *  moved the model's output from raw rules to intents, so pre-expansion spec.rules
+  /** Every handle the relations resolved to (the engine's allTargets).
+   *  The model coverage gate + the escape-hatch denominator count these —
+   *  the model's output is relations (not raw rules), so pre-expansion spec.rules
    *  (the raw escape-hatch only) undercount what the model addressed. */
   expandedTargets?: string[];
-  /** Phase 2 — the expander's per-intent notes (refusals, topbar/collapse
+  /** The engine's per-relation notes (refusals, topbar/collapse
    *  derivations). Surfaced on the run report. */
   expandNotes?: string[];
 }
@@ -77,30 +77,30 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
   let rulesEmitted = 0;
   let baseCoatCount = 0;
 
-  // Phase 2 — the expander: if the spec has intents (the primary model output),
-  // map intents + the pack + the Phase 1 semantic graph to concrete
+  // The transformation engine: if the spec has relations (the primary model
+  // output), resolve them against perception into concrete
   // rules/composition/ops. Merge with the spec's raw escape-hatch rules (raw
   // wins per-handle — the escape hatch is the model's explicit override). The
-  // expander is pure, deterministic, free (0 model calls).
+  // engine is pure, deterministic, free (0 model calls).
   let escapeHatchUses: string[] = [];
   let escapeHatchFraction = 0;
   let expandNotes: string[] = [];
   let expandedTargets: string[] = [];
   let spec = specIn;
-  if (specIn.intents && specIn.intents.length) {
-    const exp = expandIntents(specIn, perception);
+  if (specIn.relations && specIn.relations.length) {
+    const exp = transformIntent(specIn, perception);
     escapeHatchUses = exp.escapeHatchUses;
     escapeHatchFraction = exp.escapeHatchFraction;
     expandNotes = exp.notes;
     expandedTargets = exp.expandedTargets;
     // Merge: expanded rules are the base; raw escape-hatch rules override per
-    // handle (the model's explicit low-level override beats the derived intent).
+    // handle (the model's explicit low-level override beats the derived relation).
     const rulesByHandle = new Map<string, DesignRule>();
     for (const r of exp.rules) rulesByHandle.set(r.target, { ...r });
     for (const r of specIn.rules) {
       const existing = rulesByHandle.get(r.target);
       if (existing) {
-        // Raw wins: the escape hatch overrides the expanded intent on its handle.
+        // Raw wins: the escape hatch overrides the expanded relation on its handle.
         if (r.styles) existing.styles = { ...(existing.styles ?? {}), ...r.styles };
         if (r.layout) existing.layout = { ...(existing.layout ?? {}), ...r.layout };
         if (r.hover) existing.hover = { ...r.hover };
@@ -194,7 +194,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
           droppedProps.push(`refusePageNarrowing: canvasLayout.maxWidth ${modelPx}px -> ${pctValue} (zoom-proof percentage; floor = ${Math.round(MIN_CONTENT_WIDTH_FRACTION * 100)}% of ${cmw}px natural content on a wide page)`);
         }
       } else if (canvasLayout.maxWidth) {
-        // A4: percentify DELETED. A px cap is zoom-hostile, but converting it to
+        // percentify DELETED. A px cap is zoom-hostile, but converting it to
         // a viewport percentage is the exact failure Law 0 describes. The
         // structure path's min(X, 100%) wrapping provides relational sizing.
       }
@@ -221,7 +221,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
       }
       if (readable) decls.push(`color: ${readable} !important;`);
     }
-    // A6: overflow-x: clip DELETED. Bleed means the layout was over-constrained.
+    // overflow-x: clip DELETED. Bleed means the layout was over-constrained.
     // Fix the constraint, don't clip the symptom.
     if (decls.length) { blocks.push(`html, body {\n${indent(decls)}\n}`); rulesEmitted++; }
 
@@ -263,7 +263,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
       }
       if (rule.layout && !opts.collapseTargets?.includes(rule.target)) {
         const clampThis = opts.dropSizing || (opts.clampTargets?.includes(rule.target) ?? false);
-        // A4: percentify DELETED. Converting a desired pixel width into a
+        // percentify DELETED. Converting a desired pixel width into a
         // percentage of the captured viewport is the exact failure Law 0
         // describes. The structure path's min(X, 100%) wrapping provides
         // relational sizing without measurement-derived percentages.
@@ -346,7 +346,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
       // Targeted overflow repair: strip growth-sizing on ONLY the offending
       // clusters, leaving every other cluster's layout intact (vs the blanket
       // dropLayout that collapsed the whole redesign into a recolor).
-      // A6: squeeze repair DELETED. If content is squeezed, a min-width or
+      // squeeze repair DELETED. If content is squeezed, a min-width or
       // WrapOnOverflow constraint is missing — fix the constraint, not the symptom.
       const clampThis = opts.dropSizing || (opts.clampTargets?.includes(rule.target) ?? false);
       let layoutInput = rule.layout;
@@ -356,7 +356,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
       // The cluster's samples tell us it carries text; the layout value tells us
       // how narrow. Pure geometry — no aesthetic logic.
       layoutInput = refuseSubMeasure(layoutInput, cluster, droppedProps, rule.target);
-      // A4: percentify DELETED — see composition-rule note above.
+      // percentify DELETED — see composition-rule note above.
       const r = buildLayoutDeclarations(layoutInput, {
         isConstraintOwner: cl?.isContainer ?? false,
         ownsTarget: cl?.constraintOwnerHandle != null,
@@ -431,7 +431,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
     // color readable against it. Guard: skip clusters with background images (thumbnails)
     // so content images are never painted over.
     if (opts.pixelInvisibleTargets?.length) {
-      // Phase-1 root-cause fix (wrong-bg failure class): the OLD code derived ONE
+      // root-cause fix (wrong-bg failure class): the OLD code derived ONE
       // bg+text pair for ALL pixel-invisible clusters from `deriveBaseTone(canvasBg)`
       // — the CANVAS bg, not the surface each cluster's text actually sits on. A
       // cluster on a dark ancestor-painted panel got a canvas-derived pair (light bg
@@ -481,22 +481,22 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
     }
   }
 
-  // A6: clip overflow repair DELETED. Bleed means the layout was over-constrained.
+  // clip overflow repair DELETED. Bleed means the layout was over-constrained.
   // Fix the constraint, don't clip the symptom.
 
-  // A6: base-coat harmonizer DELETED. Fifty unaddressed clusters receiving an
+  // base-coat harmonizer DELETED. Fifty unaddressed clusters receiving an
   // identical background and text colour is flat uniformity, not design. Each
   // cluster gets its own constraint-driven styling. The constraint that now
   // carries the load: FillParent + MaxWidth + StackVertically per slot.
   // (The baseCoatCount stays 0 — reported for backward compat.)
 
-  // B10: Law 0 assertion — reject any raw px in a sizing property that reached
+  // Law 0 assertion — reject any raw px in a sizing property that reached
   // the final CSS. The structure path wraps fixed px by construction (min(X,100%));
   // a raw px here means a path leaked. THROWS, does not rewrite — the source is
   // fixed, so the guard is a gate, not a bandage.
   assertNoRawPxSizing(blocks.join('\n\n'));
 
-  // A6: forceContrast reporting — a last-resort safety net, never silent.
+  // forceContrast reporting — a last-resort safety net, never silent.
   // Collect the handles where forceContrast applied a readable pair.
   const forceContrastReport: string[] = opts.forceContrast
     ? [...new Set([...(opts.contrastTargets ?? []), ...(opts.pixelInvisibleTargets ?? [])])]
@@ -504,7 +504,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
 
   return {
     css: blocks.join('\n\n'), rulesEmitted, invalidTargets, droppedProps, baseCoatCount, forceContrastReport, ops: validatedOps,
-    ...(escapeHatchUses.length || specIn.intents?.length ? { escapeHatchUses, escapeHatchFraction, expandNotes, expandedTargets } : {}),
+    ...(escapeHatchUses.length || specIn.relations?.length ? { escapeHatchUses, escapeHatchFraction, expandNotes, expandedTargets } : {}),
   };
 }
 
@@ -568,12 +568,12 @@ function planAccentKeep(spec: DesignSpec, byHandle: Map<string, Cluster>, percep
  * (they contain the page), never page-scale containers or huge repeated
  * clusters (likely content lists).
  *
- * HARD SAFETY RULE (Phase 2, permanent): a destructive intent (hide) is
+ * HARD SAFETY RULE (permanent): a destructive relation (hide) is
  * FORBIDDEN on any role below the confidence threshold — the classifier is less
  * than coin-flip sure what this region is, so deleting it risks removing content
  * it misread. Low-confidence roles get conservative treatment only. The
  * threshold (0.5) is the value below which a role is "uncertain"; a confident
- * ad-or-void/nav-chrome stays hideable. Enforced here (the expander), not just
+ * ad-or-void/nav-chrome stays hideable. Enforced here (the engine), not just
  * the prompt.
  */
 const DESTRUCTIVE_CONFIDENCE_FLOOR = 0.5;

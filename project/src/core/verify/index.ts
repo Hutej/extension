@@ -15,13 +15,13 @@ import {
   luminanceCompatible, MIN_CHARS_PER_LINE,
 } from '../laws/index.ts';
 import { parseColor, contrastRatio, colorfulness, colorDistance, extractGradientStops, type RGBA } from '../../shared/color.ts';
-import { packForSpec } from '../compile/expand.ts';
+import { packForSpec } from '../compile/transform.ts';
 import type { DesignSpec } from '../spec/index.ts';
 
 const OVERLAP_TOLERANCE = 2; // allow minor noise / a couple of self-inflicted-but-benign overlaps
 
-/** Phase 2 — conformance: a deterministic, FREE check that the emitted CSS follows
- *  its own declared design system (the pack the expander resolved). The first
+/** Conformance: a deterministic, FREE check that the emitted CSS follows
+ *  its own declared design system (the pack the engine resolved). The first
  *  CONSTRUCTIVE verification (everything before was defensive). Reported per run
  *  alongside the defensive checks; the violations are listed VERBATIM in the end
  *  report so we can calibrate before promoting conformance to a hard gate (next
@@ -30,7 +30,7 @@ export interface ConformanceResult {
   ok: boolean;
   /** Every violation, verbatim — for the end report (calibrate before enforcing). */
   violations: string[];
-  /** The pack the expander resolved (the declared system the CSS is checked against). */
+  /** The pack the engine resolved (the declared system the CSS is checked against). */
   packId: string;
   /** Handles the model gave raw rules for (the escape hatch) — the vocabulary-gap metric. */
   escapeHatchUses: string[];
@@ -58,7 +58,7 @@ export interface VerifyResult {
   /** Count of low-contrast text nodes WITHOUT a [data-wm-c] ancestor — invisible to
    *  handle-targeted repair (forceContrast targets handles) and to the pixel
    *  detector (only scans [data-wm-c] rects). The canvas text floor + base-coat are
-   *  the only paths that reach un-clustered text. Surfaced for the Phase-1 run report
+   *  the only paths that reach un-clustered text. Surfaced for the run report
    *  so a no-handle failure class is visible, not silently dropped. */
   contrastNoHandle: number;
   /** Handles of moved/reordered nodes that did NOT survive the move (gone, hidden,
@@ -68,7 +68,7 @@ export interface VerifyResult {
    *  Architect left untouched (same width+position, no op). Empty when the reflow
    *  was addressed (op on the handle) OR no reflow was warranted. */
   reflowSkippedHandles: string[];
-  /** Phase 2 — conformance to the declared pack (spacing ∈ scale, type ∈ ramp,
+  /** Conformance to the declared pack (spacing ∈ scale, type ∈ ramp,
    *  colors ∈ relationships). Logged (constructive signal, not a hard gate this
    *  phase); the violations are listed verbatim in the end report. null when the
    *  spec had no intents/pack (a raw-only or restyle-only run — no declared system). */
@@ -552,7 +552,7 @@ function measureFramedClusterFraction(): number {
 // ── contrast ───────────────────────────────────────────────────────
 
 function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<string, string>, _noHandle: { count: number }): boolean {
-  // S8.4: sample ONE REPRESENTATIVE PER [data-wm-c] handle (reuses the
+  // sample ONE REPRESENTATIVE PER [data-wm-c] handle (reuses the
   // findBleedTargets dedupe pattern) instead of a global size-sorted element
   // list. The old code had two compounding bugs:
   //  (a) candidates filtered to textContent.trim().length >= 5 — "MDN" is 3
@@ -599,7 +599,7 @@ function checkContrast(details: string[], targets: Set<string>, targetBgs: Map<s
       details.push(`low contrast on "${(el.textContent || '').trim().slice(0, 24)}"`);
     }
   }
-  // S8.4: failedTop = failures among the top-N largest-font representatives.
+  // failedTop = failures among the top-N largest-font representatives.
   // Preserves the strict "top-10 largest text must ALL pass" rule WITHOUT the
   // global font-size sort that cut 13px text from sampling entirely.
   const sorted = [...checkedReps].sort((a, b) => b.fs - a.fs);
@@ -658,7 +658,7 @@ function alphaBlend(fg: RGBA, bg: RGBA): RGBA {
 
 function clamp01(n: number): number { return Math.max(0, Math.min(1, n)); }
 
-// ── Phase 2 — conformance (constructive verification) ───────────────
+// ── Conformance (constructive verification) ──────────────────────────
 
 /** Tolerance for matching a spacing value to the scale (a value within this many
  *  px of a scale step counts as "on the scale" — base-coat + the structure path's
@@ -705,7 +705,7 @@ function pxValues(value: string): number[] {
   return out;
 }
 
-/** Check the emitted CSS against the pack the expander resolved. Pure, free,
+/** Check the emitted CSS against the pack the engine resolved. Pure, free,
  *  deterministic. Returns the violations VERBATIM (for the end report) + the
  *  escape-hatch metric. A conformance failure is LOGGED this phase (constructive
  *  signal, not a hard gate — calibrate from the grid before promoting it). */
@@ -713,16 +713,16 @@ export function checkConformance(css: string, spec: DesignSpec, escapeHatchUses:
   const pack = packForSpec(spec);
   const violations: string[] = [];
 
-  // Only check when the spec declared a system (intents or a pack choice). A
-  // raw-only or restyle-only run with no intents has no declared system —
+  // Only check when the spec declared a system (relations or a pack choice). A
+  // raw-only or restyle-only run with no relations has no declared system —
   // conformance is null at the call site; this returns ok with no violations.
-  if (!spec.intents?.length && !spec.pack) {
+  if (!spec.relations?.length && !spec.pack) {
     return { ok: true, violations, packId: pack.id, escapeHatchUses, escapeHatchFraction: 0 };
   }
 
   // 1) Spacing ∈ declared scale. Every padding/gap/margin px value should be a
   //    step on the pack's spacingScale (±tolerance). A value off the scale is a
-  //    violation (the model emitted a raw px the expander didn't clamp, or an
+  //    violation (the model emitted a raw px the engine didn't clamp, or an
   //    escape-hatch rule with an off-system spacing).
   const spacingProps = ['padding', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'gap', 'margin', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left', 'margin-inline', 'margin-block'];
   const spacingValues = cssValuesForProps(css, spacingProps);
@@ -775,21 +775,20 @@ export function checkConformance(css: string, spec: DesignSpec, escapeHatchUses:
   }
 
   // 4) Family consistency — every member of a group/role the model targeted got
-  //    the same intent. Checked from the spec's intents: two intents on the same
-  //    role/group with different emphasis/density/measure/aesthetic is a
-  //    contradiction (the family is half-styled). This catches the model emitting
-  //    conflicting intents on the same family.
+  //    the same relation. Checked from the spec's relations: two relations on
+  //    the same subject with conflicting relations is a contradiction (the
+  //    family is half-styled). This catches the model emitting conflicting
+  //    relations on the same family.
   const byTarget = new Map<string, Set<string>>();
-  for (const intent of spec.intents ?? []) {
-    const key = `${intent.targetKind ?? ''}:${intent.target}`;
-    const sig = [intent.emphasis, intent.density, intent.measure, intent.aesthetic ? JSON.stringify(intent.aesthetic) : ''].filter(Boolean).join('|');
-    const set = byTarget.get(key) ?? new Set<string>();
+  for (const rel of spec.relations ?? []) {
+    const sig = JSON.stringify(rel);
+    const set = byTarget.get(rel.subject) ?? new Set<string>();
     set.add(sig);
-    byTarget.set(key, set);
+    byTarget.set(rel.subject, set);
   }
   let familyInconsistency = 0;
   for (const [key, sigs] of byTarget) {
-    if (sigs.size > 1) { familyInconsistency++; violations.push(`family inconsistency: target ${key} has ${sigs.size} distinct intents — ${[...sigs].join(' / ')}`); }
+    if (sigs.size > 1) { familyInconsistency++; violations.push(`family inconsistency: subject ${key} has ${sigs.size} distinct relations — ${[...sigs].join(' / ')}`); }
   }
 
   const ok = spacingOff === 0 && typeOff === 0 && colorOff === 0 && familyInconsistency === 0;

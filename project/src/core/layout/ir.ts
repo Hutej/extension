@@ -1,5 +1,5 @@
 /**
- * core/layout/ir — the Current Layout IR. Phase 2.5, Step 1.
+ * core/layout/ir — the Current Layout IR. 
  *
  * The IR answers "how is it arranged?" — a SEPARATE stage from Perception ("what is this?") and the
  * Semantic Model ("what is this: a nav-primary?"). It is a PURE PROJECTION of a Perception into the

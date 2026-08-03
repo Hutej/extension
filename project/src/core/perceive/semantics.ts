@@ -1,10 +1,10 @@
-/** core/perceive/semantics — D9 (landmarks, interactive inventory) +
- *  C4 (heading outline tree) + C7 (component-type taxonomy). */
+/** core/perceive/semantics — (landmarks, interactive inventory) +
+ *  (heading outline tree) + (component-type taxonomy). */
 
 import type { Cluster } from './index.ts';
 import { deepQuerySelector } from './dom-utils.ts';
 
-// ── C4 (carried from enrichment.ts): Heading outline tree ───────────
+// ── Heading outline tree ───────────
 
 export interface HeadingNode {
   level: number;
@@ -51,7 +51,7 @@ export function buildOutline(): { tree: HeadingNode[]; clusterByHeading: Map<str
   return { tree, clusterByHeading };
 }
 
-// ── C7 (carried from enrichment.ts): Component-type taxonomy ────────
+// ── Component-type taxonomy ────────
 
 export type ComponentType =
   | 'card' | 'list' | 'table' | 'form' | 'hero' | 'navbar' | 'siderail'
@@ -114,7 +114,7 @@ export function classifyComponentType(cluster: Cluster, el: HTMLElement | null):
   return { type: 'unknown', confidence: 0 };
 }
 
-// ── D9: landmarks + interactive inventory ────────────────────────────
+// ── landmarks + interactive inventory ────────────────────────────
 
 // HTML5 sectioning elements that imply an ARIA landmark. 'search' has no
 // HTML5 tag — it is role-only. Form maps to tag <form> / role="form".

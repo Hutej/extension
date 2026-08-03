@@ -1,11 +1,11 @@
-/** core/perceive/spatial — D2 (position, adjacency, columns, reading order,
- *  gutters, symmetry, focal point) + D7 (density, rhythm, room).
+/** core/perceive/spatial — (position, adjacency, columns, reading order,
+ *  gutters, symmetry, focal point) + (density, rhythm, room).
  *  Spatial relationships derived from cluster positions. */
 
 import type { Cluster } from './index.ts';
 import { colorfulness, parseColor } from '../../shared/color.ts';
 
-// ── C8 (carried from enrichment.ts): Density, rhythm, alignment ─────
+// ── Density, rhythm, alignment ─────
 
 export interface DensityProfile {
   rhythmBaseline: number;     // modal gap between siblings (px)
@@ -36,7 +36,7 @@ export function measureDensity(clusters: Cluster[], _viewport: { w: number; h: n
   return { rhythmBaseline, alignmentEdges, whitespaceGini };
 }
 
-/** Measure alignment edges from cluster rect positions (D2: uses rect.x
+/** Measure alignment edges from cluster rect positions (uses rect.x
  *  directly — positions are now on the rects, no live-DOM re-query). */
 export function measureAlignmentEdges(clusters: Cluster[], _vpW: number): number[] {
   const edgeCounts = new Map<number, number>();
@@ -48,7 +48,7 @@ export function measureAlignmentEdges(clusters: Cluster[], _vpW: number): number
   return [...edgeCounts.entries()].filter(([, n]) => n >= 2).map(([e]) => e).sort((a, b) => a - b).slice(0, 8);
 }
 
-// ── D2 — Position layer types ───────────────────────────────────────
+// ── Position layer types ───────────────────────────────────────
 
 export interface SpatialAdjacency {
   above: string | null;  // handle of cluster directly above
@@ -98,7 +98,22 @@ export interface SpatialModel {
   focalPoint: FocalPoint | null;
 }
 
-// ── D7 — Density, rhythm, room types ───────────────────────────────
+// ── Vertical row groups ────────────────────────────────────────
+
+/** A row group: clusters that share a y-band (overlapping or adjacent vertical
+ *  positions). Carries the member handles, the y-band extent, and how the members
+ *  align within the row. Measurements inform decisions (Law 0) — the px height is
+ *  perception data the design step converts to ratios; vAlign/hAlign are ranks. */
+export interface RowGroup {
+  members: string[];      // cluster handles sharing the y-band (left-to-right)
+  y: number;               // top of the y-band (px, document coords)
+  yEnd: number;            // bottom of the y-band (px)
+  height: number;          // yEnd - y (px) — the row's vertical extent
+  vAlign: 'top' | 'center' | 'bottom' | 'mixed';   // how members line up vertically
+  hAlign: 'start' | 'center' | 'end' | 'stretch' | 'mixed';  // horizontal distribution
+}
+
+// ── Density, rhythm, room types ───────────────────────────────
 
 export interface RegionDensity {
   handle: string;
@@ -120,7 +135,7 @@ export interface ExpandedDensityProfile extends DensityProfile {
   paddingOutliers: string[]; // handles that deviate
 }
 
-// ── D2 — buildSpatialModel ─────────────────────────────────────────
+// ── buildSpatialModel ─────────────────────────────────────────
 
 /** Compute the full spatial model: adjacency, columns, reading order,
  *  gutters, symmetry, and focal point. All derived from cluster rects —
@@ -135,10 +150,94 @@ export function buildSpatialModel(clusters: Cluster[], viewport: { w: number; h:
   return { adjacency, columns, readingOrder, gutters, symmetry, focalPoint };
 }
 
-// ── D7 — measureDensityV2 ───────────────────────────────────────────
+// ── buildRowGroups ──────────────────────────────────────────────
+
+const ROW_MIN_W = 40;
+const ROW_MIN_H = 16;
+const ROW_ALIGN_TOL_PX = 8;   // px tolerance for "edges line up"
+const ROW_ALIGN_TOL_FRAC = 0.02; // 2% of parent width
+
+/** Group clusters sharing a y-band into rows. A row = a set of clusters whose
+ *  y-ranges overlap (any overlap — same greedy rule as computeReadingOrder).
+ *  Rows with fewer than 2 members are dropped (a single cluster is not a group).
+ *  vAlign is derived from how member tops/bottoms/centers line up; hAlign from
+ *  how members distribute across their common parent's width (when they share
+ *  one). Pure rect math — no DOM access. */
+export function buildRowGroups(clusters: Cluster[]): RowGroup[] {
+  const eligible = clusters.filter((c) => c.rect.w >= ROW_MIN_W && c.rect.h >= ROW_MIN_H);
+  if (eligible.length < 2) return [];
+  const sorted = [...eligible].sort((a, b) => a.rect.y - b.rect.y);
+  const rows: { y: number; yEnd: number; members: Cluster[] }[] = [];
+  for (const c of sorted) {
+    const cy = c.rect.y;
+    const cyEnd = c.rect.y + c.rect.h;
+    let found = false;
+    for (const row of rows) {
+      if (cy < row.yEnd && row.y < cyEnd) {
+        row.members.push(c);
+        row.y = Math.min(row.y, cy);
+        row.yEnd = Math.max(row.yEnd, cyEnd);
+        found = true;
+        break;
+      }
+    }
+    if (!found) rows.push({ y: cy, yEnd: cyEnd, members: [c] });
+  }
+  const out: RowGroup[] = [];
+  for (const row of rows) {
+    if (row.members.length < 2) continue;
+    const members = row.members.sort((a, b) => a.rect.x - b.rect.x);
+    out.push({
+      members: members.map((m) => m.handle),
+      y: Math.round(row.y),
+      yEnd: Math.round(row.yEnd),
+      height: Math.round(row.yEnd - row.y),
+      vAlign: classifyVAlign(members),
+      hAlign: classifyHAlign(members, clusters),
+    });
+  }
+  return out;
+}
+
+/** How members line up vertically within the row: tops aligned → 'top',
+ *  bottoms aligned → 'bottom', centers aligned → 'center', else 'mixed'. */
+function classifyVAlign(members: Cluster[]): RowGroup['vAlign'] {
+  const spread = (xs: number[]): number => Math.max(...xs) - Math.min(...xs);
+  if (spread(members.map((m) => m.rect.y)) <= ROW_ALIGN_TOL_PX) return 'top';
+  if (spread(members.map((m) => m.rect.y + m.rect.h)) <= ROW_ALIGN_TOL_PX) return 'bottom';
+  if (spread(members.map((m) => m.rect.y + m.rect.h / 2)) <= ROW_ALIGN_TOL_PX) return 'center';
+  return 'mixed';
+}
+
+/** How members distribute horizontally across their common parent's width.
+ *  Requires a shared parent cluster; without one the reference box is unknown
+ *  → 'mixed'. leading≈0 & trailing≈0 → 'stretch'; leading≈0 → 'start';
+ *  trailing≈0 → 'end'; leading≈trailing → 'center'; else 'mixed'. */
+function classifyHAlign(members: Cluster[], all: Cluster[]): RowGroup['hAlign'] {
+  const parentHandle = members[0].layout.parentHandle;
+  if (!parentHandle || !members.every((m) => m.layout.parentHandle === parentHandle)) return 'mixed';
+  const parent = all.find((c) => c.handle === parentHandle);
+  if (!parent) return 'mixed';
+  const pLeft = parent.rect.x;
+  const pRight = parent.rect.x + parent.rect.w;
+  const pWidth = pRight - pLeft;
+  if (pWidth <= 0) return 'mixed';
+  const tol = Math.max(ROW_ALIGN_TOL_PX, pWidth * ROW_ALIGN_TOL_FRAC);
+  const mLeft = Math.min(...members.map((m) => m.rect.x));
+  const mRight = Math.max(...members.map((m) => m.rect.x + m.rect.w));
+  const leading = mLeft - pLeft;
+  const trailing = pRight - mRight;
+  if (Math.abs(leading) <= tol && Math.abs(trailing) <= tol) return 'stretch';
+  if (Math.abs(leading) <= tol) return 'start';
+  if (Math.abs(trailing) <= tol) return 'end';
+  if (Math.abs(leading - trailing) <= tol) return 'center';
+  return 'mixed';
+}
+
+// ── measureDensityV2 ───────────────────────────────────────────
 
 /** Expanded density profile: per-region density, free room, vertical rhythm
- *  variance, and padding rhythm. Extends the C8 DensityProfile so the
+ *  variance, and padding rhythm. Extends the DensityProfile so the
  *  existing `density` field on Perception stays type-compatible. */
 export function measureDensityV2(clusters: Cluster[], viewport: { w: number; h: number }): ExpandedDensityProfile {
   const base = measureDensity(clusters, viewport);

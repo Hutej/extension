@@ -6,15 +6,17 @@
  * recipes FORBIDDEN, no named-site clones.
  *
  * The model picks a pack (or blends/overrides for a novel prompt) and maps roles
- * onto it; the deterministic expander (core/compile/expand.ts) resolves the
- * pack + the model's overrides into the concrete CSS the compiler emits. EVERY
- * pack field is model-overridable via the spec's `packOverrides` — packs floor
+ * onto it; the deterministic transformation engine (core/compile/transform.ts)
+ * resolves the pack + the model's overrides into the concrete CSS the compiler
+ * emits. EVERY pack field is model-overridable via the spec's `packOverrides` — packs floor
  * quality, they must NOT cap creativity (the test grid rotates NOVEL prompts
  * that override a pack; a lookup table that only handles known styles is a
  * failure).
  *
  * Pure data + pure resolvers — no DOM, no model calls, unit-testable.
  */
+
+import type { PackPrinciples } from './vocabulary.ts';
 
 /** The type-size roles on a pack's ramp. */
 export type TypeRole = 'display' | 'heading' | 'body' | 'small';
@@ -24,8 +26,8 @@ export type SurfaceTier = 'flat' | 'raised' | 'overlay';
 
 export interface SurfaceDef {
   bg: string;          // the surface background (a pack color or a named accent)
-  border?: string;    // a border value (borderScale step resolved by the expander)
-  shadow?: string;    // a shadow value (shadowScale step resolved by the expander)
+  border?: string;    // a border value (borderScale step resolved by the engine)
+  shadow?: string;    // a shadow value (shadowScale step resolved by the engine)
 }
 
 export interface PackColors {
@@ -36,33 +38,33 @@ export interface PackColors {
   /** A muted text/border color (de-emphasis, chrome). */
   subtle: string;
   /** NAMED accents — a relationship name → a hex. The model references
-   *  "primary"/"muted"; the expander resolves the hex. Never a raw hex per use. */
+   *  "primary"/"muted"; the engine resolves the hex. Never a raw hex per use. */
   accents: Record<string, string>;
 }
 
 export interface PackLayoutRules {
   /** The side-rail width as a fraction of the viewport (sidebar→topbar reflow). */
   sideRailWidthFrac: number;
-  /** The topbar height a sidebar becomes (px, wrapped viewport-safe by the expander). */
+  /** The topbar height a sidebar becomes (px, wrapped viewport-safe by the engine). */
   topbarHeight: number;
-  /** The default content measure (px) for a 'prose' measure intent on a wide page. */
+  /** The default content measure (px) for a 'prose' measure relation on a wide page. */
   proseMeasurePx: number;
 }
 
 /**
  * A design-language pack. Pure data. Every field is model-overridable via
- * `packOverrides` on the spec (the expander applies overrides on top of the
+ * `packOverrides` on the spec (the engine applies overrides on top of the
  * chosen pack).
  */
 export interface DesignPack {
   id: string;
-  /** The spacing scale — px steps on the 8pt grid. Density intents index into it. */
+  /** The spacing scale — px steps on the 8pt grid. spacingStep relations index into it. */
   spacingScale: number[];
-  /** The type ramp — px per type role. Emphasis/typeRamp intents index into it. */
+  /** The type ramp — px per type role. typeRank/emphasisRank relations index into it. */
   typeRamp: Record<TypeRole, number>;
-  /** Line-height per type role. Density intents modulate this. */
+  /** Line-height per type role. lineHeightStep relations modulate this. */
   lineHeight: Record<TypeRole, number>;
-  /** The width intents — px measures for prose/full/compact. */
+  /** The width measures — px measures for prose/full/compact. */
   measurePx: { prose: number; full: number; compact: number };
   /** The radius scale — px steps (999 = pill). radiusStep indexes into it. */
   radiusScale: number[];
@@ -74,14 +76,29 @@ export interface DesignPack {
   surfaces: Record<SurfaceTier, SurfaceDef>;
   /** NAMED color relationships — canvas/text/subtle + accents. */
   colors: PackColors;
-  /** Layout rules the expander uses for reflow intents. */
+  /** Layout rules the engine uses for reflow relations. */
   layoutRules: PackLayoutRules;
+  /** Letter-spacing scale — em steps indexed by letterSpacingStep. */
+  letterSpacingScale: string[];
+  /** Word-spacing scale — em steps indexed by wordSpacingStep. */
+  wordSpacingScale: string[];
+  /** Line-height scale — unitless ratios indexed by lineHeightStep. */
+  lineHeightScale: number[];
+  /** Font-weight scale — px weights indexed by fontWeightRank (1-5). */
+  fontWeightScale: number[];
+  /** Structured design principles the engine enforces. */
+  principles: PackPrinciples;
 }
 
 // ── The pack library (archetypes only — no named-site clones) ──────────
 
 const SPACING_8PT = [0, 4, 8, 12, 16, 24, 32, 48, 64];
 const RADIUS_SCALE = [0, 4, 8, 12, 16, 24, 999];
+
+const LETTER_SPACING = ['-0.04em', '-0.02em', '0em', '0.02em', '0.06em'];
+const WORD_SPACING = ['-0.05em', '0em', '0.05em', '0.1em', '0.2em'];
+const LINE_HEIGHT_SCALE = [1.0, 1.15, 1.3, 1.45, 1.6, 1.8, 2.0];
+const FONT_WEIGHT_SCALE = [300, 400, 500, 700, 900];
 
 /** minimal-editorial — a calm, type-led, restrained-accent editorial system. */
 const MINIMAL_EDITORIAL: DesignPack = {
@@ -100,6 +117,11 @@ const MINIMAL_EDITORIAL: DesignPack = {
   },
   colors: { canvas: '#fafaf7', text: '#1a1a1a', subtle: '#6b6b6b', accents: { primary: '#b8410f', muted: '#9a9a9a' } },
   layoutRules: { sideRailWidthFrac: 0.22, topbarHeight: 56, proseMeasurePx: 680 },
+  letterSpacingScale: LETTER_SPACING,
+  wordSpacingScale: WORD_SPACING,
+  lineHeightScale: LINE_HEIGHT_SCALE,
+  fontWeightScale: FONT_WEIGHT_SCALE,
+  principles: { minTypeScaleRatio: 1.2, maxAccentCount: 2, raiseSurface: 'on-emphasis', densityRange: [2, 6], surfaceDefinition: 'border' },
 };
 
 /** dense-terminal — a compact, high-information-density, monospace-leaning system. */
@@ -119,6 +141,11 @@ const DENSE_TERMINAL: DesignPack = {
   },
   colors: { canvas: '#14161a', text: '#d8dde3', subtle: '#7a828c', accents: { primary: '#4dabf7', muted: '#5c6370' } },
   layoutRules: { sideRailWidthFrac: 0.2, topbarHeight: 44, proseMeasurePx: 560 },
+  letterSpacingScale: ['-0.03em', '-0.01em', '0em', '0.01em', '0.03em'],
+  wordSpacingScale: ['-0.02em', '0em', '0.02em', '0.05em', '0.1em'],
+  lineHeightScale: [1.0, 1.1, 1.25, 1.4, 1.5, 1.65, 1.8],
+  fontWeightScale: FONT_WEIGHT_SCALE,
+  principles: { minTypeScaleRatio: 1.15, maxAccentCount: 1, raiseSurface: 'never', densityRange: [1, 5], surfaceDefinition: 'border' },
 };
 
 /** soft-glass — a translucent, layered, glassmorphic system (backdrop-blur surfaces). */
@@ -138,6 +165,11 @@ const SOFT_GLASS: DesignPack = {
   },
   colors: { canvas: '#0f1420', text: '#f3f5fa', subtle: '#9aa4b8', accents: { primary: '#7c5cff', muted: '#5c6370' } },
   layoutRules: { sideRailWidthFrac: 0.24, topbarHeight: 52, proseMeasurePx: 640 },
+  letterSpacingScale: LETTER_SPACING,
+  wordSpacingScale: WORD_SPACING,
+  lineHeightScale: LINE_HEIGHT_SCALE,
+  fontWeightScale: FONT_WEIGHT_SCALE,
+  principles: { minTypeScaleRatio: 1.25, maxAccentCount: 2, raiseSurface: 'on-overlay', densityRange: [2, 6], surfaceDefinition: 'shadow' },
 };
 
 /** warm-print — a warm, readable, book-like system (serif-leaning body type). */
@@ -157,6 +189,11 @@ const WARM_PRINT: DesignPack = {
   },
   colors: { canvas: '#f4ede0', text: '#2b2318', subtle: '#7a6a55', accents: { primary: '#9a4a1c', muted: '#a89a82' } },
   layoutRules: { sideRailWidthFrac: 0.22, topbarHeight: 54, proseMeasurePx: 620 },
+  letterSpacingScale: LETTER_SPACING,
+  wordSpacingScale: WORD_SPACING,
+  lineHeightScale: LINE_HEIGHT_SCALE,
+  fontWeightScale: FONT_WEIGHT_SCALE,
+  principles: { minTypeScaleRatio: 1.2, maxAccentCount: 2, raiseSurface: 'on-emphasis', densityRange: [2, 6], surfaceDefinition: 'either' },
 };
 
 /** The pack library. Style archetypes only — the model picks + adapts. */
@@ -177,7 +214,7 @@ export function getPack(id: string | undefined): DesignPack {
   return PACKS[id ?? DEFAULT_PACK_ID] ?? PACKS[DEFAULT_PACK_ID];
 }
 
-/** Resolve a pack + model overrides into the pack the expander uses. Every pack
+/** Resolve a pack + model overrides into the pack the engine uses. Every pack
  *  field is model-overridable — `packOverrides` overlays the chosen pack's
  *  defaults (a deep merge: arrays/objects replace at the field level, scalars
  *  override). Pure. */
@@ -200,6 +237,11 @@ export function resolvePack(id: string | undefined, overrides?: Partial<DesignPa
     radiusScale: overrides.radiusScale ?? base.radiusScale,
     borderScale: overrides.borderScale ?? base.borderScale,
     shadowScale: overrides.shadowScale ?? base.shadowScale,
+    letterSpacingScale: overrides.letterSpacingScale ?? base.letterSpacingScale,
+    wordSpacingScale: overrides.wordSpacingScale ?? base.wordSpacingScale,
+    lineHeightScale: overrides.lineHeightScale ?? base.lineHeightScale,
+    fontWeightScale: overrides.fontWeightScale ?? base.fontWeightScale,
+    principles: { ...base.principles, ...(overrides.principles ?? {}) },
   };
 }
 
@@ -207,7 +249,7 @@ export function resolvePack(id: string | undefined, overrides?: Partial<DesignPa
  *  picks by name and references the tokens. Pure. */
 export function summarizePack(p: DesignPack): string {
   const accents = Object.keys(p.colors.accents).join('/');
-  return `${p.id}: spacing[${p.spacingScale.join(',')}]px type{display:${p.typeRamp.display} heading:${p.typeRamp.heading} body:${p.typeRamp.body} small:${p.typeRamp.small}} measure{prose:${p.measurePx.prose} full:${p.measurePx.full} compact:${p.measurePx.compact}} radius[${p.radiusScale.join(',')}] surfaces{flat/raised/overlay} accents{${accents}} canvas:${p.colors.canvas} text:${p.colors.text}`;
+  return `${p.id}: spacing[${p.spacingScale.join(',')}]px type{display:${p.typeRamp.display} heading:${p.typeRamp.heading} body:${p.typeRamp.body} small:${p.typeRamp.small}} measure{prose:${p.measurePx.prose} full:${p.measurePx.full} compact:${p.measurePx.compact}} radius[${p.radiusScale.join(',')}] border[${p.borderScale.join(',')}] shadow[${p.shadowScale.length}]tiers surfaces{flat/raised/overlay} accents{${accents}} canvas:${p.colors.canvas} text:${p.colors.text} principles{minTypeRatio:${p.principles.minTypeScaleRatio} maxAccent:${p.principles.maxAccentCount} raise:${p.principles.raiseSurface} density:[${p.principles.densityRange.join('-')}] surface:${p.principles.surfaceDefinition}}`;
 }
 
 /** The full DESIGN PACKS block the serialized perception emits. */

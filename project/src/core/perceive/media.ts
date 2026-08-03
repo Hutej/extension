@@ -1,4 +1,4 @@
-/** core/perceive/media — D8 (media inventory: images, video, canvas, SVG, icons).
+/** core/perceive/media — (media inventory: images, video, canvas, SVG, icons).
  *  Enrichment: inventories every image, video, canvas, SVG and icon, reads
  *  intrinsic vs rendered dimensions, classifies media kind, and flags
  *  distortion + lazy loading. Measurements INFORM decisions but never become

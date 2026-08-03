@@ -16,7 +16,7 @@
 /** Maximum CSS input length in characters */
 export const MAX_CSS_INPUT_LENGTH = 512_000;
 
-// B8: MAX_HTML_INPUT_LENGTH deleted — only used by deleted sanitizeMarkup.
+// MAX_HTML_INPUT_LENGTH deleted — only used by deleted sanitizeMarkup.
 
 // ── Types ──────────────────────────────────────────────────────────
 
@@ -30,7 +30,7 @@ export interface SanitizeCssResult {
   report: SanitizeReport;
 }
 
-// B8: sanitizeMarkup deleted — never imported anywhere.
+// sanitizeMarkup deleted — never imported anywhere.
 
 // ── CSS Sanitizer ──────────────────────────────────────────────────
 
@@ -93,7 +93,7 @@ export function sanitizeCss(css: string): SanitizeCssResult {
     return '/* [sanitized: behavior removed] */';
   });
 
-  // 5. Strip javascript: protocol in any value — B6: decode CSS escape sequences
+  // 5. Strip javascript: protocol in any value — decode CSS escape sequences
   // first so \6a\61\76\61\73\63\72\69\70\74 can't bypass the javascript: check.
   result = result.replace(/\\([0-9a-fA-F]{1,6})\s?/g, (_m, hex: string) => String.fromCharCode(parseInt(hex, 16)));
   result = result.replace(/javascript\s*:/gi, (_match) => {
@@ -106,7 +106,7 @@ export function sanitizeCss(css: string): SanitizeCssResult {
   result = result.replace(/url\s*\(\s*(['"]?)(.*?)\1\s*\)/gi, (match, _quote, urlContent) => {
     const trimmed = urlContent.trim().toLowerCase();
 
-    // Allow data: URIs for images ONLY (B6: was accepting any data: type —
+    // Allow data: URIs for images ONLY (was accepting any data: type —
     // data:text/html, data:text/javascript, etc. could carry script vectors).
     if (trimmed.startsWith('data:image/')) return match;
 
@@ -127,4 +127,4 @@ export function sanitizeCss(css: string): SanitizeCssResult {
 
 // ── HTML Sanitizer ─────────────────────────────────────────────────
 
-// B8: sanitizeMarkup + STRIPPED_TAGS + UNWRAP_TAGS deleted — never imported anywhere.
+// sanitizeMarkup + STRIPPED_TAGS + UNWRAP_TAGS deleted — never imported anywhere.

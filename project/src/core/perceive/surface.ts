@@ -1,10 +1,10 @@
-/** core/perceive/surface — D4 (background resolution, elevation model) +
- *  D6 (borders, shape, surface identity) + C6 (colour as HSL model). */
+/** core/perceive/surface — (background resolution, elevation model) +
+ *  (borders, shape, surface identity) + (colour as HSL model). */
 
 import type { Cluster } from './index.ts';
 import { parseColor, colorfulness, extractGradientStops } from '../../shared/color.ts';
 
-// ── C6 (carried from enrichment.ts): Colour as a model ──────────────
+// ── Colour as a model ──────────────
 
 export interface ColorEntry {
   hex: string;
@@ -161,7 +161,7 @@ export function buildColorModel(p: { clusters: Cluster[] }): ColorModel {
   };
 }
 
-// ── D4: Background, transparency, layering ─────────────────────────
+// ── Background, transparency, layering ─────────────────────────
 
 export interface BackgroundResolution {
   effectiveColor: string;        // alpha-composited hex (#rrggbb)
@@ -190,7 +190,7 @@ export interface ElevationModel {
   floatingRegions: string[];           // position != static
 }
 
-// ── D6: Borders, shape, surface identity ───────────────────────────
+// ── Borders, shape, surface identity ───────────────────────────
 
 export interface ShadowParse {
   offsetX: number; offsetY: number; blur: number; spread: number;
@@ -279,7 +279,7 @@ function elementForCluster(cluster: Cluster): HTMLElement | null {
   return document.querySelector<HTMLElement>(cluster.selector);
 }
 
-// ── D4 functions ───────────────────────────────────────────────────
+// ── functions ───────────────────────────────────────────────────
 
 /** Resolve the effective background by walking up through transparency to an
  *  opaque base, alpha-compositing each transparent layer. Law 0: the returned
@@ -412,7 +412,7 @@ export function buildElevationModel(clusters: Cluster[]): ElevationModel {
   return { zIndexGroups, stackingContexts, shadowTiers, floatingRegions };
 }
 
-// ── D6 functions ───────────────────────────────────────────────────
+// ── functions ───────────────────────────────────────────────────
 
 /** Per-region border, radius, outline, shadow and shape classification. */
 export function analyzeBorderShape(cluster: Cluster, el: HTMLElement | null): BorderShapeProfile {

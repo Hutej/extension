@@ -1,5 +1,5 @@
 /**
- * core/layout/exclusions — the relayout exclusion registry. Phase 2.5, Step 1.5C.
+ * core/layout/exclusions — the relayout exclusion registry. 
  *
  * Marks subtrees `relayout: false` when they are controlled by JS widgets whose
  * layout the solver must not touch (shadow DOM, canvas, video, virtualized lists,

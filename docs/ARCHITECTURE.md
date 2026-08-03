@@ -23,18 +23,18 @@ change.
 `layoutCompiler = 'v1' | 'v2'`. Default `'v1'`. Override via `WM_LAYOUT_COMPILER` env var and a popup
 dev toggle. The two implementations are NOT intertwined — the pipeline forks once; no shared mutable
 state, no conditionals sprinkled through `compile/`. Once v2 is stable we switch the flag and delete
-v1 — that deletion is Phase 3, not now.
+v1 — that deletion comes later, not now.
 
 **v1 (legacy, current default):**
-`perceive -> reason (DesignSpec) -> compile(expand+laws) -> verify -> repair(patches CSS) -> apply`
+`perceive -> reason (DesignSpec) -> compile(transform+laws) -> verify -> repair(patches CSS) -> apply`
 
-**v2 (new, this phase):**
-`perceive -> semantic model -> extractLayoutIR (Current) -> transform (intents+archetype+slots ->
+**v2 (new):**
+`perceive -> semantic model -> extractLayoutIR (Current) -> transform (relations+archetype+slots ->
 Target IR) -> solver (Target IR -> CSS) -> verify (hard gates + advisory scores) -> repair
 (re-solve, never patch CSS) -> apply`
 
-The intent DSL SURVIVES in v2. The model still emits role intents; the expander still maps
-intents→Target IR constraints. The solver sits BELOW the expander.
+The relation language SURVIVES in v2. The model still emits relations; the engine still maps
+relations→Target IR constraints. The solver sits BELOW the engine.
 
 ## The Layout IR type schema (`src/core/layout/ir.ts`)
 
@@ -42,7 +42,7 @@ Four sections per node, no more. **Immutability is a contract, not a convention:
 deep-frozen (`Object.freeze` recursively); any mutation throws in dev. The Target IR is a NEW object
 built from the frozen Current IR, never a mutation of it.
 
-- **`semantic`** — `role: DesignRole` (from Phase 1), `confidence`, `dominanceRank`, `group`.
+- **`semantic`** — `role: DesignRole`, `confidence`, `dominanceRank`, `group`.
 - **`authoredLayout`** — `display`, `flow` (row/column/none), `isContainer`, `isFlex`, `isGrid`,
   `flexWrap`, `intrinsicSizing` (auto/fixed/fluid), `position` (static/relative/absolute/fixed/sticky),
   `centered`, `widthRatio` (bucketed to 0.05).
@@ -83,7 +83,7 @@ A layout language is NOT CSS and NOT HTML. It defines slots, relationships, cons
 preference and priority rules. Each slot declares: `id`, `allowedRoles[]`, `preferredWidth`,
 `flow`, `ordering`, `minWidth`, `constraints[]` (each with priority). v1 ships exactly ONE language:
 **Documentation** (predictable, information-dense, mostly static, responsive, few JS layout
-assumptions). Do NOT build a second language this phase.
+assumptions). Do NOT build a second language yet.
 
 **Documentation slots:** `masthead`, `nav-local`, `toc`, `main`, `aside`, `footer`, `overflow`.
 
@@ -136,8 +136,8 @@ every nested element fluid; inheritance compounds and the page collapses.
 --space-m: clamp(16px, 2vw, 24px);
 --space-l: clamp(24px, 3vw, 40px);
 ```
-This fixes a verified Phase 2 defect: `expand.ts` currently freezes fontSize, padding, maxWidth,
-radius and border as raw px (lines ~199, 214, 224, 276, 279, 286). Spacing and type are non-fluid
+This fixes a verified defect: the compiler currently freezes fontSize, padding, maxWidth,
+radius and border as raw px. Spacing and type are non-fluid
 today; route them through the token set.
 
 ## Exclusion registry (`src/core/layout/exclusions.ts`)
@@ -160,7 +160,7 @@ Principled detection (NO hostnames, NO site names) marking subtrees `relayout: f
 we did not author, you may NOT replace its layout. Wrap it, or move up to a higher semantic boundary.
 
 This is the prime suspect for the BBC and YouTube contentCollapse rollbacks deferred for ten rounds.
-The Step 8 proof reports explicitly whether it resolves them.
+The proof report explicitly states whether it resolves them.
 
 ## Wrapper lifecycle policy
 
@@ -212,7 +212,7 @@ layer STAYS; it defines the invariants the solver must respect.
 
 ## IR stability probe methodology + measured numbers
 
-Step 1 probe (`tests/probe/layout-ir.test.ts`), 0 paid calls, 5 grid sites. Perturbations: resize
+The probe (`tests/probe/layout-ir.test.ts`), 0 paid calls, 5 grid sites. Perturbations: resize
 (1920/1440/1280), zoom (viewport ÷ factor: 125%→1536px, 150%→1280px — coincides with the 1280 resize,
 reported once), SPA route change (GitHub), lazy-load (scroll-to-bottom), minor DOM mutations
 (insert/remove/reorder). Metrics per site per perturbation: node identity (Jaccard), parent/child,
@@ -221,7 +221,7 @@ per-constraint-kind flip rates and per-field stability for the 5 new perception 
 
 Gates: parent/child ≥ 0.90, role ≥ 0.90, node identity ≥ 0.85, constraint (no-Ordering) ≥ 0.85, on
 all 5 sites. Pre-authorized blocked outcome: if the gate fails ONLY on resize node-identity, that is
-expected (geometry-derived handles re-cluster) — STOP and recommend pulling Phase 5 ahead of the
+expected (geometry-derived handles re-cluster) — STOP and recommend pulling role-anchored stable handles ahead of the
 solver; never tune clustering to green the number.
 
 **Measured numbers (full 5-site grid, 0 paid calls, 1 full-grid run):**
@@ -249,12 +249,12 @@ Per the rules, the classifier and clustering were NOT tuned to pass. The amendme
 decisive: with-`Ordering` constraint stability collapses to 0.247–0.859 (Ordering flips 4–75%); the
 no-`Ordering` gate number is the stable one (0.965–1.000). Resolution is a user decision: accept
 role-label instability (treat role as advisory; the IR structure is stable), revisit the classifier's
-viewport-coupled thresholds, or pull Phase 5 (role-anchored stable handles) ahead of the solver —
+viewport-coupled thresholds, or pull role-anchored stable handles ahead of the solver —
 which would stabilize BOTH role and YouTube identity by decoupling from geometry/signature.
 
 ## Model transport (unchanged by v1/v2 split)
 
-Architect (structure/intents/pack) + Painter (surface) run in parallel on `@cf/zai-org/glm-5.2`;
+Architect (structure/relations/pack) + Painter (surface) run in parallel on `@cf/zai-org/glm-5.2`;
 Critic repairs on `@cf/zai-org/glm-4.7-flash`. Archetype choice folds into the existing Architect call
 (zero new paid calls). One attempt, ≤120s hard abort; retries only 429/5xx; tokens logged per run. No
 fallback chain. Key in `project/.env` (`OPENAI_API_KEY`, gitignored) — Cloudflare Workers AI
@@ -268,14 +268,14 @@ OpenAI-compatible endpoint is the live path.
   only, never preventive `anywhere`.
 - A px ceiling is zoom-hostile; convert to a viewport-relative percentage.
 
-## P2.5 temporary gate rebase (moved from product.md — a decision, not a change record)
+## Temporary gate rebase (a decision, not a change record)
 
-The standing rule is "applied ≥4/5" on the full grid. P2.5 narrows this deliberately:
+The standing rule is "applied ≥4/5" on the full grid. The current step narrows this deliberately:
 
-- P2.5 by-eye gate = **MDN, Wikipedia, GitHub docs (3 sites)** — architecture validation, not stress.
-- **BBC + YouTube in P2.5 must only APPLY WITHOUT ROLLBACK** under the exclusion registry. Their
-  appearance is NOT judged this phase — that is the P2.6 gate.
-- The full **5/5-sites-applied beauty gate RETURNS as the Phase 2.6 gate.**
+- By-eye gate = **MDN, Wikipedia, GitHub docs (3 sites)** — architecture validation, not stress.
+- **BBC + YouTube must only APPLY WITHOUT ROLLBACK** under the exclusion registry. Their
+  appearance is NOT judged yet — that is the next gate.
+- The full **5/5-sites-applied beauty gate returns at the next gate.**
 - Rationale, verbatim: *"Don't touch BBC or YouTube first. Those are stress tests, not architecture validation."*
 
 ## Standing rule: pixel gates assert physics only (moved from product.md)

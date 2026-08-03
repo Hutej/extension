@@ -6,7 +6,7 @@
  * without a live page. content.ts supplies the real adapter; the unit test
  * supplies a fake.
  *
- * B2: inverses resolve by stable HANDLE, not by live Node reference. Stored
+ * inverses resolve by stable HANDLE, not by live Node reference. Stored
  * Node references go stale the instant a framework re-renders, which means undo
  * silently does nothing on exactly the pages where it matters most. The handle
  * is signature-based and re-resolvable at undo time. For removed nodes (no
@@ -15,7 +15,7 @@
 
 import type { DesignOp, OpKind } from '../spec';
 
-/** The inverse of one op — exactly enough to undo it. B2: parent + nextSibling
+/** The inverse of one op — exactly enough to undo it. parent + nextSibling
  *  are resolved by handle at undo time, not by stored Node reference. */
 export type OpInverse =
   | { kind: 'reattach'; node: Node; parentHandle: string | null; nextSiblingHandle: string | null } // undo remove
@@ -45,7 +45,7 @@ export interface DomAdapter {
   createElement(tag: string): Node;
   /** move 'to' a destination handle: resolve to a live node, or null for 'floating'. */
   resolveDestination(to: string | undefined): HTMLElement | null;
-  /** B2: extract the handle from a live DOM node (the [data-wm-c] attribute), or null. */
+  /** extract the handle from a live DOM node (the [data-wm-c] attribute), or null. */
   handleOf(node: Node | null): string | null;
 }
 
@@ -78,7 +78,7 @@ export class TransactionLog {
   }
 
   /** Replay the log BACKWARDS, applying each inverse. Restores the original DOM.
-   *  B2: each undo is wrapped in try/catch so one failure cannot abandon the
+   *  each undo is wrapped in try/catch so one failure cannot abandon the
    *  remainder. Inverses resolve by handle at undo time, not by stored Node
    *  reference (which goes stale on framework re-render). Returns the number of
    *  undos that succeeded (for the structural assertion). */
@@ -117,7 +117,7 @@ export class TransactionLog {
         }
         undone++;
       } catch {
-        // B2: one failed undo must not abandon the remainder.
+        // one failed undo must not abandon the remainder.
         failed++;
       }
     }

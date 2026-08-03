@@ -4,15 +4,16 @@
  * OPEN-ENDED (any tokens/values) but STRUCTURED (validated shape, real handles).
  * The compiler — not the AI — decides which declarations are safe to emit.
  *
- * Phase 2: the PRIMARY model output is per-role design INTENTS (RoleIntent[]),
- * not raw declarations. A deterministic expander (core/compile/expand.ts) maps
- * intents + a design-language pack + the Phase 1 semantic graph to the
+ * The model's PRIMARY output is a set of RELATIONAL STATEMENTS
+ * (RelationStatement[]). A deterministic engine (core/compile/transform.ts)
+ * resolves each relation against the current perception to produce the
  * concrete `rules`/`composition`/`ops` the compiler emits. The raw `rules`
  * path stays as a BOUNDED escape hatch — the model may emit a raw rule on a
- * specific handle when the intent vocabulary can't express the design; every
- * escape-hatch use is logged loudly (the count + the FRACTION = the vocabulary-
- * gap metric). Intents target roles OR groups OR handles, so identical
- * families can no longer be half-styled (family consistency by construction).
+ * specific handle when the relational vocabulary can't express the design;
+ * every escape-hatch use is logged loudly (the count + the FRACTION = the
+ * vocabulary-gap metric). Relations target handles, roles, or groups, so
+ * identical families can no longer be half-styled (family consistency by
+ * construction).
  *
  * Removed `keep` (was a loophole that codified partial redesigns —
  * the model could "keep" any cluster it didn't want to redesign and completeness
@@ -22,6 +23,8 @@
  */
 
 import type { DesignPack, TypeRole, SurfaceTier, SurfaceDef, PackLayoutRules } from '../design/packs';
+import type { RelationStatement } from '../design/vocabulary';
+import { validateRelations } from '../design/validate';
 
 /** Free-form declaration bag: spec-key -> value. Compiler drops unknown/unsafe keys. */
 export type StyleDecls = Record<string, string>;   // paint keys
@@ -64,77 +67,13 @@ export interface DesignOp {
    *  explicitly — a second thought, not a reflex. 'forbidden' targets (primary
    *  content, scripts) are refused regardless. */
   consent?: boolean;
-  /** A7: the mutation reason from the closed list (escape-overflow-hidden,
+  /** the mutation reason from the closed list (escape-overflow-hidden,
    *  escape-stacking-context, cross-layout-regions, impossible-ancestry).
    *  Required for the op to execute — default is no DOM mutation. */
   reason?: string;
 }
 
-// ── Phase 2 — the role-intent DSL ───────────────────────────────────
-
-/** How loud a region reads. The expander maps this to type (the pack's type
- *  ramp) + surface + accent. `hidden` is a destructive intent — gated by the
- *  hard-safety rule (only on roles with designRoleConfidence >= 0.5). */
-export type Emphasis = 'hero' | 'normal' | 'de-emphasized' | 'hidden';
-
-/** How tightly packed a region is. The expander maps this to spacing-scale
- *  steps + line-height from the pack. */
-export type Density = 'compact' | 'comfortable' | 'spacious';
-
-/** A structural placement intent — where a region goes. The expander derives a
- *  structural op + a composition grid change from this (so the model stops
- *  hand-writing composition/ops for the reflow cases the intents cover).
- *  `collapse` is a destructive intent — gated by the hard-safety rule. */
-export type Placement =
-  | 'keep'              // leave where it is
-  | 'topbar'            // sidebar → full-width top bar (reorder + grid change)
-  | 'collapse'          // remove (high-confidence voids only)
-  | 'relocate'          // move to a destination (the `to` field names the dest handle)
-  | { kind: 'relocate'; to: string };
-
-/** A width intent. The expander maps this to the pack's measurePx (percentified
- *  by the existing compile laws, so zoom-proof). */
-export type Measure = 'prose' | 'full' | 'compact';
-
-/** Aesthetic overrides the model controls — in TOKEN GRAMMAR, never raw px.
- *  The expander resolves these against the pack + the model's packOverrides.
- *  A named accent ("primary"), a surface tier, scale *steps* (not raw values),
- *  a type-ramp role. The model never emits a raw hex/px the pack already owns. */
-export interface AestheticOverrides {
-  /** A pack accent name ("primary" | "muted" | a packOverrides accent). */
-  accent?: string;
-  /** A surface tier from the pack's surface system. */
-  surface?: SurfaceTier;
-  /** A step index into the pack's radiusScale. */
-  radiusStep?: number;
-  /** A step index into the pack's borderScale. */
-  borderStep?: number;
-  /** A step index into the pack's shadowScale. */
-  shadowStep?: number;
-  /** A texture treatment (glass adds backdrop-filter on the surface). */
-  texture?: 'none' | 'grain' | 'glass';
-  /** A type-size role on the pack's type ramp (overrides emphasis-derived size). */
-  typeRamp?: TypeRole;
-}
-
-/** One per-role design intent. The PRIMARY model output. Targets a role, a
- *  group, or a single handle; role/group targets fan out to every member, so
- *  identical families can no longer be half-styled (family consistency by
- *  construction). The expander maps intent + pack + the Phase 1 semantic graph
- *  to the concrete rules/composition/ops the compiler emits. */
-export interface RoleIntent {
-  /** A design role ("listing", "nav-primary"), a group id ("g4x2y1"), or a
-   *  single handle ("c1a2b3"). Role/group targets fan out to every member. */
-  target: string;
-  /** What `target` is. Inferred when omitted: a handle if it matches a known
-   *  cluster handle, else a role (the expander resolves against the perception). */
-  targetKind?: 'role' | 'group' | 'handle';
-  emphasis?: Emphasis;
-  density?: Density;
-  placement?: Placement;
-  measure?: Measure;
-  aesthetic?: AestheticOverrides;
-}
+// ── Relational statements (replaces the old enum-based DSL) ───────
 
 
 
@@ -159,15 +98,16 @@ export interface DesignSpec {
    *  composition). Validated by compile against guard laws, executed against
    *  the live DOM by content.ts with an exact inverse recorded per op. */
   ops?: DesignOp[];
-  /** Phase 2 — the model's per-role design intents. The PRIMARY model output.
-   *  The expander (core/compile/expand.ts) maps intents + the pack + the Phase 1
-   *  semantic graph to the concrete rules/composition/ops the compiler emits.
-   *  Role/group targets fan out to every member — family consistency by construction. */
-  intents?: RoleIntent[];
-  /** Phase 2 — which design-language pack the model chose (a pack id, or
-   *  undefined for the default). The expander resolves the pack + packOverrides. */
+  /** The model's relational design statements. The PRIMARY model output.
+   *  Each statement names its subjects by handle/role/group, states a relation,
+   *  and carries a magnitude as a ratio, a scale step, or an ordinal rank —
+   *  never a pixel value. The transformation engine resolves each against the
+   *  current perception. */
+  relations?: RelationStatement[];
+  /** Which design-language pack the model chose (a pack id, or
+   *  undefined for the default). The engine resolves the pack + packOverrides. */
   pack?: string;
-  /** Phase 2 — pack-field overrides (blending a novel prompt). Every pack field
+  /** Pack-field overrides (blending a novel prompt). Every pack field
    *  is model-overridable; these overlay the chosen pack's defaults so a novel
    *  prompt can adapt any pack without inventing a whole new system. */
   packOverrides?: Partial<DesignPack>;
@@ -193,12 +133,12 @@ export function validateSpec(raw: unknown): ValidateResult {
   if (!raw || typeof raw !== 'object') return { ok: false, error: 'spec is not an object' };
   const r = raw as Record<string, unknown>;
 
-  // Phase 2: the model may emit intents (the primary path) with NO raw rules,
-  // OR raw rules (the escape hatch), OR both. The expander turns intents into
+  // The model may emit relations (the primary path) with NO raw rules,
+  // OR raw rules (the escape hatch), OR both. The engine turns relations into
   // rules; a spec is valid if it has EITHER. A spec with neither is rejected.
   const hasRules = Array.isArray(r.rules);
-  const hasIntents = Array.isArray(r.intents);
-  if (!hasRules && !hasIntents) return { ok: false, error: 'spec has no rules or intents' };
+  const hasRelations = Array.isArray(r.relations);
+  if (!hasRules && !hasRelations) return { ok: false, error: 'spec has no rules or relations' };
 
   const rules: DesignRule[] = [];
   if (hasRules) for (const item of r.rules as unknown[]) {
@@ -222,27 +162,18 @@ export function validateSpec(raw: unknown): ValidateResult {
     reasoning: typeof r.reasoning === 'string' ? r.reasoning : '',
     rules,
   };
-  // Phase 2 — parse the intent DSL: intents + the pack choice + pack overrides.
-  if (hasIntents) {
-    const intents: RoleIntent[] = [];
-    for (const item of r.intents as unknown[]) {
-      if (!item || typeof item !== 'object') continue;
-      const ii = item as Record<string, unknown>;
-      if (typeof ii.target !== 'string' || !ii.target) continue;
-      const intent: RoleIntent = { target: ii.target };
-      if (ii.targetKind === 'role' || ii.targetKind === 'group' || ii.targetKind === 'handle') intent.targetKind = ii.targetKind;
-      if (ii.emphasis === 'hero' || ii.emphasis === 'normal' || ii.emphasis === 'de-emphasized' || ii.emphasis === 'hidden') intent.emphasis = ii.emphasis;
-      if (ii.density === 'compact' || ii.density === 'comfortable' || ii.density === 'spacious') intent.density = ii.density;
-      intent.placement = parsePlacement(ii.placement);
-      if (ii.measure === 'prose' || ii.measure === 'full' || ii.measure === 'compact') intent.measure = ii.measure;
-      const a = parseAesthetic(ii.aesthetic);
-      if (a) intent.aesthetic = a;
-      if (intent.emphasis || intent.density || intent.placement || intent.measure || intent.aesthetic) intents.push(intent);
-    }
-    if (intents.length) spec.intents = intents;
+  // Parse the relational statements (the PRIMARY model output). Each statement
+  // is validated against the boundary schema: known relation type,
+  // resolvable fields, magnitude within range, no contradiction. Invalid
+  // statements are rejected INDIVIDUALLY with a reason — never cast through.
+  if (hasRelations) {
+    const report = validateRelations(r.relations as unknown[]);
+    if (report.accepted.length) spec.relations = report.accepted;
+    // Rejected relations are dropped individually — valid relations pass through.
+    // The rejection count is surfaced via report.rejected.length if needed for logging.
   }
   if (typeof r.pack === 'string' && r.pack) spec.pack = r.pack;
-  // B6: validate packOverrides with a real schema check, not a bare cast.
+  // validate packOverrides with a real schema check, not a bare cast.
   // The model output is untrusted — reject anything that fails the check.
   const validatedOverrides = validatePackOverrides(r.packOverrides);
   if (validatedOverrides) spec.packOverrides = validatedOverrides;
@@ -295,41 +226,12 @@ export function validateSpec(raw: unknown): ValidateResult {
   if (canvas) spec.canvas = canvas;
   if (canvasLayout) spec.canvasLayout = canvasLayout;
 
-  if (rules.length === 0 && !spec.intents?.length && !spec.canvas && !spec.canvasLayout && !spec.variables) {
-    return { ok: false, error: 'spec produced no usable rules, intents, canvas, or variables' };
+  if (rules.length === 0 && !spec.relations?.length && !spec.canvas && !spec.canvasLayout && !spec.variables) {
+    return { ok: false, error: 'spec produced no usable rules, relations, canvas, or variables' };
   }
   return { ok: true, spec };
 }
 
-/** Parse a Placement intent — a string kind, or { kind: 'relocate', to }. */
-function parsePlacement(v: unknown): Placement | undefined {
-  if (typeof v === 'string') {
-    if (v === 'keep' || v === 'topbar' || v === 'collapse' || v === 'relocate') return v;
-    return undefined;
-  }
-  if (v && typeof v === 'object') {
-    const o = v as Record<string, unknown>;
-    if (o.kind === 'relocate' && typeof o.to === 'string') return { kind: 'relocate', to: o.to };
-  }
-  return undefined;
-}
-
-/** Parse AestheticOverrides — token grammar only (no raw values accepted here;
- *  the expander resolves named accents / scale steps / surface tiers). */
-function parseAesthetic(v: unknown): AestheticOverrides | undefined {
-  if (!v || typeof v !== 'object') return undefined;
-  const a = v as Record<string, unknown>;
-  const out: AestheticOverrides = {};
-  if (typeof a.accent === 'string' && a.accent) out.accent = a.accent;
-  if (a.surface === 'flat' || a.surface === 'raised' || a.surface === 'overlay') out.surface = a.surface;
-  if (typeof a.radiusStep === 'number') out.radiusStep = a.radiusStep;
-  if (typeof a.borderStep === 'number') out.borderStep = a.borderStep;
-  if (typeof a.shadowStep === 'number') out.shadowStep = a.shadowStep;
-  if (a.texture === 'none' || a.texture === 'grain' || a.texture === 'glass') out.texture = a.texture;
-  if (a.typeRamp === 'display' || a.typeRamp === 'heading' || a.typeRamp === 'body' || a.typeRamp === 'small') out.typeRamp = a.typeRamp;
-  if (Object.keys(out).length) return out;
-  return undefined;
-}
 
 /**
  * Merge an Architect spec (composition/layout/canvasLayout/hide — the structure)
@@ -385,29 +287,20 @@ export function mergeSpecs(architect?: DesignSpec, painter?: DesignSpec): Design
 
   const rules = [...rulesByTarget.values()].filter((r) => r.styles || r.layout || r.hover || r.focusVisible || r.hide);
 
-  // Phase 2 — merge intents by target. The Architect emits structural intents
-  // (emphasis/density/placement/measure); the Painter emits aesthetic intents
-  // (aesthetic) + the pack choice + packOverrides. Join per target: structural
-  // fields from the Architect, aesthetic from the Painter (each role owns its
-  // field). Dedup by target+targetKind (first wins).
-  const intentsByTarget = new Map<string, RoleIntent>();
-  const mergeIntent = (intent: RoleIntent): void => {
-    const key = `${intent.targetKind ?? ''}:${intent.target}`;
-    const existing = intentsByTarget.get(key);
-    if (!existing) { intentsByTarget.set(key, { ...intent }); return; }
-    // Structural fields — Architect wins (it owns structure).
-    if (intent.emphasis && !existing.emphasis) existing.emphasis = intent.emphasis;
-    if (intent.density && !existing.density) existing.density = intent.density;
-    if (intent.placement && !existing.placement) existing.placement = intent.placement;
-    if (intent.measure && !existing.measure) existing.measure = intent.measure;
-    // Aesthetic — Painter wins (it owns surface); merge sub-fields.
-    if (intent.aesthetic) {
-      existing.aesthetic = { ...(existing.aesthetic ?? {}), ...intent.aesthetic };
+  // Merge relations from both roles. Dedup by JSON signature (first wins).
+  const seenRelations = new Set<string>();
+  const relations: RelationStatement[] = [];
+  const mergeRelations = (rels?: RelationStatement[]): void => {
+    if (!rels) return;
+    for (const r of rels) {
+      const key = JSON.stringify(r);
+      if (seenRelations.has(key)) continue;
+      seenRelations.add(key);
+      relations.push(r);
     }
   };
-  if (architect?.intents) for (const i of architect.intents) mergeIntent(i);
-  if (painter?.intents) for (const i of painter.intents) mergeIntent(i);
-  const intents = [...intentsByTarget.values()];
+  mergeRelations(architect?.relations);
+  mergeRelations(painter?.relations);
 
   // Composition: Architect-only (region-level structure). Take the Architect's.
   const composition = architect?.composition;
@@ -423,7 +316,7 @@ export function mergeSpecs(architect?: DesignSpec, painter?: DesignSpec): Design
   const variables = painter?.variables ?? architect?.variables;
   const paletteMode = painter?.paletteMode ?? architect?.paletteMode;
   const canvasLayout = architect?.canvasLayout ?? painter?.canvasLayout;
-  // Phase 2 — pack: the Painter picks the pack (it owns the aesthetic system);
+  // Pack: the Painter picks the pack (it owns the aesthetic system);
   // the Architect may name one too (Painter wins). packOverrides: deep-merge.
   const pack = painter?.pack ?? architect?.pack;
   const packOverrides = mergePackOverrides(architect?.packOverrides, painter?.packOverrides);
@@ -436,7 +329,7 @@ export function mergeSpecs(architect?: DesignSpec, painter?: DesignSpec): Design
     ...(canvasLayout ? { canvasLayout } : {}),
     ...(composition ? { composition } : {}),
     ...(ops ? { ops } : {}),
-    ...(intents.length ? { intents } : {}),
+    ...(relations.length ? { relations } : {}),
     ...(pack ? { pack } : {}),
     ...(packOverrides ? { packOverrides } : {}),
     rules,
@@ -445,7 +338,7 @@ export function mergeSpecs(architect?: DesignSpec, painter?: DesignSpec): Design
 
 /** Deep-merge two packOverrides records (the Painter's overrides win on a shared
  *  field; the Architect's contribute otherwise). Returns undefined if both empty.
- *  The nested objects are merged at the field level; the result is a `Partial<DesignPack>` — the expander's `resolvePack` overlays it on the chosen pack,
+ *  The nested objects are merged at the field level; the result is a `Partial<DesignPack>` — the engine's `resolvePack` overlays it on the chosen pack,
  *  so a partial override (e.g. just `typeRamp.body`) is fine. */
 function mergePackOverrides(a?: Partial<DesignPack>, b?: Partial<DesignPack>): Partial<DesignPack> | undefined {
   if (!a && !b) return undefined;
@@ -461,7 +354,7 @@ function mergePackOverrides(a?: Partial<DesignPack>, b?: Partial<DesignPack>): P
   return out;
 }
 
-/** B6: Validate model-supplied packOverrides with a real schema check instead of
+/** Validate model-supplied packOverrides with a real schema check instead of
  *  a bare cast. Rejects anything that isn't a plain object with known field names
  *  and correctly-typed values. This is the trust boundary — the model is untrusted. */
 function validatePackOverrides(raw: unknown): Partial<DesignPack> | undefined {
@@ -520,6 +413,21 @@ function validatePackOverrides(raw: unknown): Partial<DesignPack> | undefined {
   if (r.lineHeight && typeof r.lineHeight === 'object' && !Array.isArray(r.lineHeight)) {
     (out as Record<string, unknown>).lineHeight = r.lineHeight;
   }
+  if (Array.isArray(r.letterSpacingScale) && r.letterSpacingScale.every((v) => typeof v === 'string')) {
+    (out as Record<string, unknown>).letterSpacingScale = r.letterSpacingScale;
+  }
+  if (Array.isArray(r.wordSpacingScale) && r.wordSpacingScale.every((v) => typeof v === 'string')) {
+    (out as Record<string, unknown>).wordSpacingScale = r.wordSpacingScale;
+  }
+  if (Array.isArray(r.lineHeightScale) && r.lineHeightScale.every((v) => typeof v === 'number')) {
+    (out as Record<string, unknown>).lineHeightScale = r.lineHeightScale;
+  }
+  if (Array.isArray(r.fontWeightScale) && r.fontWeightScale.every((v) => typeof v === 'number')) {
+    (out as Record<string, unknown>).fontWeightScale = r.fontWeightScale;
+  }
+  if (r.principles && typeof r.principles === 'object' && !Array.isArray(r.principles)) {
+    (out as Record<string, unknown>).principles = r.principles;
+  }
   return Object.keys(out).length ? out : undefined;
 }
 
@@ -537,17 +445,15 @@ function asDecls(v: unknown): StyleDecls | undefined {
 
 /**
  * Completeness contract. Gate: does the spec have the minimums for a complete
- * redesign? Canvas + composition/layout + (rules OR intents) covering ≥15% of
- * clusters. If these pass, base-coat covers the rest. Unaccounted clusters are
- * listed for logging but do NOT fail the gate — base-coat is the safety net.
+ * redesign? Canvas + composition/layout + (rules OR relations) covering ≥15%
+ * of clusters. If these pass, base-coat covers the rest. Unaccounted clusters
+ * are listed for logging but do NOT fail the gate — base-coat is the safety
+ * net.
  *
- * Phase 2: the model may emit INTENTS (the primary path) with no raw rules.
- * Intents are design work — an intent target counts toward the rules gate and
- * the accounted set (the expander turns it into rules; the post-apply coverage
- * gate is the real backstop). A role/group target can't be resolved to handles
- * here (the expander does that), so it's counted as 1 toward the min — the
- * honest signal is "the model made a design decision," and the verify coverage
- * gate catches a spec that left most of the page unaddressed.
+ * Relations are design work — a relation's subject counts toward the rules
+ * gate and the accounted set (the engine turns it into rules; the post-apply
+ * coverage gate is the real backstop). A role/group subject can't be resolved
+ * to handles here (the engine does that), so it's counted as 1 toward the min.
  */
 export function checkCompleteness(spec: DesignSpec, handles: Set<string>): { ok: boolean; unaccounted: string[]; reason?: string } {
   if (!spec.canvas?.background) {
@@ -556,11 +462,11 @@ export function checkCompleteness(spec: DesignSpec, handles: Set<string>): { ok:
   if (!spec.canvasLayout && (!spec.composition || spec.composition.length === 0)) {
     return { ok: false, unaccounted: [], reason: 'No canvasLayout or composition rules — the page proportions must be a deliberate decision.' };
   }
-  const intentCount = spec.intents?.length ?? 0;
-  const effective = spec.rules.length + intentCount;
+  const relationCount = spec.relations?.length ?? 0;
+  const effective = spec.rules.length + relationCount;
   const minRules = Math.ceil(handles.size * 0.15);
   if (effective < minRules) {
-    return { ok: false, unaccounted: [], reason: `Only ${spec.rules.length} rules + ${intentCount} intents for ${handles.size} clusters — need at least ${minRules} (15%). Style the major clusters actively.` };
+    return { ok: false, unaccounted: [], reason: `Only ${spec.rules.length} rules + ${relationCount} relations for ${handles.size} clusters — need at least ${minRules} (15%). Style the major clusters actively.` };
   }
   // All gates pass — base-coat covers unaccounted clusters.
   const accounted = new Set<string>();
@@ -572,14 +478,10 @@ export function checkCompleteness(spec: DesignSpec, handles: Set<string>): { ok:
       if (rule.styles || rule.layout || rule.hide) accounted.add(rule.target);
     }
   }
-  // Phase 2 — a handle-targeted intent accounts that handle (role/group targets
-  // can't be resolved here; the expander does that — the verify coverage gate
-  // is the backstop).
-  if (spec.intents) {
-    for (const intent of spec.intents) {
-      if (intent.targetKind === 'handle' || (!intent.targetKind && /^c[0-9a-z]{6}$/.test(intent.target))) {
-        accounted.add(intent.target);
-      }
+  // A handle-targeted relation accounts that handle.
+  if (spec.relations) {
+    for (const rel of spec.relations) {
+      if (/^c[0-9a-z]{6}$/.test(rel.subject)) accounted.add(rel.subject);
     }
   }
   const unaccounted = [...handles].filter((h) => !accounted.has(h));

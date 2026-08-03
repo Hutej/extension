@@ -82,7 +82,7 @@ export const DECORATIVE_EDGE_DENSITY_MAX = 0.12;
  *
  * Returns the handles of clusters that render as voids.
  *
- * S11.5: detectPageVoids (below) catches large uniform regions BETWEEN clusters
+ * detectPageVoids (below) catches large uniform regions BETWEEN clusters
  * that have no ClusterRect — the GitHub cream band. detectVoids only checks named
  * clusters; detectPageVoids scans the full capture.
  */
@@ -109,7 +109,7 @@ export function detectVoids(capture: PixelInput, rects: ClusterRect[]): string[]
   return out;
 }
 
-/** S11.5: page-level void detection. Scans the full capture for large uniform
+/** page-level void detection. Scans the full capture for large uniform
  *  regions NOT covered by text/image-bearing clusters. detectVoids only checks
  *  named cluster rects — a large empty band BETWEEN clusters (like GitHub's cream
  *  gap) has no ClusterRect and is invisible. This function catches it: if > ¼ of
@@ -222,12 +222,12 @@ export interface PixelVerifyResult {
   invisibleText: string[]; // cluster handles whose text renders invisible
   squeeze: string[];       // cluster handles squeezed below readable measure
   recolor: boolean;         // true if before/after reads as a recolor (stock structure, hue-only shift)
-  captureFailed: boolean;   // S10.3: true if any capture returned 0-size data — pixel results untrustworthy
+  captureFailed: boolean;   // true if any capture returned 0-size data — pixel results untrustworthy
   passed: boolean;         // true iff all three lists are empty AND no recolor AND no captureFailed
   critiques: string[];     // human-readable, for the repair router
 }
 
-/** Phase-1 invisible-text failure classes. The repair comment in repair/index.ts
+/** invisible-text failure classes. The repair comment in repair/index.ts
  *  promises the deterministic bg+text pair "guarantees the pixel-invisible ones are
  *  readable regardless" — but the guarantee silently fails in four distinct ways.
  *  Classifying each surviving invisible cluster tells us WHICH root cause to fix
@@ -343,7 +343,7 @@ export function pixelVerify(captures: PixelInput[], rectsPerCapture: ClusterRect
       }
     }
     for (const h of detectInvisibleText(c, rects)) if (!invisible.includes(h)) invisible.push(h);
-    // S11.5: page-level voids — large uniform regions BETWEEN clusters.
+    // page-level voids — large uniform regions BETWEEN clusters.
     for (const h of detectPageVoids(c, rects)) if (!voids.includes(h)) voids.push(h);
   }
   // Squeeze is geometry-only (rect width vs font size) — any capture's rects suffice.
@@ -352,7 +352,7 @@ export function pixelVerify(captures: PixelInput[], rectsPerCapture: ClusterRect
   // Recolor: stock structure + hue-only shift = a recolor, mechanically. Only when
   // a before-capture is supplied. captures[0] = the scrollY=0 after-shot.
   const recolor = before && captures.length > 0 ? detectRecolor(before, captures[0]) : false;
-  // S10.3a: detect capture failure — any capture with 0-size data means pixel
+  // detect capture failure — any capture with 0-size data means pixel
   // results are untrustworthy. Without this, variance() returns 765 for 0-sample
   // rects, both detectors skip, and the pixel gate reports PASS on a broken capture.
   const captureFailed = captures.some((c) => c.width === 0 || c.height === 0 || c.data.length === 0);

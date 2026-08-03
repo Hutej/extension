@@ -1,9 +1,9 @@
-/** core/perceive/typography — D3 (type ramp, per-region typography) +
- *  C10 (text understanding: kind, direction, longest token, truncation). */
+/** core/perceive/typography — (type ramp, per-region typography) +
+ *  (text understanding: kind, direction, longest token, truncation). */
 
 import type { Cluster } from './index.ts';
 
-// ── C10 (carried from enrichment.ts): Text understanding ────────────
+// ── Text understanding ────────────
 
 export interface TextProfile {
   readingLength: number;
@@ -44,7 +44,7 @@ export function analyzeText(cluster: Cluster, el: HTMLElement | null): TextProfi
   return { readingLength, kind, dir, longestToken, truncated };
 }
 
-// ── D3: Typography as a system ──────────────────────────────────────
+// ── Typography as a system ──────────────────────────────────────
 
 export interface TypeStep {
   size: number;          // px
@@ -179,7 +179,7 @@ export function analyzeTypography(
   return { sizePx, weight, family, lineHeight, letterSpacing, textTransform, measureChars, rank };
 }
 
-// ── D3 helpers (private) ────────────────────────────────────────────
+// ── helpers (private) ────────────────────────────────────────────
 
 function parseFontSize(s: string): number {
   if (!s) return 0;

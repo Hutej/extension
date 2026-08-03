@@ -1,6 +1,6 @@
 /**
  * core/layout/languages/documentation — the Documentation layout language.
- * Phase 2.5, Step 1.5D (D1).
+ * 
  *
  * PURE DATA, no logic. Defines the slots a Documentation page lays out into, the
  * roles each slot accepts, and the constraints each slot carries. ONE language.

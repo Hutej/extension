@@ -1,5 +1,5 @@
 /**
- * core/layout/assign — deterministic slot assignment. Phase 2.5, Step 1.5D (D2).
+ * core/layout/assign — deterministic slot assignment. 
  *
  * Assigns each Layout IR node to exactly one slot in a layout language. Invariants
  * enforced by assertions that THROW (a violation is a compiler error, same class
@@ -23,7 +23,7 @@ export interface SlotAssignment {
 }
 
 /** Assign every node to exactly one slot. Throws on invariant violation.
- *  B8: the `excluded` parameter was removed — the assigner never used it
+ *  the `excluded` parameter was removed — the assigner never used it
  *  (excluded nodes still land in a slot; exclusion is a solver concern). */
 export function assignSlots(nodes: LayoutIRNode[]): SlotAssignment {
   const handleToSlot = new Map<string, SlotId>();

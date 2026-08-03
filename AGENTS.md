@@ -4,7 +4,7 @@
 
 This is not just an extension — this is an AI agent that lives in your browser. WebMorph reshapes ANY website in plain English — locally, never the site's backend. Endgame: replace EVERY browser extension. The moat is generality: principles, not recipes.
 
-## Phase 2.5 pointers (read `.kiro/steering/product.md` before any work)
+## Pointers (read `.kiro/steering/product.md` before any work)
 
 - **One architectural rule:** the AI owns design decisions, the Layout IR owns structure, the solver
   owns constraints, the compiler owns CSS. No layer takes over another's responsibility.
@@ -27,9 +27,9 @@ This is not just an extension — this is an AI agent that lives in your browser
 2. **Zero site-specific hardcoding.** Principles, not recipes. No aesthetic lookup tables. Test grids rotate NOVEL prompts (never reuse one).
 3. **Real proof only:** real extension, real sites, real model calls, real popup→Transform flow. NEVER pass a test by loosening it. NEVER fake or overstate a result.
 4. **All or nothing:** any original-looking region after a redesign = FAILURE, even if every automated check is green. The human eye is the final gate.
-6. **Do not rebuild `perceive/`** unless the audit proves it wrong. No vision/screenshot input to the design model. (Enrichment of `perceive/` is allowed — additive fields like Phase 1's `designRole`; a rebuild is not.)
+6. **Do not rebuild `perceive/`** unless the audit proves it wrong. No vision/screenshot input to the design model. (Enrichment of `perceive/` is allowed — additive fields like `designRole`; a rebuild is not.)
 7. **Security/git:** `.env` stays gitignored (public repo); push only after proven slices. Quality over speed.
-8. **Layout flag:** `layoutCompiler = 'v1' | 'v2'` (default `v1`). P2.5 builds v2 behind the flag; never
+8. **Layout flag:** `layoutCompiler = 'v1' | 'v2'` (default `v1`). v2 is built behind the flag; never
    intertwine the two paths.
 
 ## Run the harness

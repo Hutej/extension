@@ -1,5 +1,5 @@
 /**
- * core/verify/resize — the resize-invariance harness (Law 0, rule A8).
+ * core/verify/resize — the resize-invariance harness (Law 0).
  *
  * A layout built from constraints survives an arbitrary viewport change with no
  * pipeline re-run. A layout built from measurements does not. This is physics:

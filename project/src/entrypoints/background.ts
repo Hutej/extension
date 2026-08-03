@@ -28,7 +28,7 @@ export default defineBackground(() => {
 
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (message.action === 'styleSpec') {
-      // B1: Unified on Cloudflare Workers AI credentials (cloudflare_account_id +
+      // Unified on Cloudflare Workers AI credentials (cloudflare_account_id +
       // cloudflare_api_token). The orphaned openai_api_key path is deleted.
       chrome.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token'], async (result: Record<string, unknown>) => {
         const accountId = result.cloudflare_account_id as string | undefined;
