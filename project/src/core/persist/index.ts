@@ -51,7 +51,3 @@ export async function saveSiteState(key: string, state: SiteState): Promise<void
 export async function clearSiteState(key: string): Promise<void> {
   await browser.storage.local.remove([key]);
 }
-
-export function hasTransform(state: SiteState): boolean {
-  return !!state.style;
-}

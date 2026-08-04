@@ -250,9 +250,6 @@ export const MAX_ACCENT_FRACTION = 0.15;       // was 0.4 — accent is RARE, no
  */
 export const MAX_FRAMED_FRACTION = 0.45;
 
-/** Two non-nested regions overlapping more than this fraction of the smaller = a layout collision. */
-export const MAX_REGION_OVERLAP = 0.35;
-
 /** The single injected style element id. Unlayered + appended last in <head> wins the cascade (Exp 006). */
 export const STYLE_ELEMENT_ID = 'revueon-style';
 
@@ -384,7 +381,6 @@ export const MIN_CONTENT_WIDTH_FRACTION = 0.92;
  * a wide child can't shrink into a dead-margin band inside its parent either.
  */
 export const MIN_COMPONENT_WIDTH_FRACTION = 0.92;
-export const COMPONENT_WIDE_FRACTION = 0.7;
 
 /**
  * Clamp columnCount to fit the container. Pure: takes the requested

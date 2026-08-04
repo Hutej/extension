@@ -9,7 +9,7 @@
  *
  * Usage: node --experimental-strip-types scripts/audit-wiring.ts
  */
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync, statSync, existsSync } from 'node:fs';
 import { join, relative, dirname } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
@@ -33,6 +33,15 @@ const srcFiles = readDir(srcDir);
 const srcContent = new Map<string, string>();
 for (const f of srcFiles) srcContent.set(f, readFileSync(f, 'utf8'));
 const allSrc = [...srcContent.values()].join('\n');
+
+// Also read test files — an export used in tests/ is a test utility, not an orphan.
+const testsDir = join(root, 'tests');
+let testContent = '';
+if (existsSync(testsDir)) {
+  for (const f of readDir(testsDir)) {
+    try { testContent += readFileSync(f, 'utf8') + '\n'; } catch { /* ignore */ }
+  }
+}
 
 // ── Check 1: Vocabulary relation wiring ────────────────────────────
 {
@@ -127,49 +136,49 @@ const allSrc = [...srcContent.values()].join('\n');
 
 // ── Check 2: Exported symbol with no non-test caller ──────────────
 {
-  // Extract all exports from src/ files.
+  // Extract all RUNTIME exports from src/ files (functions, consts, classes).
+  // Type exports (interfaces, types) are compile-time only — they don't need
+  // runtime callers and are excluded from the orphan check.
   const exports = new Map<string, string[]>(); // file -> exported names
   for (const [path, content] of srcContent) {
     const names: string[] = [];
-    // export function X, export const X, export class X, export type X, export interface X
+    // export function X, export const X, export class X, export let X
     for (const m of content.matchAll(/export\s+(?:async\s+)?(?:function|const|class|let)\s+([A-Za-z_$][\w$]*)/g)) {
       names.push(m[1]);
     }
-    for (const m of content.matchAll(/export\s+type\s+([A-Za-z_$][\w$]*)/g)) {
-      names.push(m[1]);
-    }
-    for (const m of content.matchAll(/export\s+interface\s+([A-Za-z_$][\w$]*)/g)) {
-      names.push(m[1]);
-    }
+    // Skip `export type` and `export interface` — compile-time only.
     if (names.length) exports.set(path, names);
   }
 
-  // For each exported symbol, check if it's imported in any OTHER src/ file.
+  // For each exported symbol, check if it's imported in any OTHER src/ file
+  // OR used within its own file (beyond the export declaration).
   for (const [exportPath, names] of exports) {
     const exportRel = relative(srcDir, exportPath).replace(/\\/g, '/');
+    const ownContent = srcContent.get(exportPath) ?? '';
     for (const name of names) {
-      // Check if the name appears in an import in any other src/ file.
+      // First: check same-file usage. An export used within its own file is NOT
+      // an orphan — it's a utility that's also used internally (e.g., applyStyle
+      // is called by applyStyleEverywhere in the same file). Count occurrences:
+      // the export line counts as 1; if there are >= 2, it's used internally.
+      const ownCount = (ownContent.match(new RegExp(`\\b${name}\\b`, 'g')) || []).length;
+      if (ownCount >= 2) continue; // used in its own file — not an orphan
+      // Then: check other src/ files.
       let found = false;
       for (const [otherPath, otherContent] of srcContent) {
         if (otherPath === exportPath) continue;
-        // Look for import { name } or import type { name } or import { ..., name, ... }
-        // Also check re-export: export { name } from
         if (new RegExp(`\\b${name}\\b`).test(otherContent) && otherContent.includes(name)) {
-          // Check if it's in an import statement or usage
-          // Simple heuristic: if the name appears in the file at all (beyond the export),
-          // it's likely used. This has false positives but is conservative.
           found = true;
           break;
         }
       }
       if (!found) {
-        // Check if it's used in test files (tests are valid callers for some exports).
-        // But the audit says "no non-test caller" — so test-only exports are flagged.
+        // Check test files — an export used in tests/ is a test utility, not an orphan.
+        if (new RegExp(`\\b${name}\\b`).test(testContent)) continue;
         findings.push({
           check: 'orphan-export',
           symbol: `${name} (${exportRel})`,
-          verdict: 'warn',
-          detail: 'no non-test caller found in src/',
+          verdict: 'fail',
+          detail: 'no caller found in src/ or tests/',
         });
       }
     }

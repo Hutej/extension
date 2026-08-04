@@ -18,15 +18,6 @@ import type { PixelInput } from './pixel.ts';
  * The real caller (content.ts) passes a `shot` that: sets scrollY, waits a frame,
  * asks the background for captureVisibleTab, decodes the PNG to a PixelInput.
  */
-export async function captureAtPositions(
-  scrolls: number[],
-  shot: (y: number) => Promise<PixelInput>,
-): Promise<PixelInput[]> {
-  const out: PixelInput[] = [];
-  for (const y of scrolls) out.push(await shot(y));
-  return out;
-}
-
 /**
  * Decode a PNG (data URL or Buffer) to a PixelInput by drawing it to a canvas at
  * a coarse width (the detectors downscale anyway). Runs in the page (uses Image

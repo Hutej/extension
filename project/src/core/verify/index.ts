@@ -1,12 +1,11 @@
 /**
- * core/verify — post-apply gate. Three not-broken checks + quality signals:
- *   changed   — did layout actually move? (LENIENT: low MIN_CHANGE_SCORE)
- *   coherent  — accent used sparingly (area-measured) AND surfaces not uniformly
- *               framed (count-measured over distinct clusters)
- *   noOverlap — our CSS introduced no NEW region collisions vs the original page
- *               (compares before/after overlap counts, so pre-existing floating/
- *               sticky overlaps never false-fail)
+ * core/verify — post-apply gate. Physics gates (not-broken) + advisory signals.
+ * The structural conformance checks in conformance.ts are the REAL gate — they
+ * compare the rendered result against the TargetLayoutIR.
  */
+
+export { checkStructuralConformance } from './conformance.ts';
+export type { StructuralConformanceResult, ConformanceCheck, ConformancePlacement } from './conformance.ts';
 
 import { findPrimaryContentNode, captureLayoutFingerprint, type LayoutFingerprint } from '../perceive/index.ts';
 import {

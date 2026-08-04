@@ -92,16 +92,6 @@ export function pickReadableText(bg: RGBA): string {
  * contrast ratio across the stops (the worst case), or the ratio against the single
  * color for a non-gradient. Pure.
  */
-export function minContrastAgainstGradient(text: RGBA, stops: RGBA[]): number {
-  if (stops.length === 0) return 21; // no stops -> treat as maximally readable
-  let min = Infinity;
-  for (const stop of stops) {
-    const r = contrastRatio(text, stop);
-    if (r < min) min = r;
-  }
-  return min;
-}
-
 /**
  * Pick a readable text color for a gradient background, checking against EVERY
  * stop. A single pickReadableText against the average stop can leave text invisible

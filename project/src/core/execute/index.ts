@@ -50,11 +50,6 @@ function injectShadowStyle(root: ShadowRoot, css: string): void {
   root.appendChild(style);
 }
 
-export function removeStyle(): void {
-  stopDefense();
-  document.getElementById(STYLE_ELEMENT_ID)?.remove();
-}
-
 export function removeStyleEverywhere(shadowRoots: ShadowRoot[]): void {
   stopDefense();
   document.getElementById(STYLE_ELEMENT_ID)?.remove();
