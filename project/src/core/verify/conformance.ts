@@ -333,8 +333,7 @@ function checkElevationConformance(pack: DesignPack, proxies: ProxyInfo[]): Conf
         return shadowBlur && Math.abs(parseInt(shadowBlur[1], 10) - scaleBlur) <= 2;
       });
       if (!blurMatch) {
-        // ponytail: loose check — the shadow might be a compound; just pass if any scale entry matches
-        // the first blur radius. This is a conformance check, not a precision gate.
+        failures.push(`${p.handle}: box-shadow not on pack scale`);
       }
     }
     const borderWeight = parseFloat(cs.borderTopWidth);
@@ -372,14 +371,17 @@ function checkMeasureConformance(pack: DesignPack, proxies: ProxyInfo[]): Confor
     if (width > measurePx.full * 1.1) {
       failures.push(`${role}: line length ${width}px exceeds full measure ${measurePx.full}px`);
     }
-    // Line-height: within [1.2, 2.0] (readable band).
+    // Line-height: compare against the pack's declared lineHeight for the
+    // region's role, not a hardcoded taste band. The pack declares per-role
+    // line-height values — the rendered value should match within tolerance.
     if (!isNaN(lh) && fs > 0) {
       const lhRatio = lh / fs;
-      if (lhRatio < 1.2) {
-        failures.push(`${role}: line-height ${lhRatio.toFixed(2)} below readable band (1.2)`);
-      }
-      if (lhRatio > 2.0) {
-        failures.push(`${role}: line-height ${lhRatio.toFixed(2)} above readable band (2.0)`);
+      // The pack's lineHeightScale is [1.0, 1.15, 1.3, 1.45, 1.6, 1.8, 2.0].
+      // Conformance: the rendered line-height ratio should be within 0.15 of
+      // a step on the scale (the pack's declared steps, not a taste band).
+      const onScale = pack.lineHeightScale.some(step => Math.abs(lhRatio - step) <= 0.15);
+      if (!onScale) {
+        failures.push(`${role}: line-height ratio ${lhRatio.toFixed(2)} not on pack scale [${pack.lineHeightScale.join(',')}]`);
       }
     }
   }
