@@ -53,6 +53,15 @@ const allSrc = [...srcContent.values()].join('\n');
   // Transform engine — case statements + COMPOSITION_RELATIONS.
   const transformPath = join(srcDir, 'core/compile/transform.ts');
   const transform = readFileSync(transformPath, 'utf8');
+  // Domain modules: after H4, the relation switch is split into per-domain
+  // handler modules in relations/*.ts. Read all of them (except composition.ts
+  // and context.ts which are not relation handlers) so the emission check can
+  // find handler entries there.
+  const relationsDir = join(srcDir, 'core/compile/relations');
+  const domainModuleContent = readDir(relationsDir)
+    .filter((f) => !f.endsWith('composition.ts') && !f.endsWith('context.ts'))
+    .map((f) => readFileSync(f, 'utf8'))
+    .join('\n');
   // Composition relations are resolved by resolveComposition (in relations/composition.ts),
   // not case statements in transform.ts. Check both files for the COMPOSITION_RELATIONS set.
   const compositionRels = new Set<string>();
@@ -71,10 +80,12 @@ const allSrc = [...srcContent.values()].join('\n');
     // reference, magnitude). Relations with specific cases get extra
     // validation, but the generic path covers all.
     const inValidator = inSpecs;
-    // Emission: either a case statement in transform.ts or in COMPOSITION_RELATIONS.
+    // Emission: a case statement in transform.ts, a handler in a domain
+    // module, or in COMPOSITION_RELATIONS.
     const hasCase = new RegExp(`case\\s+'${rel}'`).test(transform);
+    const hasHandler = new RegExp(`\\b${rel}\\s*\\(\\s*_?rel\\b`).test(domainModuleContent);
     const inComposition = compositionRels.has(rel);
-    const hasEmission = hasCase || inComposition;
+    const hasEmission = hasCase || hasHandler || inComposition;
 
     // H2: For composition relations, a validation path is not an emission
     // path. The solver reads slotAssignment, spans, tracks, slotBehaviour —

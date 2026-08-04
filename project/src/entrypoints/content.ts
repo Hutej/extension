@@ -11,79 +11,33 @@
  */
 
 import { perceive, serializePerception, serializePainterPerception, clearHandles, clearRoleCache, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
-import { compileSpec, deriveBaseTone, type CompileOptions } from '@/core/compile';
+import { compileSpec, type CompileOptions } from '@/core/compile';
 import { startMovableHandlers, stopMovableHandlers } from '@/core/interaction/movable';
 import { transformIntent, resolveComposition } from '@/core/compile/transform.ts';
 import { sanitizeCss } from '@/core/sanitize';
+import { redactSensitiveData } from '@/core/sanitize/redact';
 import { verifyStyle, checkConformance, type VerifyResult, type ConformanceResult } from '@/core/verify';
-import { pixelVerify, classifyInvisibleFailures, type PixelVerifyResult, type InvisibleBreakdown, type PixelInput, type ClusterRect } from '@/core/verify/pixel';
-import { screenshotToPixelInput } from '@/core/verify/capture';
+import { type PixelVerifyResult, type InvisibleBreakdown } from '@/core/verify/pixel';
+import { captureShotAt, captureAndPixelVerify } from '@/core/verify/pixel-capture';
+import { classifyInvisible } from '@/core/verify/pixel-classify';
 import { checkResizeInvariance, defaultCheckAt, type ResizeCheckResult } from '@/core/verify/resize';
 import { planRepair, type Attempt } from '@/core/repair';
 import { checkCompleteness, mergeSpecs } from '@/core/spec';
 import { applyStyleEverywhere, removeStyleEverywhere, startDefenseEverywhere, ensureEscapeUI, removeEscapeUI } from '@/core/execute';
+import { applyInlineBackstop } from '@/core/execute/backstop';
 import { loadSiteState, saveSiteState, clearSiteState, storageKey } from '@/core/persist';
-import { parseColor, pickReadableText } from '@/shared/color';
 import { AI_CONFIG, logDebug } from '@/core/config';
 import type { Role } from '@/core/reason';
 import type { DesignSpec } from '@/core/spec';
-import { TransactionLog, type DomAdapter } from '@/core/ops/transaction';
+import { TransactionLog } from '@/core/ops/transaction';
 import { validateOps, type ValidatedOp } from '@/core/ops';
+import { liveDom, executeOps } from '@/core/ops/execute';
 import { extractLayoutIR, buildFallbackTargetIR } from '@/core/layout/ir';
 import { detectExclusions } from '@/core/layout/exclusions';
 import { assignSlots } from '@/core/layout/assign';
 import { DOCUMENTATION_SLOTS } from '@/core/layout/languages/documentation';
 import { solve, computeGridPlacementCss, type SolverPlan } from '@/core/layout/solve';
-
-/** Redact sensitive data from a string before sending it to the model.
- *  Collects form input values and credential-shaped strings, then replaces them
- *  with [REDACTED] in the serialized perception.
- *
- *  safety: redaction is restricted to TEXT CONTENT and FORM VALUES only.
- *  It must never touch handles, selectors, class names, CSS variable names or
- *  any structural field — a redacted selector produces a silent no-op transform.
- *  The old ≥40-char rule matched any long alphanumeric string (handles, CSS var
- *  names, selector paths are all alphanumeric and can be ≥40 chars); it now
- *  requires entropy characteristics (mixed case + digits), not just length. */
-function redactSensitiveData(text: string): string {
-  let redacted = text;
-  // 1. Collect form input values from the live DOM — these are actual user data.
-  const sensitiveValues: string[] = [];
-  for (const el of document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>('input, textarea, select')) {
-    const val = (el as HTMLInputElement).value;
-    if (val && val.length > 3) sensitiveValues.push(val);
-    // Password-adjacent: if this is a password field, also redact nearby fields.
-    if (el.type === 'password' || el.type === 'email' || el.name?.toLowerCase().includes('pass') || el.name?.toLowerCase().includes('token') || el.name?.toLowerCase().includes('secret') || el.name?.toLowerCase().includes('key')) {
-      if (val && val.length > 1) sensitiveValues.push(val);
-    }
-  }
-  // 2. Credential-shaped strings — require entropy, not just length.
-  // The old /\b[a-zA-Z0-9]{40,}\b/g matched any 40+ char alphanumeric token —
-  // handles (c + 6 base36), CSS var names, and selector paths are all
-  // alphanumeric and can hit 40 chars. Require specific credential shapes:
-  // known prefixes (sk-, v1., bearer) OR high-entropy (mixed case + digits,
-  // ≥32 chars — a real API key/token, not a selector or class name which
-  // tend to be single-case or hyphen-separated).
-  const credPatterns = [
-    /\bsk-[a-zA-Z0-9]{20,}\b/g,           // OpenAI-style keys
-    /\bv1\.\d+-[a-zA-Z0-9]{20,}\b/g,       // Cloudflare-style tokens
-    /\bbearer\s+[a-zA-Z0-9._-]+/gi,         // Bearer tokens
-    // High-entropy: ≥32 chars with both upper+lower+digit (a real token,
-    // not a structural field which is typically single-case or hyphenated)
-    /\b(?=.*[a-z])(?=.*[A-Z])(?=.*\d)[a-zA-Z0-9]{32,}\b/g,
-  ];
-  // 3. Redact form values — actual user text/form content, never structural.
-  for (const val of sensitiveValues) {
-    if (val.length > 3 && redacted.includes(val)) {
-      redacted = redacted.split(val).join('[REDACTED]');
-    }
-  }
-  // 4. Redact credential-shaped patterns.
-  for (const pattern of credPatterns) {
-    redacted = redacted.replace(pattern, '[REDACTED]');
-  }
-  return redacted;
-}
+import { assertPlanHonoured } from '@/core/layout/plan-assert';
 
 interface SpecResponse { ok: boolean; spec?: DesignSpec; kind?: string; message?: string; usage?: unknown; model?: string; callMs?: number; httpRequests?: number; }
 
@@ -201,296 +155,6 @@ function markFailed(msg: string): void {
 
 // ── Core run ───────────────────────────────────────────────
 
-/** Build ClusterRect[] from the current [data-rv-c] elements for the pixel
- *  detectors. One representative per handle, with the rendered rect + text + font
- *  size. Skips our own UI nodes. `hasImage`/`hasGradient` flag content-image vs
- *  gradient/texture backgrounds so the void detector can recognize a DECORATIVE
- *  dead-zone (a large gradient with no content — the Wikipedia case) independent
- *  of color flatness. */
-function buildClusterRects(): ClusterRect[] {
-  const seen = new Set<string>();
-  const out: ClusterRect[] = [];
-  for (const el of Array.from(document.querySelectorAll('[data-rv-c]'))) {
-    if (el.hasAttribute('data-revueon-ui') || !(el instanceof HTMLElement)) continue;
-    const handle = el.getAttribute('data-rv-c')!;
-    if (seen.has(handle)) continue;
-    seen.add(handle);
-    const r = el.getBoundingClientRect();
-    const cs = getComputedStyle(el);
-    // role: the semantic role (for the rail-aware invisible-text detector). The
-    // tag/role is the element's own; a rail label is often a <nav>/<aside> child.
-    const role = el.getAttribute('role') || el.tagName.toLowerCase();
-    const bgImage = cs.backgroundImage;
-    // hasImage: a url() background = a content image (thumbnail). hasGradient: a
-    // gradient/texture background (linear/radial/conic/repeating) — NOT a content
-    // image. A cluster with a gradient bg and no text is a decorative dead-zone
-    // candidate (the void detector's case 2).
-    const hasImage = /url\(/i.test(bgImage);
-    const hasGradient = /gradient/i.test(bgImage) && !hasImage;
-    out.push({
-      handle,
-      rect: { x: r.left, y: r.top, w: r.width, h: r.height },
-      text: (el.textContent || '').trim(),
-      fontSize: parseFloat(cs.fontSize) || 16,
-      role,
-      hasImage,
-      hasGradient,
-    });
-  }
-  return out;
-}
-
-/** Capture the visible tab at scroll position y. Scrolls, waits two rAF, captures
- *  via the background service worker (only it can captureVisibleTab). Returns an
- *  empty PixelInput on error. Module-level so the before-capture (recolor detector)
- *  and the post-apply capture share the same path. */
-async function captureShotAt(y: number): Promise<PixelInput> {
-  window.scrollTo(0, y);
-  await new Promise<void>((r) => requestAnimationFrame(() => requestAnimationFrame(() => r())));
-  return new Promise<PixelInput>((resolve) => {
-    chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, (resp: { ok: boolean; dataUrl?: string }) => {
-      if (chrome.runtime.lastError || !resp?.ok || !resp.dataUrl) { resolve({ width: 0, height: 0, data: new Uint8ClampedArray(0) }); return; }
-      void screenshotToPixelInput(resp.dataUrl, window.innerWidth || 1280).then(resolve).catch(() => resolve({ width: 0, height: 0, data: new Uint8ClampedArray(0) }));
-    });
-  });
-}
-
-/** Capture the visible tab at 3 scroll positions (top / mid / deep) and run
- *  the pixel detectors. Returns the PixelVerifyResult + the time it took. Asks the
- *  background service worker for captureVisibleTab (only it can capture a tab).
- *  Free, deterministic, zero model calls. When a `before` is supplied, the recolor
- *  detector compares it to captures[0] (the scrollY=0 after-shot). */
-async function captureAndPixelVerify(before?: PixelInput): Promise<{ result: PixelVerifyResult; ms: number }> {
-  const tc = performance.now();
-  // use document.body.scrollHeight (matching the test harness) so the
-  // verify pass captures at the SAME scroll positions. document.documentElement
-  // and document.body can differ (margins/overflow), causing the verify to miss
-  // invisible text that the test harness catches — sticky headers are always at
-  // the viewport top, but the content behind them changes per scroll position.
-  const h = (document.body?.scrollHeight || document.documentElement.scrollHeight) || 1;
-  const scrolls = [0, Math.floor(h / 2), Math.floor(h * 0.8)];
-  // Build rects at EACH scroll position — getBoundingClientRect() returns viewport-
-  // relative coords, so a rect from scrollY=0 misaligned against a capture at
-  // scrollY=h/2 reads the wrong pixels (the false-positive source). The capture is
-  // decoded at viewport width (CSS pixels) so the coordinate system matches the rects.
-  const captures: PixelInput[] = [];
-  const rectsPerCapture: ClusterRect[][] = [];
-  for (const y of scrolls) {
-    captures.push(await captureShotAt(y));
-    rectsPerCapture.push(buildClusterRects());
-  }
-  window.scrollTo(0, 0);
-  const result = pixelVerify(captures, rectsPerCapture, before);
-  return { result, ms: Math.round(performance.now() - tc) };
-}
-
-/** assert the solver's emit-time plan against the rendered DOM — deterministic,
- *  no pixels. Checks: (1) the number of distinct VISUAL column x-positions among
- *  non-full-width placed proxies === plan.expectedColumns; (2) for each slot in the
- *  plan, at least one proxy with that slot has the expected grid-column-start.
- *  If the plan and the rendered result disagree, the run FAILS (planHonoured hard gate).
- *  Using visual x-positions (not grid-column-start) for (1) catches the case where
- *  the grid-column says "2" but the element renders at x=0 (track inheritance, or
- *  auto-placement putting items in different rows so they look like 1 column). */
-function assertPlanHonoured(plan: SolverPlan): boolean {
-  const proxies = document.querySelectorAll<HTMLElement>('[data-rv-plan-slot]');
-  if (proxies.length === 0) return true;
-  // (1) measured distinct visual columns = distinct left-edge x-positions (bucketed
-  // to 40px) among non-full-width proxies (grid-column-end !== "-1").
-  const xBuckets = new Set<number>();
-  for (const el of proxies) {
-    const cs = getComputedStyle(el);
-    if (cs.gridColumnEnd === '-1') continue;  // skip full-width proxies
-    const rect = el.getBoundingClientRect();
-    if (rect.width === 0 || rect.height === 0) continue;
-    xBuckets.add(Math.round(rect.left / 40) * 40);
-  }
-  const measuredColumns = xBuckets.size || 1;
-  if (measuredColumns !== plan.expectedColumns) return false;
-  // (2) each expected column must have at least one proxy at that grid-column-start.
-  const expectedTracks = new Set<number>();
-  for (const col of Object.values(plan.handleToColumn)) {
-    if (col > 0) expectedTracks.add(col);
-  }
-  for (const expectedTrack of expectedTracks) {
-    let found = false;
-    for (const el of proxies) {
-      const start = parseInt(getComputedStyle(el).gridColumnStart, 10);
-      if (start === expectedTrack) { found = true; break; }
-    }
-    if (!found) return false;
-  }
-  return true;
-}
-
-/** instrument: classify each SURVIVING invisible-text cluster (still
- *  invisible after paint N) into its failure class — {no-handle, wrong-bg,
- *  cascade-loss, multi-bg} — so the run report names the ROOT CAUSE of every
- *  invisible cluster, not just the count. The repair comment promises the
- *  deterministic bg+text pair "guarantees the pixel-invisible ones are readable
- *  regardless"; this instrument proves or disproves that guarantee per run.
- *  Pure classification lives in core/verify/pixel (classifyInvisibleFailures);
- *  this gathers the DOM-grounded inputs the pure fn needs:
- *   - emittedBg[handle]  : the `background` our CSS actually painted on it (live).
- *   - liveEffBg[handle]  : the effective bg the text sits on (parent-chain walk).
- *   - multiBg            : handles whose rect spans >1 distinct opaque-ancestor bg.
- *  A no-handle survivor (text with no [data-rv-c]) is invisible to the pixel
- *  detector entirely (buildClusterRects only iterates [data-rv-c]); those are
- *  counted separately on VerifyResult.contrastNoHandle. */
-function classifyInvisible(invisible: string[]): InvisibleBreakdown | null {
-  if (!invisible.length) return null;
-  const emittedBg = new Map<string, string>();
-  const liveEffBg = new Map<string, string>();
-  const multiBg = new Set<string>();
-  const colorDiag = new Map<string, string>();
-  for (const h of invisible) {
-    const el = document.querySelector<HTMLElement>(`[data-rv-c="${h}"]`);
-    if (!el) continue;
-    emittedBg.set(h, getComputedStyle(el).backgroundColor || '');
-    liveEffBg.set(h, effectiveBgStr(el));
-    // multi-bg: sample the rect's left/right thirds' effective backgrounds; if they
-    // differ, the cluster spans >1 painted surface (one pair can't cover both).
-    const r = el.getBoundingClientRect();
-    if (r.width > 200) {
-      const leftBg = effectiveBgAt(r.left + 8, r.top + r.height / 2);
-      const rightBg = effectiveBgAt(r.right - 8, r.top + r.height / 2);
-      if (leftBg && rightBg && leftBg !== rightBg) multiBg.add(h);
-    }
-    // DIAG : capture the cluster's computed color + the first text-bearing
-    // descendant's tag/computed-color, so the harness's INVISIBLE-TEXT breakdown
-    // shows WHY the forced color isn't reaching the text (root-causes `unknown`).
-    if (colorDiag.size < 5) {
-      const cs = getComputedStyle(el);
-      const hasDirectText = (e: Element): boolean => Array.from(e.childNodes).some((n) => n.nodeType === 3 && n.textContent && n.textContent.trim());
-      // search ANY descendant branch (first-child-only descent misses sibling text)
-      let txtEl: Element | null = null;
-      for (const d of Array.from(el.querySelectorAll('*'))) { if (hasDirectText(d)) { txtEl = d; break; } }
-      if (!txtEl && hasDirectText(el)) txtEl = el;
-      const txtColor = txtEl ? getComputedStyle(txtEl).color : '(no text desc)';
-      const txtTag = txtEl ? `${txtEl.tagName.toLowerCase()}${txtEl.id ? '#' + txtEl.id : ''}${txtEl.className && typeof txtEl.className === 'string' ? '.' + String(txtEl.className).split(/\s+/).slice(0, 2).join('.') : ''}` : '-';
-      const r2 = el.getBoundingClientRect();
-      colorDiag.set(h, `clusterColor=${cs.color} display=${cs.display} bg=${cs.backgroundColor} rect=${Math.round(r2.width)}x${Math.round(r2.height)} textIn=<${txtTag}> txtColor=${txtColor}`);
-    }
-  }
-  const bd = classifyInvisibleFailures(invisible, emittedBg, liveEffBg, multiBg);
-  if (bd) for (const rec of bd.records) { const d = colorDiag.get(rec.handle); if (d) rec.evidence = `${rec.evidence} [${d}]`; }
-  return bd;
-}
-
-/** Effective background of an element as a CSS rgb() string — the first opaque
- *  ancestor's bg, mirroring verify's effectiveBackground walk. */
-function effectiveBgStr(el: HTMLElement): string {
-  let cur: Element | null = el;
-  while (cur) {
-    const c = parseColor(getComputedStyle(cur).backgroundColor);
-    if (c && c[3] >= 0.95) return `rgb(${c[0]},${c[1]},${c[2]})`;
-    cur = cur.parentElement;
-  }
-  return '';
-}
-/** Effective background at a viewport point via elementFromPoint — the real painted
- *  surface under a pixel (catches a bg boundary the rect-walk averages over). */
-function effectiveBgAt(x: number, y: number): string {
-  const el = document.elementFromPoint(x, y) as Element | null;
-  return el ? effectiveBgStr(el as HTMLElement) : '';
-}
-
-/** The live DOM adapter for the op transaction layer. executeOps + txnLog.undoAll
- *  go through this so the inverse logic in transaction.ts is DOM-agnostic. */
-const liveDom: DomAdapter = {
-  resolve(handle) { return document.querySelector<HTMLElement>(`[data-rv-c="${handle}"]`); },
-  parent(node) { return node.parentNode; },
-  nextSibling(node) { return node.nextSibling; },
-  insertBefore(parent, node, ref) { parent.insertBefore(node, ref); },
-  appendChild(parent, node) { parent.appendChild(node); },
-  removeChild(parent, node) { parent.removeChild(node); },
-  createElement(tag) { return document.createElement(tag); },
-  resolveDestination(to) { return to ? document.querySelector<HTMLElement>(`[data-rv-c="${to}"]`) : null; },
-  // extract the handle from a live DOM node for handle-based inverse resolution.
-  handleOf(node) { return node instanceof HTMLElement ? node.getAttribute('data-rv-c') : null; },
-};
-
-/** Execute a validated op set against the live DOM. Idempotent: each op checks
- *  the live state and skips if already satisfied (re-derive on reload + dynamic
- *  defense re-exec both call this). Records an exact inverse per op (session
- *  undo). Refused/no-op ops are counted, not recorded. Returns {executed,refused}.
- *  `record` = true on the primary apply (records inverses); false on re-derive
- *  (no log — the log is session-only, the spec re-derives on reload). */
-function executeOps(ops: ValidatedOp[], record: boolean): { executed: number; refused: number; refusedReasons: string[] } {
-  let executed = 0; const refusedReasons: string[] = [];
-  for (const op of ops) {
-    const el = liveDom.resolve(op.target);
-    if (!el) { refusedReasons.push(`${op.kind}(${op.target}:not-found)`); continue; }
-    const parent = liveDom.parent(el);
-    if (!parent) { refusedReasons.push(`${op.kind}(${op.target}:no-parent)`); continue; }
-
-    if (op.kind === 'remove') {
-      const next = liveDom.nextSibling(el);
-      liveDom.removeChild(parent, el);
-      if (record) txnLog.record({ op: { kind: 'remove', target: op.target }, target: op.target, inverse: { kind: 'reattach', node: el, parentHandle: liveDom.handleOf(parent), nextSiblingHandle: liveDom.handleOf(next) } });
-      executed++; continue;
-    }
-
-    if (op.kind === 'wrap') {
-      // Idempotent: if the cluster is already the sole child of a wrapper we
-      // created, skip (re-derive on reload). Detect a wrapper with a data-rv-wrap
-      // attr around the cluster.
-      const existingWrap = el.parentElement?.getAttribute('data-rv-wrap') === 'true' ? el.parentElement : null;
-      if (existingWrap) { executed++; continue; }
-      const wrap = liveDom.createElement('div') as HTMLElement;
-      wrap.setAttribute('data-rv-wrap', 'true');
-      if (op.hint) (wrap as HTMLElement).style.display = op.hint;
-      const next = liveDom.nextSibling(el);
-      liveDom.insertBefore(parent, wrap, next);
-      liveDom.appendChild(wrap, el);
-      if (record) txnLog.record({ op: { kind: 'wrap', target: op.target }, target: op.target, inverse: { kind: 'unwrap', handle: op.target, wrapper: wrap, parentHandle: liveDom.handleOf(parent), nextSiblingHandle: liveDom.handleOf(next) } });
-      executed++; continue;
-    }
-
-    if (op.kind === 'reorder') {
-      const parentEl = parent;
-      // Idempotent: if `before` is given and the target is already immediately before it, skip.
-      if (op.before) {
-        const beforeEl = liveDom.resolve(op.before);
-        if (beforeEl && liveDom.nextSibling(el) === beforeEl) { executed++; continue; }
-        if (beforeEl) {
-          const next = liveDom.nextSibling(el);
-          liveDom.insertBefore(parentEl, el, beforeEl);
-          if (record) txnLog.record({ op: { kind: 'reorder', target: op.target, before: op.before }, target: op.target, inverse: { kind: 'reparent', handle: op.target, parentHandle: liveDom.handleOf(parentEl), nextSiblingHandle: liveDom.handleOf(next) } });
-          executed++; continue;
-        }
-      }
-      // No/missing before → move to end. Idempotent if already last.
-      if (liveDom.nextSibling(el) === null) { executed++; continue; }
-      const next = liveDom.nextSibling(el);
-      liveDom.appendChild(parentEl, el);
-      if (record) txnLog.record({ op: { kind: 'reorder', target: op.target }, target: op.target, inverse: { kind: 'reparent', handle: op.target, parentHandle: liveDom.handleOf(parentEl), nextSiblingHandle: liveDom.handleOf(next) } });
-      executed++; continue;
-    }
-
-    if (op.kind === 'move') {
-      // 'floating' = position:fixed lever (a mini-player). Idempotent if already fixed.
-      if (op.hint === 'floating') {
-        if (getComputedStyle(el).position === 'fixed') { executed++; continue; }
-        const prevInlines = (el as HTMLElement).style.cssText;
-        const next = liveDom.nextSibling(el);
-        (el as HTMLElement).style.position = 'fixed';
-        if (record) txnLog.record({ op: { kind: 'move', target: op.target, to: 'floating', consent: true }, target: op.target, inverse: { kind: 'reparent', handle: op.target, parentHandle: liveDom.handleOf(parent), nextSiblingHandle: liveDom.handleOf(next), prevCss: prevInlines } });
-        executed++; continue;
-      }
-      const dest = liveDom.resolveDestination(op.to);
-      if (!dest) { refusedReasons.push(`move(${op.target}:bad-dest)`); continue; }
-      // Idempotent: already a child of the destination.
-      if (liveDom.parent(el) === dest) { executed++; continue; }
-      const next = liveDom.nextSibling(el);
-      liveDom.appendChild(dest, el);
-      if (record) txnLog.record({ op: { kind: 'move', target: op.target, to: op.to }, target: op.target, inverse: { kind: 'reparent', handle: op.target, parentHandle: liveDom.handleOf(parent), nextSiblingHandle: liveDom.handleOf(next) } });
-      executed++; continue;
-    }
-  }
-  return { executed, refused: refusedReasons.length, refusedReasons };
-}
-
 async function runStyle(intent: string, restyleOnly = false): Promise<TransformOutcome> {
   // MV3 keepalive: open a port so the SW stays alive for the duration of this run.
   // The SW (background.ts) relays the model fetch (70-90s) — without the port, MV3's
@@ -586,37 +250,6 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   // minimum; the budget is time, not a call count.
   const canReReason = (): boolean => (AI_CONFIG.designMaxMs - (Date.now() - t0)) > AI_CONFIG.criticMinMs;
 
-  /** Inline-style forceContrast backstop: forces the readable bg+text pair onto
-   *  each invisible cluster's own element, beating id-level site !important that
-   *  defeats the CSS rule (the cascade-loss class). Reused by both v1 and v2. */
-  const applyInlineBackstop = (curSpec: DesignSpec, targets: string[] | undefined, contrastTargetBgs: Record<string, string> | undefined): void => {
-    if (!targets?.length) return;
-    const canvasTone = deriveBaseTone(curSpec.canvas?.background ?? '');
-    const canvasParsed = parseColor(canvasTone);
-    const opaque = (bg: string | undefined | null): string | null => {
-      if (!bg) return null;
-      const p = parseColor(bg);
-      return p && p[3] === 1 ? bg : null;
-    };
-    for (const h of new Set(targets)) {
-      const el = document.querySelector<HTMLElement>(`[data-rv-c="${h}"]`);
-      if (!el) continue;
-      // skip content images (url()) but NOT gradients. A gradient bg can
-      // make text invisible; the inline backstop (inline+!important) overrides it
-      // with a readable solid pair. Content images are preserved.
-      if (/url\(/i.test(getComputedStyle(el).backgroundImage)) continue;
-      const ownBg = getComputedStyle(el).backgroundColor;
-      const effBg = opaque(contrastTargetBgs?.[h]) ?? opaque(ownBg) ?? canvasTone;
-      const baseTone = deriveBaseTone(effBg);
-      const baseParsed = parseColor(baseTone) ?? canvasParsed;
-      const readableBg = baseParsed ? baseTone : '#ffffff';
-      const readableText = baseParsed ? pickReadableText(baseParsed) : '#111111';
-      el.style.setProperty('background', readableBg, 'important');
-      el.style.setProperty('background-image', 'none', 'important');
-      el.style.setProperty('color', readableText, 'important');
-    }
-  };
-
   // ── Design call: Architect + Painter in PARALLEL, then merge ──
   // The Architect sets the structure (composition/layout/canvasLayout/hide); the
   // Painter sets the surface (canvas/variables/paletteMode/styles). Independent
@@ -691,7 +324,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const { ops: validated, refused: opRefusals } = validateOps(spec.ops, perception);
     if (!validated.length) return { executed: 0, refused: opRefusals.length, reasons: opRefusals, ops: [] as ValidatedOp[] };
     // Execute against the CURRENT (pre-op) stamps — handles resolve to live nodes.
-    const r = executeOps(validated, true);
+    const r = executeOps(validated, true, txnLog);
     activeOps = validated;
     return { executed: r.executed, refused: r.refused + opRefusals.length, reasons: [...opRefusals, ...r.refusedReasons], ops: validated };
   })();
@@ -1119,7 +752,7 @@ async function reapplyStored(): Promise<boolean> {
   // satisfied — a move already applied, a removed element gone). No log on re-derive.
   const { ops: revalidated } = validateOps(state.style.spec.ops, perception);
   if (revalidated.length) {
-    executeOps(revalidated, false);
+    executeOps(revalidated, false, txnLog);
     activeOps = revalidated;
     // Re-perceive so compile uses post-op geometry (the reclamation must show).
     perception = perceive();
@@ -1236,7 +869,7 @@ function restyleDynamic(): void {
   // a removed element; re-execute is idempotent — removed ops are a no-op if
   // the element is gone, re-apply if it came back). No log (re-derive path).
   const { ops: revalidated } = validateOps(activeSpec.ops, perception);
-  if (revalidated.length) { executeOps(revalidated, false); activeOps = revalidated; }
+  if (revalidated.length) { executeOps(revalidated, false, txnLog); activeOps = revalidated; }
   const compiled = compileSpec(activeSpec, perception, activeOpts);
   // prepend the stored structural CSS (grid + display:contents) so the
   // grid layout survives dynamic re-style (MutationObserver re-apply path).

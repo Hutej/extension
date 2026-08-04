@@ -17,15 +17,31 @@
  * model calls. The caller (compile/index.ts) merges these with any raw
  * escape-hatch rules (raw wins on a specific handle) then runs the existing
  * compile path.
+ *
+ * The relation switch is split into per-domain resolver modules
+ * (compile/relations/*.ts); this file builds the shared context (helpers +
+ * mutable accumulators) and dispatches each relation to its domain handler in
+ * the SAME order the inline switch ran, so accent-budget allocation and style
+ * merging are behaviour-identical.
  */
 
 import type { DesignSpec, DesignRule, DesignOp, StyleDecls, LayoutDecls } from '../spec/index.ts';
 import type { Perception, Cluster } from '../perceive/index.ts';
 import type { DesignRole } from '../perceive/semantic.ts';
 import { resolvePack, type DesignPack, type TypeRole, type SurfaceTier } from '../design/packs.ts';
-import type { RelationStatement, Subject, AlignmentEdge } from '../design/vocabulary.ts';
+import type { Subject, RelationStatement } from '../design/vocabulary.ts';
 import { COMPOSITION_RELATIONS, resolveComposition } from './relations/composition.ts';
 export { resolveComposition };
+import type { RelationContext, RelationHandlerMap } from './relations/context.ts';
+import { spacingHandlers } from './relations/spacing.ts';
+import { typographyHandlers } from './relations/typography.ts';
+import { hierarchyHandlers } from './relations/hierarchy.ts';
+import { surfaceHandlers } from './relations/surface.ts';
+import { colorHandlers } from './relations/color.ts';
+import { layoutHandlers } from './relations/layout.ts';
+import { motionHandlers } from './relations/motion.ts';
+import { opsHandlers } from './relations/ops.ts';
+import { interactionHandlers } from './relations/interaction.ts';
 
 /** The destructive-confidence floor: a destructive relation (hide/remove) is
  *  forbidden on a role the classifier is < this sure about. */
@@ -41,6 +57,19 @@ export interface TransformResult {
   pack: DesignPack;
   notes: string[];
 }
+
+/** The merged per-domain handler map. Built once (module-level — pure data). */
+const RELATION_HANDLERS: RelationHandlerMap = {
+  ...spacingHandlers,
+  ...typographyHandlers,
+  ...hierarchyHandlers,
+  ...surfaceHandlers,
+  ...colorHandlers,
+  ...layoutHandlers,
+  ...motionHandlers,
+  ...opsHandlers,
+  ...interactionHandlers,
+};
 
 /**
  * Transform relational statements into concrete rules/composition/ops. The PRIMARY
@@ -74,8 +103,9 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
   const escapeHatchUses = new Set<string>();
   for (const rule of spec.rules) escapeHatchUses.add(rule.target);
 
-  // Accent tracking for the pack's maxAccentCount principle.
-  let accentCount = 0;
+  // Accent tracking for the pack's maxAccentCount principle. Mutable holder so
+  // the domain resolvers can increment it through the shared context.
+  const accent = { count: 0 };
 
   /** Resolve a subject string to cluster handles. A handle matches one cluster;
    *  a role fans out to every cluster of that role; a group fans out to every
@@ -305,8 +335,41 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
     return null;
   };
 
+  // ── The shared context handed to every domain resolver ──
+  const ctx: RelationContext = {
+    pack,
+    byHandle,
+    resolveSubject,
+    resolveReference,
+    ruleFor,
+    compFor,
+    addStyles,
+    addLayout,
+    fontSizePx,
+    paddingPx,
+    lineHeightValue,
+    shadowTier,
+    closestStep,
+    closestRampValue,
+    continuousSpacing,
+    continuousLineHeight,
+    deriveMutationReason,
+    rankToTypeRole,
+    tierToSurface,
+    rampRoles,
+    rampPx,
+    fineRampPx,
+    ops,
+    notes,
+    accent,
+  };
+
+  // ── Dispatch each relation to its domain handler ──
+  // Iterates relations in the ORIGINAL order (not grouped by domain) so the
+  // order-sensitive accent budget and the last-wins style merge are identical
+  // to the inline switch. Composition relations are resolved by
+  // resolveComposition, not here.
   for (const rel of relations) {
-    // Composition relations are resolved by resolveComposition, not here.
     if (COMPOSITION_RELATIONS.has(rel.relation)) continue;
     const subjects = resolveSubject(rel.subject);
     if (!subjects.length) {
@@ -316,403 +379,9 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
 
     for (const c of subjects) {
       allTargets.add(c.handle);
-
-      switch (rel.relation) {
-        // ── Size relations ──
-        case 'sizeRatio': {
-          const refs = resolveReference(rel.reference, c);
-          if (!refs.length) { notes.push(`sizeRatio ${rel.subject}: reference "${rel.reference}" not found`); break; }
-          // Enforce minTypeScaleRatio: the model's ratio must produce at least
-          // the pack's minimum type-scale step (a ratio below this is a no-op visually).
-          const minRatio = pack.principles?.minTypeScaleRatio ?? 1;
-          const effectiveRatio = rel.ratio < minRatio && rel.ratio >= 1
-            ? (notes.push(`sizeRatio ${rel.subject}: ratio ${rel.ratio} < minTypeScaleRatio ${minRatio}, clamped`) || minRatio)
-            : rel.ratio;
-          // F2 fix: generate the ramp from the pack's base + scale character
-          // instead of snapping to a fixed 4-value ramp. The measurement
-          // (refSize × ratio) informs which step; the generated step value
-          // (derived from pack tokens) is the output — Law 0 preserved.
-          const targetPx = fontSizePx(refs[0]) * effectiveRatio;
-          const fontSize = closestRampValue(fineRampPx, targetPx);
-          // Find the matching lineHeight from the pack's named roles: the
-          // closest named role to the generated font-size gets its lineHeight.
-          const tr = rampRoles[closestStep(rampPx, fontSize)];
-          addLayout(ruleFor(c.handle), {
-            fontSize: `${fontSize}px`,
-            lineHeight: String(pack.lineHeight[tr]),
-          });
-          break;
-        }
-        case 'typeRank': {
-          const tr = rankToTypeRole(rel.rank);
-          addLayout(ruleFor(c.handle), {
-            fontSize: `${pack.typeRamp[tr]}px`,
-            lineHeight: String(pack.lineHeight[tr]),
-          });
-          break;
-        }
-
-        // ── Rank and hierarchy ──
-        case 'outranks': {
-          const refs = resolveReference(rel.reference, c);
-          if (!refs.length) { notes.push(`outranks ${rel.subject}: reference "${rel.reference}" not found`); break; }
-          // Law 0: find the reference's current ramp rank, step up one;
-          // emit the pack token at the new rank.
-          const refRank = closestStep(rampPx, fontSizePx(refs[0]));
-          const newRank = Math.max(0, refRank - 1);
-          const tr = rampRoles[newRank];
-          addLayout(ruleFor(c.handle), {
-            fontSize: `${pack.typeRamp[tr]}px`,
-            lineHeight: String(pack.lineHeight[tr]),
-          });
-          break;
-        }
-        case 'emphasisRank': {
-          // Emphasis hierarchy: rank 0 = highest, progressively de-emphasised.
-          // Every rank emits real CSS — the vocabulary promised it.
-          const wScale = pack.fontWeightScale;
-          // Map rank to a weight index (0=highest emphasis → 4=lightest).
-          const wi = Math.min(wScale.length - 1, Math.max(0, rel.rank));
-          addLayout(ruleFor(c.handle), { fontWeight: String(wScale[Math.max(0, wScale.length - 1 - wi)]) });
-          // Ranks 3+ also get the pack's muted colour — visual de-emphasis.
-          if (rel.rank >= 3) {
-            addStyles(ruleFor(c.handle), { color: pack.colors.subtle });
-          }
-          break;
-        }
-
-        // ── Spacing relations ──
-        case 'spacingStep': {
-          const step = Math.max(pack.principles.densityRange[0], Math.min(pack.principles.densityRange[1], rel.step));
-          const px = pack.spacingScale[step] ?? 0;
-          addStyles(ruleFor(c.handle), { padding: `${px}px` });
-          break;
-        }
-        case 'spacingRatio': {
-          const refs = resolveReference(rel.reference, c);
-          if (!refs.length) { notes.push(`spacingRatio ${rel.subject}: reference not found`); break; }
-          // F2 fix: continuous spacing — compute the actual value and clamp
-          // to the pack's spacing range + grid. No more snapping to 9 fixed steps.
-          const targetPx = paddingPx(refs[0]) * rel.ratio;
-          const px = continuousSpacing(targetPx);
-          addStyles(ruleFor(c.handle), { padding: `${px}px` });
-          break;
-        }
-        case 'gapStep': {
-          const step = Math.max(pack.principles.densityRange[0], Math.min(pack.principles.densityRange[1], rel.step));
-          const px = pack.spacingScale[step] ?? 0;
-          addLayout(ruleFor(c.handle), { gap: `${px}px` });
-          break;
-        }
-        case 'gapRatio': {
-          const refs = resolveReference(rel.reference, c);
-          if (!refs.length) { notes.push(`gapRatio ${rel.subject}: reference not found`); break; }
-          // F2 fix: continuous gap — compute the actual value and clamp.
-          const targetPx = (refs[0].layout.siblingGapPx ?? pack.spacingScale[3] ?? 12) * rel.ratio;
-          const px = continuousSpacing(targetPx);
-          addLayout(ruleFor(c.handle), { gap: `${px}px` });
-          break;
-        }
-        case 'marginStep': {
-          const px = pack.spacingScale[rel.step] ?? 0;
-          addLayout(ruleFor(c.handle), { margin: `${px}px` });
-          break;
-        }
-        case 'marginEquals': {
-          const refs = resolveReference(rel.reference, c);
-          if (!refs.length) { notes.push(`marginEquals ${rel.subject}: reference not found`); break; }
-          // F2 fix: continuous margin — compute the actual value and clamp.
-          const targetPx = refs[0].layout.siblingGapPx ?? 0;
-          const px = continuousSpacing(targetPx);
-          addLayout(ruleFor(c.handle), { margin: `${px}px` });
-          break;
-        }
-        case 'paddingSide': {
-          // Clamp to densityRange like spacingStep — per-side override, same density limits.
-          const [dMin, dMax] = pack.principles?.densityRange ?? [0, 20];
-          const step = Math.max(dMin, Math.min(dMax, rel.step));
-          const px = pack.spacingScale[step] ?? 0;
-          const key = rel.side === 'all' ? 'padding' : `padding${rel.side.charAt(0).toUpperCase()}${rel.side.slice(1)}`;
-          addStyles(ruleFor(c.handle), { [key]: `${px}px` });
-          break;
-        }
-
-        // ── Alignment relations ──
-        case 'alignsWith': {
-          // Emit the alignment edge as a layout property.
-          const edgeMap: Record<AlignmentEdge, string> = {
-            start: 'flex-start', center: 'center', end: 'flex-end', stretch: 'stretch',
-          };
-          addLayout(ruleFor(c.handle), { alignItems: edgeMap[rel.edge] });
-          break;
-        }
-
-        // ── Elevation relations ──
-        case 'elevationAbove': {
-          const refs = resolveReference(rel.reference, c);
-          if (!refs.length) { notes.push(`elevationAbove ${rel.subject}: reference not found`); break; }
-          const refTier = shadowTier(refs[0]);
-          const newTier = Math.min(pack.shadowScale.length - 1, refTier + rel.levels);
-          const shadow = pack.shadowScale[newTier] ?? 'none';
-          addStyles(ruleFor(c.handle), { boxShadow: shadow });
-          break;
-        }
-        case 'elevationStep': {
-          const step = Math.min(pack.shadowScale.length - 1, Math.max(0, rel.step));
-          addStyles(ruleFor(c.handle), { boxShadow: pack.shadowScale[step] ?? 'none' });
-          break;
-        }
-
-        // ── Colour role assignment ──
-        case 'accentRole': {
-          const limit = Math.min(rel.maxCount, pack.principles.maxAccentCount);
-          if (accentCount >= limit) {
-            notes.push(`accentRole ${rel.subject}: REFUSED — accent budget exhausted (${accentCount}/${limit})`);
-            break;
-          }
-          const color = pack.colors.accents[rel.role];
-          if (!color) { notes.push(`accentRole ${rel.subject}: accent "${rel.role}" not found in pack`); break; }
-          accentCount++;
-          addStyles(ruleFor(c.handle), { background: color });
-          break;
-        }
-        case 'accentOn': {
-          if (accentCount >= pack.principles.maxAccentCount) {
-            notes.push(`accentOn ${rel.subject}: REFUSED — accent budget exhausted (${accentCount}/${pack.principles.maxAccentCount})`);
-            break;
-          }
-          const color = pack.colors.accents[rel.role];
-          if (!color) { notes.push(`accentOn ${rel.subject}: accent "${rel.role}" not found in pack`); break; }
-          accentCount++;
-          if (rel.target === 'text') addStyles(ruleFor(c.handle), { color });
-          else if (rel.target === 'border') addStyles(ruleFor(c.handle), { borderColor: color, borderStyle: 'solid', borderWidth: `${pack.borderScale[1] ?? 1}px` });
-          else addStyles(ruleFor(c.handle), { background: color });
-          break;
-        }
-
-        // ── Proportional width allocation ──
-        case 'widthFraction': {
-          const refs = resolveReference(rel.reference, c);
-          if (!refs.length) { notes.push(`widthFraction ${rel.subject}: reference not found`); break; }
-          const pct = Math.round(rel.fraction * 100);
-          const r = compFor(c.handle);
-          addLayout(r, { width: `${pct}%` });
-          break;
-        }
-
-        // ── Grouping ──
-        case 'groupWith': {
-          // Advisory: set display:flex on the parent so children share a
-          // formatting context. Direction and wrapping are declared via
-          // composition relations (stackDirection, wrapBehavior), not
-          // assumed here — Law 0 rule 2: don't impose a direction on
-          // something that already had one.
-          const parent = resolveSubject('parent', c);
-          if (parent.length) {
-            const r = compFor(parent[0].handle);
-            addLayout(r, { display: 'flex' });
-          }
-          notes.push(`groupWith ${rel.subject} → ${rel.reference}: parent set to flex (advisory)`);
-          break;
-        }
-
-        // ── Typography details ──
-        case 'letterSpacingStep': {
-          const val = pack.letterSpacingScale[rel.step] ?? '0em';
-          addStyles(ruleFor(c.handle), { letterSpacing: val });
-          break;
-        }
-        case 'wordSpacingStep': {
-          const val = pack.wordSpacingScale[rel.step] ?? '0em';
-          addStyles(ruleFor(c.handle), { wordSpacing: val });
-          break;
-        }
-        case 'fontWeightRank': {
-          const w = pack.fontWeightScale[rel.rank - 1] ?? 400;
-          addLayout(ruleFor(c.handle), { fontWeight: String(w) });
-          break;
-        }
-        case 'textTransform': {
-          addStyles(ruleFor(c.handle), { textTransform: rel.transform });
-          break;
-        }
-        case 'lineHeightStep': {
-          const val = pack.lineHeightScale[rel.step] ?? pack.lineHeight.body;
-          addLayout(ruleFor(c.handle), { lineHeight: String(val) });
-          break;
-        }
-        case 'lineHeightRatio': {
-          // F2 fix: continuous line-height — compute the actual value and clamp
-          // to the pack's lineHeightScale range. No more snapping to fixed steps.
-          const refs = resolveReference(rel.reference, c);
-          if (!refs.length) { notes.push(`lineHeightRatio ${rel.subject}: reference not found`); break; }
-          const targetVal = lineHeightValue(refs[0]) * rel.ratio;
-          const lh = continuousLineHeight(targetVal);
-          addLayout(ruleFor(c.handle), { lineHeight: String(lh) });
-          break;
-        }
-
-        // ── Surface details ──
-        case 'radiusCorner': {
-          const rv = pack.radiusScale[rel.step] ?? 0;
-          const radius = rv >= 999 ? '9999px' : `${rv}px`;
-          if (rel.corner === 'all') {
-            addStyles(ruleFor(c.handle), { borderRadius: radius });
-          } else {
-            const map: Record<string, string> = { tl: 'borderTopLeftRadius', tr: 'borderTopRightRadius', br: 'borderBottomRightRadius', bl: 'borderBottomLeftRadius' };
-            addStyles(ruleFor(c.handle), { [map[rel.corner]]: radius });
-          }
-          break;
-        }
-        case 'borderWeight': {
-          const w = pack.borderScale[rel.step] ?? 0;
-          addStyles(ruleFor(c.handle), { borderWidth: `${w}px`, borderStyle: 'solid', borderColor: pack.colors.subtle });
-          break;
-        }
-        case 'surfaceTier': {
-          const p = pack.principles;
-          // raiseSurface gate: refuse raising when the pack forbids it.
-          if (p.raiseSurface === 'never' && rel.tier > 0) {
-            notes.push(`surfaceTier ${rel.subject}: REFUSED — raiseSurface=never, tier ${rel.tier} > 0`);
-            break;
-          }
-          if (p.raiseSurface === 'on-overlay' && rel.tier === 1) {
-            notes.push(`surfaceTier ${rel.subject}: REFUSED — raiseSurface=on-overlay, raised (tier 1) not allowed`);
-            break;
-          }
-          const surf = pack.surfaces[tierToSurface(rel.tier)];
-          if (!surf) { notes.push(`surfaceTier ${rel.subject}: tier ${rel.tier} has no surface in pack`); break; }
-          addStyles(ruleFor(c.handle), { background: surf.bg });
-          // surfaceDefinition gate: border-only, shadow-only, or both.
-          const useBorder = p.surfaceDefinition !== 'shadow' && !!surf.border;
-          const useShadow = p.surfaceDefinition !== 'border' && !!surf.shadow;
-          if (useBorder && surf.border) {
-            const bm = surf.border.match(/^(\d+px)\s+(solid)\s+(.+)$/);
-            if (bm) addStyles(ruleFor(c.handle), { borderWidth: bm[1], borderStyle: bm[2], borderColor: bm[3] });
-            else addStyles(ruleFor(c.handle), { border: surf.border });
-          }
-          if (useShadow && surf.shadow) addStyles(ruleFor(c.handle), { boxShadow: surf.shadow });
-          break;
-        }
-
-        // ── Layout ──
-        case 'proseColumns': {
-          addLayout(ruleFor(c.handle), { columnCount: String(rel.count) });
-          break;
-        }
-
-        // ── Structural ops ──
-        case 'hide': {
-          if (c.designRoleConfidence < DESTRUCTIVE_CONFIDENCE_FLOOR) {
-            notes.push(`hide ${rel.subject} (${c.handle}): REFUSED — role ${c.designRole}@${c.designRoleConfidence.toFixed(2)} < ${DESTRUCTIVE_CONFIDENCE_FLOOR} (hard-safety rule)`);
-            break;
-          }
-          // Safety gates (same as the old hideRefusal).
-          if (c.role === 'main' || c.role === 'article') { notes.push(`hide ${c.handle}: REFUSED — primary-content`); break; }
-          if (c.layout.isPassiveWrapper || c.layout.isOpaqueWrapper) { notes.push(`hide ${c.handle}: REFUSED — wrapper`); break; }
-          if (c.rect.h > 300) { notes.push(`hide ${c.handle}: REFUSED — tall-content`); break; }
-          ruleFor(c.handle).hide = true;
-          break;
-        }
-        case 'reorderBefore': {
-          const refs = resolveReference(rel.reference, c);
-          if (!refs.length) { notes.push(`reorderBefore ${rel.subject}: reference not found`); break; }
-          if (c.moveSafety !== 'safe') { notes.push(`reorderBefore ${c.handle}: REFUSED — moveSafety=${c.moveSafety}`); break; }
-          // F6: derive a real MutationReason from the actual situation.
-          const reason = deriveMutationReason(c, refs[0], byHandle);
-          if (!reason) {
-            notes.push(`reorderBefore ${c.handle}: REFUSED — no MutationReason applies (CSS can express this without DOM mutation)`);
-            break;
-          }
-          ops.push({ kind: 'reorder', target: c.handle, before: refs[0].handle, reason });
-          break;
-        }
-        case 'moveTo': {
-          const refs = resolveReference(rel.reference, c);
-          if (!refs.length) { notes.push(`moveTo ${rel.subject}: reference not found`); break; }
-          if (c.moveSafety === 'forbidden') { notes.push(`moveTo ${c.handle}: REFUSED — forbidden`); break; }
-          // F6: derive a real MutationReason from the actual situation.
-          const reason = deriveMutationReason(c, refs[0], byHandle);
-          if (!reason) {
-            notes.push(`moveTo ${c.handle}: REFUSED — no MutationReason applies (CSS can express this without DOM mutation)`);
-            break;
-          }
-          ops.push({ kind: 'move', target: c.handle, to: refs[0].handle, reason });
-          break;
-        }
-
-        // ── Motion (F4) ──
-        // All motion CSS is transform/opacity only — never triggers reflow.
-        // prefers-reduced-motion is honoured absolutely: the entire motion layer
-        // is wrapped in @media (prefers-reduced-motion: no-preference) at compile.
-        case 'transitionTier': {
-          if (!pack.motionAnimated) { notes.push(`transitionTier ${c.handle}: REFUSED — pack is not animated`); break; }
-          const dur = pack.motionDurationScale[Math.min(pack.motionDurationScale.length - 1, Math.max(0, rel.tier))] ?? 0;
-          if (dur === 0) break; // tier 0 = no transition
-          addStyles(ruleFor(c.handle), {
-            transition: `transform ${dur}ms var(--rv-easing, ease-out), opacity ${dur}ms var(--rv-easing, ease-out), box-shadow ${dur}ms var(--rv-easing, ease-out)`,
-          });
-          break;
-        }
-        case 'transitionEasing': {
-          if (!pack.motionAnimated) { notes.push(`transitionEasing ${c.handle}: REFUSED — pack is not animated`); break; }
-          const easing = pack.motionEasing[rel.easing] ?? 'ease-out';
-          addStyles(ruleFor(c.handle), { ['--rv-easing' as string]: easing });
-          break;
-        }
-        case 'entranceDelay': {
-          if (!pack.motionAnimated) { notes.push(`entranceDelay ${c.handle}: REFUSED — pack is not animated`); break; }
-          const delayScale = pack.motionDurationScale;
-          const delay = delayScale[Math.min(delayScale.length - 1, Math.max(0, rel.tier))] ?? 0;
-          // Entrance: opacity 0→1 + translateY(8px→0). Transform+opacity only.
-          // The stagger is driven by the tier (reading order → tier mapping).
-          addStyles(ruleFor(c.handle), {
-            animation: `rv-enter ${delayScale[delayScale.length - 1] ?? 300}ms var(--rv-easing, ease-out) ${delay}ms both`,
-          });
-          break;
-        }
-        case 'hoverElevate': {
-          if (!pack.motionAnimated) { notes.push(`hoverElevate ${c.handle}: REFUSED — pack is not animated`); break; }
-          const newTier = Math.min(pack.shadowScale.length - 1, shadowTier(c) + rel.levels);
-          const shadow = pack.shadowScale[newTier] ?? 'none';
-          const r = ruleFor(c.handle);
-          // Hover: transform-based lift (no layout movement) + shadow. Step from pack.
-          const lift = pack.spacingScale[1] ?? 4;
-          r.hover = { ...(r.hover ?? {}), transform: `translateY(-${lift}px)`, boxShadow: shadow };
-          break;
-        }
-        case 'focusRing': {
-          const color = pack.colors.accents[rel.role];
-          if (!color) { notes.push(`focusRing ${c.handle}: accent "${rel.role}" not found in pack`); break; }
-          const r = ruleFor(c.handle);
-          // Outline width from pack borderScale, offset from pack spacingScale.
-          const ow = pack.borderScale[2] ?? 2;
-          const oo = pack.spacingScale[1] ?? 4;
-          r.focusVisible = { ...(r.focusVisible ?? {}), outline: `${ow}px solid ${color}`, outlineOffset: `${oo}px` };
-          break;
-        }
-
-        // ── Interaction (F5) ──
-        case 'movable': {
-          // Opt-in movable capability. Transform-based: no DOM mutation.
-          // The compile layer adds cursor:grab + touch-action:none + a CSS class
-          // that enables the runtime drag handler. The drag handler applies
-          // transform: translate() only — never mutates style.position, never
-          // moves DOM nodes. Fully reversible: clear the transform.
-          const step = pack.spacingScale[1] ?? 4;
-          addStyles(ruleFor(c.handle), {
-            cursor: 'grab',
-            ['--rv-movable' as string]: '1',
-            ['--rv-movable-step' as string]: `${step}px`,
-            touchAction: 'none',
-          });
-          break;
-        }
-
-        default: {
-          notes.push(`unknown relation: ${(rel as RelationStatement).relation}`);
-        }
-      }
+      const handler = RELATION_HANDLERS[rel.relation];
+      if (handler) handler(rel, c, ctx);
+      else notes.push(`unknown relation: ${(rel as RelationStatement).relation}`);
     }
   }
 
