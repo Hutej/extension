@@ -501,16 +501,17 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
 
         // ── Grouping ──
         case 'groupWith': {
-          // Emit display:flex + flex-direction:row + gap on the subject's
-          // parent so the children (subject + reference siblings) align as a
-          // row. A bare display:flex without direction/gap is too weak to
-          // actually group — F3: make groupWith produce real visual grouping.
+          // Advisory: set display:flex on the parent so children share a
+          // formatting context. Direction and wrapping are declared via
+          // composition relations (stackDirection, wrapBehavior), not
+          // assumed here — Law 0 rule 2: don't impose a direction on
+          // something that already had one.
           const parent = resolveSubject('parent', c);
           if (parent.length) {
             const r = compFor(parent[0].handle);
-            addLayout(r, { display: 'flex', flexDirection: 'row', gap: `${pack.spacingScale[3] ?? 12}px` });
+            addLayout(r, { display: 'flex' });
           }
-          notes.push(`groupWith ${rel.subject} → ${rel.reference}: parent set to flex row`);
+          notes.push(`groupWith ${rel.subject} → ${rel.reference}: parent set to flex (advisory)`);
           break;
         }
 
@@ -674,15 +675,19 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
           const newTier = Math.min(pack.shadowScale.length - 1, shadowTier(c) + rel.levels);
           const shadow = pack.shadowScale[newTier] ?? 'none';
           const r = ruleFor(c.handle);
-          // Hover: transform-based lift (no layout movement) + shadow.
-          r.hover = { ...(r.hover ?? {}), transform: 'translateY(-2px)', boxShadow: shadow };
+          // Hover: transform-based lift (no layout movement) + shadow. Step from pack.
+          const lift = pack.spacingScale[1] ?? 4;
+          r.hover = { ...(r.hover ?? {}), transform: `translateY(-${lift}px)`, boxShadow: shadow };
           break;
         }
         case 'focusRing': {
           const color = pack.colors.accents[rel.role];
           if (!color) { notes.push(`focusRing ${c.handle}: accent "${rel.role}" not found in pack`); break; }
           const r = ruleFor(c.handle);
-          r.focusVisible = { ...(r.focusVisible ?? {}), outline: `2px solid ${color}`, outlineOffset: '2px' };
+          // Outline width from pack borderScale, offset from pack spacingScale.
+          const ow = pack.borderScale[2] ?? 2;
+          const oo = pack.spacingScale[1] ?? 4;
+          r.focusVisible = { ...(r.focusVisible ?? {}), outline: `${ow}px solid ${color}`, outlineOffset: `${oo}px` };
           break;
         }
 
@@ -693,9 +698,11 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
           // that enables the runtime drag handler. The drag handler applies
           // transform: translate() only — never mutates style.position, never
           // moves DOM nodes. Fully reversible: clear the transform.
+          const step = pack.spacingScale[1] ?? 4;
           addStyles(ruleFor(c.handle), {
             cursor: 'grab',
             ['--rv-movable' as string]: '1',
+            ['--rv-movable-step' as string]: `${step}px`,
             touchAction: 'none',
           });
           break;

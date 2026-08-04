@@ -1528,8 +1528,6 @@ function startMovableHandlers(): void {
   if (!els.length) return;
 
   const transforms = new Map<HTMLElement, { x: number; y: number }>();
-  const STEP = 8;
-  const BIG_STEP = 40;
 
   const bound = (el: HTMLElement, dx: number, dy: number): { x: number; y: number } => {
     const t = transforms.get(el) ?? { x: 0, y: 0 };
@@ -1597,7 +1595,8 @@ function startMovableHandlers(): void {
 
     // Keyboard movement (first-class path).
     const onKeyDown = ((e: KeyboardEvent) => {
-      const big = e.shiftKey ? BIG_STEP : STEP;
+      const step = parseFloat(getComputedStyle(el).getPropertyValue('--rv-movable-step')) || 8;
+      const big = e.shiftKey ? step * 5 : step;
       let dx = 0, dy = 0;
       switch (e.key) {
         case 'ArrowLeft': dx = -big; break;
