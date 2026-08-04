@@ -12,7 +12,7 @@
 
 import { perceive, serializePerception, serializePainterPerception, clearHandles, clearRoleCache, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
 import { compileSpec, deriveBaseTone, type CompileOptions } from '@/core/compile';
-import { transformIntent } from '@/core/compile/transform.ts';
+import { transformIntent, resolveComposition } from '@/core/compile/transform.ts';
 import { sanitizeCss } from '@/core/sanitize';
 import { verifyStyle, checkConformance, type VerifyResult, type ConformanceResult } from '@/core/verify';
 import { pixelVerify, classifyInvisibleFailures, type PixelVerifyResult, type InvisibleBreakdown, type PixelInput, type ClusterRect } from '@/core/verify/pixel';
@@ -709,9 +709,9 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
 
   // ── Structural CSS from the solver (free, no model calls) ──
   // The solver produces grid placement CSS from the Target Layout IR. The Target
-  // IR is built from the deterministic slot assignment (fallback — G3 will wire
-  // the model's composition relations to drive the Target IR). The structural CSS
-  // is combined with the aesthetic CSS from the compiler.
+  // IR is built from the model's composition relations (when present) or the
+  // deterministic slot assignment (fallback). The structural CSS is combined
+  // with the aesthetic CSS from the compiler.
   let structuralCss = '';
   let solvePlacement: ReturnType<typeof computeGridPlacementCss> | null = null;
   let planHonoured = true;
@@ -725,13 +725,15 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const sAssignment = assignSlots(sIR.nodes);
     const slotPreferredWidth = new Map<string, 'full' | 'side' | 'content'>();
     for (const s of DOCUMENTATION_SLOTS) slotPreferredWidth.set(s.id, s.preferredWidth);
-    const sTarget = buildFallbackTargetIR(sAssignment.handleToSlot, slotPreferredWidth);
+    const fallbackTarget = buildFallbackTargetIR(sAssignment.handleToSlot, slotPreferredWidth);
+    const sTarget = resolveComposition(spec.relations, fallbackTarget);
     try {
       const sSolveResult = solve({ ir: sIR, target: sTarget, excluded: sExcludedSet });
       solvePlacement = computeGridPlacementCss(sSolveResult);
       structuralCss = solvePlacement.css;
       planHonoured = assertPlanHonoured(solvePlacement.plan);
-      logDebug(`solver: matched=${sSolveResult.matchedTargets} placed=${solvePlacement.nodesPlaced} notPlaceable=${solvePlacement.nodesNotPlaceable.length} collapsed=${solvePlacement.intermediatesCollapsed} selectorFallback=${solvePlacement.selectorFallback} planCols=${solvePlacement.plan.expectedColumns} planHonoured=${planHonoured}`);
+      logDebug(`solver: matched=${sSolveResult.matchedTargets} placed=${solvePlacement.nodesPlaced} notPlaceable=${solvePlacement.nodesNotPlaceable.length} collapsed=${solvePlacement.intermediatesCollapsed} selectorFallback=${solvePlacement.selectorFallback} planCols=${solvePlacement.plan.expectedColumns} planHonoured=${planHonoured} archetype=${sTarget.archetype} tracks=${sTarget.tracks.length} unsatisfiable=${sTarget.unsatisfiable.length}`);
+      if (sTarget.unsatisfiable.length) logDebug(`solver unsatisfiable: ${sTarget.unsatisfiable.map((u) => `${u.handle}:${u.constraint} (${u.reason})`).join('; ')}`);
     } catch (e) {
       logDebug(`solver failed (non-fatal): ${(e as Error).message}`);
     }

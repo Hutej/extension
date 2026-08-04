@@ -104,6 +104,21 @@ function validateOne(
   if (rel === 'transitionEasing' && !EASING_CHARS.has(r.easing as string)) return { ok: false, reason: 'transitionEasing.easing must be smooth|sharp|spring|linear' };
   if (rel === 'focusRing' && !ACCENT_ROLES.has(r.role as string)) return { ok: false, reason: 'focusRing.role must be primary|secondary|muted' };
 
+  // Composition relation validation
+  if (rel === 'archetype') {
+    if (typeof r.archetype !== 'string' || !r.archetype) return { ok: false, reason: 'archetype.archetype must be a non-empty string' };
+  }
+  if (rel === 'trackAllocation') {
+    if (!Array.isArray(r.ratios) || r.ratios.length === 0) return { ok: false, reason: 'trackAllocation.ratios must be a non-empty array' };
+    if (!r.ratios.every((v: unknown) => typeof v === 'number' && v > 0 && isFinite(v))) return { ok: false, reason: 'trackAllocation.ratios must be positive numbers' };
+  }
+  if (rel === 'stackDirection') {
+    if (r.direction !== 'vertical' && r.direction !== 'horizontal') return { ok: false, reason: 'stackDirection.direction must be vertical|horizontal' };
+  }
+  if (rel === 'wrapBehavior') {
+    if (typeof r.wrap !== 'boolean') return { ok: false, reason: 'wrapBehavior.wrap must be a boolean' };
+  }
+
   // Contradiction check: two relations on the same subject with the same relation
   // type but different magnitudes is a contradiction (e.g. two emphasisRank with
   // different ranks on the same subject).

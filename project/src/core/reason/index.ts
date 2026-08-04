@@ -139,6 +139,17 @@ STRUCTURAL:
 - {"relation":"reorderBefore","subject":"sidebar","reference":"article-body"} — reorder subject before reference in DOM order
 - {"relation":"moveTo","subject":"sidebar","reference":"main"} — relocate subject into reference
 
+COMPOSITION (page structure — declare the page's macro shape):
+- {"relation":"archetype","subject":"article-body","archetype":"two-column-rail-right"} — pick from: single-column, two-column-rail-left, two-column-rail-right, three-column
+- {"relation":"assignSlot","subject":"nav-local","track":1} — assign subject to 0-based track index
+- {"relation":"trackAllocation","subject":"article-body","ratios":[3,1]} — proportional split between tracks (ratios → fr with minmax() floors)
+- {"relation":"adjacentTo","subject":"nav-local","reference":"article-body"} — subject sits beside reference
+- {"relation":"spansTracks","subject":"masthead"} — subject spans all tracks (full-width)
+- {"relation":"readBefore","subject":"nav-local","reference":"article-body"} — subject is read before reference
+- {"relation":"stackDirection","subject":"nav-local","direction":"vertical"} — vertical or horizontal stacking
+- {"relation":"wrapBehavior","subject":"listing","wrap":true} — wrap when content overflows (browser decides when)
+- {"relation":"prominentFirst","subject":"page-title"} — subject becomes the first thing seen
+
 ## Pick a pack
 
 Emit "pack": one of the pack ids from the DESIGN PACKS block. The pack is the design SYSTEM (its spacing scale, type ramp, surface system, color relationships + its PRINCIPLES the engine enforces). Pick by archetype; never hardcode to a site.
@@ -150,8 +161,9 @@ You MAY emit a raw "rules" entry (styles/layout on a specific handle) ONLY when 
 ## Non-negotiables
 1. A pack choice.
 2. canvasLayout (the page-level content-width / arrangement decision).
-3. relations covering the major roles — size the page title, set body density, reflow side-rails. A spec with no structural relation is a failure.
-4. Address EVERY warranted reflow (the perception's REFLOW line names the side-rail handles) — a "widthFraction"/"reorderBefore"/"hide" on each, OR a widthFraction that reflows it. A rail marked "forbid-move"/"risky-move" CANNOT be reordered — use "hide" or "widthFraction" instead.
+3. An archetype + slot assignments when the structure changes — declare the page's macro shape with composition relations. Without them, the solver uses a deterministic fallback (rarely what you want).
+4. Relations covering the major roles — size the page title, set body density, reflow side-rails. A spec with no structural relation is a failure.
+5. Address EVERY warranted reflow (the perception's REFLOW line names the side-rail handles) — a "widthFraction"/"reorderBefore"/"hide" on each, OR a widthFraction that reflows it. A rail marked "forbid-move"/"risky-move" CANNOT be reordered — use "hide" or "widthFraction" instead.
 
 ## Directives
 1. USE THE ROOM. Compose the full viewport; match the measure to the page's purpose.
@@ -166,6 +178,11 @@ Respond with exactly this JSON (NO raw colors; relational statements + the pack 
   "pack": "minimal-editorial",
   "canvasLayout": { "maxWidth": "92%", "marginInline": "auto" },
   "relations": [
+    { "relation": "archetype", "subject": "article-body", "archetype": "two-column-rail-right" },
+    { "relation": "assignSlot", "subject": "nav-local", "track": 1 },
+    { "relation": "trackAllocation", "subject": "article-body", "ratios": [3, 1] },
+    { "relation": "spansTracks", "subject": "masthead" },
+    { "relation": "prominentFirst", "subject": "page-title" },
     { "relation": "typeRank", "subject": "page-title", "rank": 0 },
     { "relation": "emphasisRank", "subject": "page-title", "rank": 0 },
     { "relation": "spacingStep", "subject": "article-body", "step": 4 },

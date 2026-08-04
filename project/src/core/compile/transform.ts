@@ -24,6 +24,7 @@ import type { Perception, Cluster } from '../perceive/index.ts';
 import type { DesignRole } from '../perceive/semantic.ts';
 import { resolvePack, type DesignPack, type TypeRole, type SurfaceTier } from '../design/packs.ts';
 import type { RelationStatement, Subject, AlignmentEdge } from '../design/vocabulary.ts';
+import { ARCHETYPES, ARCHETYPE_IDS, type TargetLayoutIR, type TargetSlotBehaviour, type UnsatisfiableConstraint } from '../layout/ir.ts';
 
 /** The destructive-confidence floor: a destructive relation (hide/remove) is
  *  forbidden on a role the classifier is < this sure about. */
@@ -304,6 +305,8 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
   };
 
   for (const rel of relations) {
+    // Composition relations are resolved by resolveComposition, not here.
+    if (COMPOSITION_RELATIONS.has(rel.relation)) continue;
     const subjects = resolveSubject(rel.subject);
     if (!subjects.length) {
       notes.push(`${rel.relation} ${rel.subject}: no clusters matched`);
@@ -730,3 +733,119 @@ export function packForSpec(spec: DesignSpec): DesignPack {
 }
 
 export type { DesignPack, TypeRole, SurfaceTier };
+
+// ── Composition resolver ───────────────────────────────────────────
+
+/** The composition relation names. */
+const COMPOSITION_RELATIONS = new Set([
+  'archetype', 'assignSlot', 'trackAllocation', 'adjacentTo',
+  'spansTracks', 'readBefore', 'stackDirection', 'wrapBehavior', 'prominentFirst',
+]);
+
+/** Resolve composition relations from the spec into a Target Layout IR.
+ *  Falls back to the deterministic fallback when no composition relations are present.
+ *  Reports unsatisfiable constraints rather than silently dropping them. */
+export function resolveComposition(
+  relations: RelationStatement[] | undefined,
+  fallback: TargetLayoutIR,
+): TargetLayoutIR {
+  if (!relations?.length) return fallback;
+  const compRels = relations.filter((r) => COMPOSITION_RELATIONS.has(r.relation));
+  if (!compRels.length) return fallback;
+
+  let archetype = fallback.archetype;
+  let tracks = [...fallback.tracks];
+  const slotAssignment = new Map(fallback.slotAssignment);
+  const spans = [...fallback.spans];
+  const adjacency: [string, string][] = [...fallback.adjacency];
+  const readingOrder = [...fallback.readingOrder];
+  const slotBehaviour = new Map<number, TargetSlotBehaviour>(fallback.slotBehaviour);
+  const unsatisfiable: UnsatisfiableConstraint[] = [...fallback.unsatisfiable];
+
+  // Pass 1: archetype + trackAllocation + assignSlot + spansTracks (set up tracks + assignments)
+  for (const rel of compRels) {
+    switch (rel.relation) {
+      case 'archetype': {
+        if (!ARCHETYPE_IDS.has(rel.archetype)) {
+          unsatisfiable.push({ handle: rel.subject, constraint: 'archetype', reason: `unknown archetype '${rel.archetype}'` });
+        } else {
+          archetype = rel.archetype;
+          tracks = [...ARCHETYPES[rel.archetype].tracks];
+        }
+        break;
+      }
+      case 'trackAllocation': {
+        if (rel.ratios.length !== tracks.length) {
+          unsatisfiable.push({ handle: rel.subject, constraint: 'trackAllocation', reason: `ratios length (${rel.ratios.length}) != track count (${tracks.length})` });
+        } else {
+          tracks = tracks.map((t, i) =>
+            t.max.includes('fr') ? { ...t, max: `${rel.ratios[i]}fr` } : t,
+          );
+        }
+        break;
+      }
+      case 'assignSlot': {
+        if (rel.track < 0 || rel.track >= tracks.length) {
+          unsatisfiable.push({ handle: rel.subject, constraint: 'assignSlot', reason: `track ${rel.track} out of range (0..${tracks.length - 1})` });
+        } else {
+          slotAssignment.set(rel.subject, rel.track);
+        }
+        break;
+      }
+      case 'spansTracks': {
+        spans.push(rel.subject);
+        slotAssignment.delete(rel.subject);
+        break;
+      }
+    }
+  }
+
+  // Pass 2: adjacency + reading order + behaviour + prominence (depend on assignments)
+  for (const rel of compRels) {
+    switch (rel.relation) {
+      case 'adjacentTo':
+        adjacency.push([rel.subject, rel.reference]);
+        break;
+      case 'readBefore': {
+        const sIdx = readingOrder.indexOf(rel.subject);
+        const rIdx = readingOrder.indexOf(rel.reference);
+        if (sIdx === -1 && rIdx === -1) readingOrder.push(rel.subject, rel.reference);
+        else if (rIdx === -1) readingOrder.splice(sIdx + 1, 0, rel.reference);
+        else if (sIdx === -1) readingOrder.splice(rIdx, 0, rel.subject);
+        else if (sIdx > rIdx) {
+          readingOrder.splice(sIdx, 1);
+          readingOrder.splice(readingOrder.indexOf(rel.reference), 0, rel.subject);
+        }
+        break;
+      }
+      case 'stackDirection': {
+        const trackIdx = slotAssignment.get(rel.subject);
+        if (trackIdx != null) {
+          const existing = slotBehaviour.get(trackIdx) ?? { direction: 'column' as const, wrap: false, alignment: 'stretch' as const };
+          slotBehaviour.set(trackIdx, { ...existing, direction: rel.direction === 'vertical' ? 'column' : 'row' });
+        } else {
+          unsatisfiable.push({ handle: rel.subject, constraint: 'stackDirection', reason: 'subject not assigned to a track' });
+        }
+        break;
+      }
+      case 'wrapBehavior': {
+        const trackIdx = slotAssignment.get(rel.subject);
+        if (trackIdx != null) {
+          const existing = slotBehaviour.get(trackIdx) ?? { direction: 'column' as const, wrap: false, alignment: 'stretch' as const };
+          slotBehaviour.set(trackIdx, { ...existing, wrap: rel.wrap });
+        } else {
+          unsatisfiable.push({ handle: rel.subject, constraint: 'wrapBehavior', reason: 'subject not assigned to a track' });
+        }
+        break;
+      }
+      case 'prominentFirst': {
+        const idx = readingOrder.indexOf(rel.subject);
+        if (idx > 0) { readingOrder.splice(idx, 1); readingOrder.unshift(rel.subject); }
+        else if (idx === -1) readingOrder.unshift(rel.subject);
+        break;
+      }
+    }
+  }
+
+  return { archetype, tracks, slotAssignment, spans, adjacency, readingOrder, slotBehaviour, unsatisfiable };
+}

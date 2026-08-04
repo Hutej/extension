@@ -184,7 +184,27 @@ export type RelationStatement =
 
   // ── Interaction (F5) ──
   /** "this panel is movable" — opt-in movable element capability (transform-based, no DOM mutation). */
-  | { relation: 'movable'; subject: Subject };
+  | { relation: 'movable'; subject: Subject }
+
+  // ── Composition — page structure declared by the model ──
+  /** "the page is two columns with the rail on the right" — pick an archetype from the shortlist. */
+  | { relation: 'archetype'; subject: Subject; archetype: string }
+  /** "this region goes in track 1" — assign subject to a 0-based track index. */
+  | { relation: 'assignSlot'; subject: Subject; track: number }
+  /** "split the tracks 3:1" — proportional allocation between tracks (ratios → fr with minmax() floors). */
+  | { relation: 'trackAllocation'; subject: Subject; ratios: number[] }
+  /** "this region sits beside that one" — adjacency constraint for the solver. */
+  | { relation: 'adjacentTo'; subject: Subject; reference: Subject }
+  /** "this region spans all tracks" — full-width grid item. */
+  | { relation: 'spansTracks'; subject: Subject }
+  /** "read this region before that one" — reading-order constraint. */
+  | { relation: 'readBefore'; subject: Subject; reference: Subject }
+  /** "this group stacks vertically" or "flows horizontally" — stacking direction. */
+  | { relation: 'stackDirection'; subject: Subject; direction: 'vertical' | 'horizontal' }
+  /** "this group wraps when content overflows" — wrap behaviour (browser decides when). */
+  | { relation: 'wrapBehavior'; subject: Subject; wrap: boolean }
+  /** "this region is the first thing seen" — prominence position. */
+  | { relation: 'prominentFirst'; subject: Subject };
 
 // ── Pack principle types (data the engine enforces) ──────────
 
@@ -263,6 +283,16 @@ export const RELATION_SPECS: RelationSpec[] = [
   { relation: 'focusRing', hasReference: false, description: 'focus-visible ring using the named accent' },
   // F5 — interaction
   { relation: 'movable', hasReference: false, description: 'opt-in movable element capability (transform-based, no DOM mutation)' },
+  // Composition — page structure
+  { relation: 'archetype', hasReference: false, description: 'page archetype from the shortlist (single-column, two-column-rail-left, two-column-rail-right, three-column)' },
+  { relation: 'assignSlot', hasReference: false, magnitudeField: 'track', magnitudeKind: 'step', description: 'assign subject to 0-based track index' },
+  { relation: 'trackAllocation', hasReference: false, description: 'proportional track split (ratios → fr with minmax() floors)' },
+  { relation: 'adjacentTo', hasReference: true, description: 'subject sits beside reference (adjacency constraint)' },
+  { relation: 'spansTracks', hasReference: false, description: 'subject spans all tracks (full-width grid item)' },
+  { relation: 'readBefore', hasReference: true, description: 'subject is read before reference (reading-order constraint)' },
+  { relation: 'stackDirection', hasReference: false, description: 'stacking direction (vertical|horizontal)' },
+  { relation: 'wrapBehavior', hasReference: false, description: 'wrap behaviour when content overflows (browser decides when)' },
+  { relation: 'prominentFirst', hasReference: false, description: 'subject becomes the first thing seen (prominence position)' },
 ];
 
 /** The closed set of relation names. The boundary validator rejects
