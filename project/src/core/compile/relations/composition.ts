@@ -124,5 +124,37 @@ export function resolveComposition(
     }
   }
 
+  // Pass 3: Validate constraints the solver enforces by checking, not emitting.
+  // The solver emits CSS for tracks/slotAssignment/spans/slotBehaviour. For
+  // adjacency/readingOrder/prominence, it can only verify — if the constraint
+  // can't be met by the grid placement, report unsatisfiable (never silently drop).
+  const spanSet = new Set(spans);
+  for (const rel of compRels) {
+    if (rel.relation === 'adjacentTo') {
+      const sTrack = slotAssignment.get(rel.subject);
+      const rTrack = slotAssignment.get(rel.reference);
+      if (sTrack == null && !spanSet.has(rel.subject)) {
+        unsatisfiable.push({ handle: rel.subject, constraint: 'adjacentTo', reason: 'subject not assigned to a track' });
+      } else if (rTrack == null && !spanSet.has(rel.reference)) {
+        unsatisfiable.push({ handle: rel.reference, constraint: 'adjacentTo', reason: 'reference not assigned to a track' });
+      } else if (sTrack != null && rTrack != null && Math.abs(sTrack - rTrack) !== 1) {
+        unsatisfiable.push({ handle: rel.subject, constraint: 'adjacentTo', reason: `tracks ${sTrack} and ${rTrack} are not adjacent` });
+      }
+    }
+    if (rel.relation === 'readBefore') {
+      const sTrack = spanSet.has(rel.subject) ? 0 : slotAssignment.get(rel.subject);
+      const rTrack = spanSet.has(rel.reference) ? 0 : slotAssignment.get(rel.reference);
+      if (sTrack != null && rTrack != null && sTrack > rTrack) {
+        unsatisfiable.push({ handle: rel.subject, constraint: 'readBefore', reason: `subject in track ${sTrack} is after reference in track ${rTrack} — solver cannot emit order CSS` });
+      }
+    }
+    if (rel.relation === 'prominentFirst') {
+      const sTrack = spanSet.has(rel.subject) ? 0 : slotAssignment.get(rel.subject);
+      if (sTrack != null && sTrack > 0) {
+        unsatisfiable.push({ handle: rel.subject, constraint: 'prominentFirst', reason: `subject in track ${sTrack} is not in the first track — solver cannot emit order CSS` });
+      }
+    }
+  }
+
   return { archetype, tracks, slotAssignment, spans, adjacency, readingOrder, slotBehaviour, unsatisfiable };
 }
