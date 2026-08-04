@@ -87,6 +87,11 @@ export interface ClusterLayout {
 export interface Cluster {
   handle: string;
   selector: string;
+  /** A structural CSS selector (anchor + nth-of-type chain) that does NOT
+   *  depend on [data-rv-c]. null when no stable anchor exists — callers fall
+   *  back to `selector` ([data-rv-c="handle"]). Primary in compile; data-rv-c
+   *  is the fallback. */
+  structuralSelector: string | null;
   count: number;
   tag: string;
   role: string | null;
@@ -625,6 +630,58 @@ function structuralPath(el: HTMLElement): string {
   return [...parts, ...chain].join('/');
 }
 
+/** Build a valid CSS selector from a DOM element using the same anchor logic
+ *  as structuralPath: nearest stable attribute (id/data-testid/role/
+ *  aria-label/name) + nth-of-type chain. Returns null if no usable selector
+ *  can be derived (caller falls back to [data-rv-c]). Uniqueness-checked. */
+function buildCssSelector(el: HTMLElement): string | null {
+  let anchor: HTMLElement | null = null;
+  let n: HTMLElement | null = el;
+  let searchDepth = 0;
+  while (n && n !== document.body && n !== document.documentElement && searchDepth < 20) {
+    if (n.id || n.getAttribute('data-testid') || n.getAttribute('role') ||
+        n.getAttribute('aria-label') || n.getAttribute('name')) {
+      anchor = n;
+      break;
+    }
+    n = n.parentElement;
+    searchDepth++;
+  }
+  const parts: string[] = [];
+  if (anchor) {
+    const tag = anchor.tagName.toLowerCase();
+    if (anchor.id) parts.push(`${tag}#${cssEscape(anchor.id)}`);
+    else if (anchor.getAttribute('data-testid')) parts.push(`${tag}[data-testid="${cssEscape(anchor.getAttribute('data-testid')!)}"]`);
+    else if (anchor.getAttribute('role')) parts.push(`${tag}[role="${cssEscape(anchor.getAttribute('role')!)}"]`);
+    else if (anchor.getAttribute('aria-label')) parts.push(`${tag}[aria-label^="${cssEscape(anchor.getAttribute('aria-label')!.slice(0, 20))}"]`);
+    else if (anchor.getAttribute('name')) parts.push(`${tag}[name="${cssEscape(anchor.getAttribute('name')!)}"]`);
+  } else {
+    if (el === document.body) return 'body';
+    if (el === document.documentElement) return 'html';
+    return null;
+  }
+  const chain: string[] = [];
+  let node: HTMLElement | null = el;
+  let d = 0;
+  while (node && node !== anchor && d < 10) {
+    const tag = node.tagName.toLowerCase();
+    let cnt = 0;
+    let sib = node.previousElementSibling;
+    while (sib) { if (sib.tagName === node.tagName) cnt++; sib = sib.previousElementSibling as Element | null; }
+    chain.push(`${tag}:nth-of-type(${cnt + 1})`);
+    node = node.parentElement;
+    d++;
+  }
+  chain.reverse();
+  const sel = [...parts, ...chain].join(' > ');
+  try { return document.querySelector(sel) === el ? sel : null; } catch { return null; }
+}
+
+/** Minimal CSS string escaper for id/attribute values. */
+function cssEscape(s: string): string {
+  return (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(s) : s.replace(/["\\]/g, '\\$&');
+}
+
 // sticky roles. Classify ONCE per handle per session; cache the result
 // against the stable handle and REUSE it on every subsequent perception. Re-
 // classification is permitted ONLY when the node's own structural signature
@@ -675,7 +732,7 @@ function clusterAndStamp(candidates: Candidate[], vpArea: number, vpW: number): 
     }
     const isNativeControl = ['button', 'input', 'select', 'textarea'].includes(rep.tag);
     raws.push({
-      handle, selector: `[${CLUSTER_ATTR}="${handle}"]`, count: members.length,
+      handle, selector: `[${CLUSTER_ATTR}="${handle}"]`, structuralSelector: buildCssSelector(rep.el), count: members.length,
       tag: rep.tag, role: rep.role, isNativeControl,
       isCheckboxRadio: rep.role === 'checkbox' || rep.role === 'radio',
       hasSolidBg: rep.hasSolidBg, rect: rep.rect, samples, style: rep.style,

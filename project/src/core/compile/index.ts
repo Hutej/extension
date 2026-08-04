@@ -63,6 +63,9 @@ export interface CompileResult {
   /** The engine's per-relation notes (refusals, topbar/collapse
    *  derivations). Surfaced on the run report. */
   expandNotes?: string[];
+  /** How many CSS rule blocks fell back to [data-rv-c] because no structural
+   *  selector was available. Structural is primary; data-rv-c is the fallback. */
+  selectorFallbackCount?: number;
 }
 
 const PADDING_KEYS = ['padding', 'paddingTop', 'paddingRight', 'paddingBottom', 'paddingLeft'];
@@ -76,6 +79,16 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
   const droppedProps: string[] = [];
   let rulesEmitted = 0;
   let baseCoatCount = 0;
+  let selectorFallbackCount = 0;
+
+  /** Pick the structural selector if available, else fall back to [data-rv-c]
+   *  and increment the fallback counter. Structural is primary; data-rv-c
+   *  is the genuine fallback, not the default. */
+  const pickSelector = (cluster: Cluster): string => {
+    if (cluster.structuralSelector) return cluster.structuralSelector;
+    selectorFallbackCount++;
+    return cluster.selector;
+  };
 
   // The transformation engine: if the spec has relations (the primary model
   // output), resolve them against perception into concrete
@@ -232,7 +245,10 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
     // but this is exactly what makes glass/backdrop aesthetics work on wrapper sites.
     if (spec.canvas?.background && perception.opaqueWrappers.size > 0) {
       const selectors = [...perception.opaqueWrappers]
-        .map((h) => byHandle.get(h)?.selector)
+        .map((h) => {
+          const cl = byHandle.get(h);
+          return cl ? pickSelector(cl) : null;
+        })
         .filter(Boolean) as string[];
       if (selectors.length) {
         blocks.push(`${selectors.join(',\n')} {\n  background: transparent !important;\n}`);
@@ -251,7 +267,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
       if (rule.hide && !opts.dropHides) {
         const refusal = hideRefusal(cluster);
         if (refusal) { droppedProps.push(`composition.hide(${rule.target}:${refusal})`); }
-        else { hideSelectors.push(cluster.selector); }
+        else { hideSelectors.push(pickSelector(cluster)); }
         continue;
       }
       const decls: string[] = [];
@@ -282,7 +298,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
         // Genuine bleeds are caught by verify's bleedTargets and repaired with
         // break-word (last-resort only) — see the wordBreakTargets block below.
       }
-      if (decls.length) { blocks.push(`${cluster.selector} {\n${indent(decls)}\n}`); rulesEmitted++; }
+      if (decls.length) { blocks.push(`${pickSelector(cluster)} {\n${indent(decls)}\n}`); rulesEmitted++; }
     }
   }
 
@@ -291,7 +307,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
     const isCanvas = rule.target === 'canvas' || rule.target === 'root';
     const cluster = isCanvas ? undefined : byHandle.get(rule.target);
     if (!isCanvas && !cluster) { invalidTargets.push(rule.target); continue; }
-    const selector = isCanvas ? 'html, body' : cluster!.selector;
+    const selector = isCanvas ? 'html, body' : pickSelector(cluster!);
     const cl = cluster?.layout;
 
     // Hide channel — removal is a design decision, with guards so the model can
@@ -476,7 +492,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
     for (const h of new Set(opts.wordBreakTargets)) {
       const cl = byHandle.get(h);
       if (!cl) continue;
-      blocks.push(`${cl.selector} {\n  overflow-wrap: break-word !important;\n}`);
+      blocks.push(`${pickSelector(cl)} {\n  overflow-wrap: break-word !important;\n}`);
       rulesEmitted++;
     }
   }
@@ -489,6 +505,17 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
   // cluster gets its own constraint-driven styling. The constraint that now
   // carries the load: FillParent + MaxWidth + StackVertically per slot.
   // (The baseCoatCount stays 0 — reported for backward compat.)
+
+  // F4: Motion layer — @keyframes for entrance animations + a hard
+  // prefers-reduced-motion branch that disables the entire motion layer.
+  // Motion is transform/opacity only (never reflow). The reduced-motion
+  // override targets [data-rv-c] (stamped on every cluster at perception)
+  // so only extension-styled elements are affected.
+  const hasMotion = blocks.some((b) => /animation:|transition:|@keyframes|--rv-easing/.test(b));
+  if (hasMotion) {
+    blocks.push(`@keyframes rv-enter {\n  from { opacity: 0; transform: translateY(8px); }\n  to { opacity: 1; transform: translateY(0); }\n}`);
+    blocks.push(`@media (prefers-reduced-motion: reduce) {\n  [data-rv-c] {\n    animation: none !important;\n    transition: none !important;\n  }\n  [data-rv-c]:hover {\n    transform: none !important;\n  }\n}`);
+  }
 
   // Law 0 assertion — reject any raw px in a sizing property that reached
   // the final CSS. The structure path wraps fixed px by construction (min(X,100%));
@@ -505,6 +532,7 @@ export function compileSpec(specIn: DesignSpec, perception: Perception, opts: Co
   return {
     css: blocks.join('\n\n'), rulesEmitted, invalidTargets, droppedProps, baseCoatCount, forceContrastReport, ops: validatedOps,
     ...(escapeHatchUses.length || specIn.relations?.length ? { escapeHatchUses, escapeHatchFraction, expandNotes, expandedTargets } : {}),
+    ...(selectorFallbackCount > 0 ? { selectorFallbackCount } : {}),
   };
 }
 

@@ -44,6 +44,10 @@ export type TextTransformValue = 'uppercase' | 'lowercase' | 'capitalize' | 'non
  *  The engine resolves the rank to a px weight via the pack's fontWeightScale. */
 export type FontWeightRank = 1 | 2 | 3 | 4 | 5;
 
+/** Easing character for motion transitions — named, not a cubic-bezier string.
+ *  The pack resolves the character to a concrete easing function. */
+export type EasingCharacter = 'smooth' | 'sharp' | 'spring' | 'linear';
+
 // ── Subject resolution ─────────────────────────────────────────────
 
 /** A subject names what a relation applies to. It can be:
@@ -164,7 +168,23 @@ export type RelationStatement =
   /** "move this before that in reading order" — reorder subject before reference (structural op). */
   | { relation: 'reorderBefore'; subject: Subject; reference: Subject }
   /** "move this into that" — relocate subject into reference (structural op). */
-  | { relation: 'moveTo'; subject: Subject; reference: Subject };
+  | { relation: 'moveTo'; subject: Subject; reference: Subject }
+
+  // ── Motion (F4) ──
+  /** "this region transitions over 200ms" — transition at duration tier N on the pack's motionDurationScale. */
+  | { relation: 'transitionTier'; subject: Subject; tier: number }
+  /** "this region eases in smoothly" — easing character for the subject's transitions. */
+  | { relation: 'transitionEasing'; subject: Subject; easing: EasingCharacter }
+  /** "this region enters with a 100ms delay" — entrance animation at delay tier N (stagger by reading order). */
+  | { relation: 'entranceDelay'; subject: Subject; tier: number }
+  /** "this card lifts on hover" — hover elevation via transform (never layout). */
+  | { relation: 'hoverElevate'; subject: Subject; levels: number }
+  /** "this input has a focus ring" — focus-visible ring using the named accent. */
+  | { relation: 'focusRing'; subject: Subject; role: AccentRole }
+
+  // ── Interaction (F5) ──
+  /** "this panel is movable" — opt-in movable element capability (transform-based, no DOM mutation). */
+  | { relation: 'movable'; subject: Subject };
 
 // ── Pack principle types (data the engine enforces) ──────────
 
@@ -235,6 +255,14 @@ export const RELATION_SPECS: RelationSpec[] = [
   { relation: 'hide', hasReference: false, description: 'remove the subject (display:none)' },
   { relation: 'reorderBefore', hasReference: true, description: 'reorder subject before reference in DOM order' },
   { relation: 'moveTo', hasReference: true, description: 'relocate subject into reference' },
+  // F4 — motion
+  { relation: 'transitionTier', hasReference: false, magnitudeField: 'tier', magnitudeKind: 'step', description: 'transition at duration tier N on the pack motionDurationScale' },
+  { relation: 'transitionEasing', hasReference: false, description: 'easing character for transitions (smooth|sharp|spring|linear)' },
+  { relation: 'entranceDelay', hasReference: false, magnitudeField: 'tier', magnitudeKind: 'step', description: 'entrance animation at delay tier N (stagger by reading order)' },
+  { relation: 'hoverElevate', hasReference: true, magnitudeField: 'levels', magnitudeKind: 'count', description: 'hover elevation via transform (N levels on shadowScale)' },
+  { relation: 'focusRing', hasReference: false, description: 'focus-visible ring using the named accent' },
+  // F5 — interaction
+  { relation: 'movable', hasReference: false, description: 'opt-in movable element capability (transform-based, no DOM mutation)' },
 ];
 
 /** The closed set of relation names. The boundary validator rejects

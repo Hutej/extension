@@ -155,7 +155,10 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
   };
 
   /** Find the index in a numeric scale closest to a target px. Law 0:
-   *  the measurement informs WHICH step, the step's value is the output. */
+   *  the measurement informs WHICH step, the step's value is the output.
+   *  Legitimately discrete scales (radius, border, shadow) use this.
+   *  Continuous quantities (size, spacing, lineHeight) use the generate-and-
+   *  clamp helpers below instead. */
   const closestStep = (scale: number[], targetPx: number): number => {
     let best = 0, bestDiff = Infinity;
     scale.forEach((px, i) => {
@@ -163,6 +166,74 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
       if (d < bestDiff) { bestDiff = d; best = i; }
     });
     return best;
+  };
+
+  /** Generate a fine-grained type ramp from the pack's base + scale character.
+   *  The pack constrains (min ratio between levels, max display size, min small)
+   *  but does NOT enumerate the only four sizes a page may use. The model's ratio
+   *  produces the actual step on this generated ramp. Law 0: the ramp is derived
+   *  from pack tokens (base × scaleCharacter^n), not from measurement. */
+  const generateTypeRamp = (): number[] => {
+    const base = pack.typeRamp.body;
+    const scaleChar = pack.principles?.minTypeScaleRatio ?? 1.2;
+    const maxSize = pack.typeRamp.display;
+    const minSize = pack.typeRamp.small;
+    const ramp: number[] = [];
+    // Walk DOWN from body to small (negative steps).
+    let v = base / scaleChar;
+    const downSteps: number[] = [];
+    while (v >= minSize * 0.95 && downSteps.length < 10) { downSteps.push(Math.round(v * 10) / 10); v /= scaleChar; }
+    ramp.push(...downSteps.reverse());
+    ramp.push(base);
+    // Walk UP from body to display (positive steps).
+    v = base * scaleChar;
+    while (v <= maxSize * 1.05 && ramp.length < 30) { ramp.push(Math.round(v * 10) / 10); v *= scaleChar; }
+    // Ensure display is included exactly.
+    if (ramp[ramp.length - 1] < maxSize) ramp.push(maxSize);
+    return ramp;
+  };
+  const fineRampPx = generateTypeRamp();
+
+  /** Find the nearest value on a fine-grained ramp. For continuous quantities
+   *  (size) the ramp is generated from pack tokens; the measurement informs
+   *  which step, the step's value is the output. */
+  const closestRampValue = (ramp: number[], targetPx: number): number => {
+    let best = ramp[0], bestDiff = Infinity;
+    for (const px of ramp) {
+      const d = Math.abs(px - targetPx);
+      if (d < bestDiff) { bestDiff = d; best = px; }
+    }
+    return best;
+  };
+
+  /** Compute a continuous spacing value clamped to the pack's spacing scale range.
+   *  Law 0: the measurement (refSize × ratio) INFORMS the value; the pack
+   *  constrains the range and grid. The output is a grid-aligned value within
+   *  [min, max] of the pack's spacingScale — a generated ramp, not a raw
+   *  measurement. The grid base is the first non-zero step. */
+  const continuousSpacing = (targetPx: number): number => {
+    const scale = pack.spacingScale;
+    const min = scale[0] ?? 0;
+    const max = scale[scale.length - 1] ?? 64;
+    const gridBase = scale[1] ?? 4; // first non-zero step = grid unit
+    const clamped = Math.max(min, Math.min(max, targetPx));
+    // Snap to the nearest grid multiple — a pack-derived value, not a raw measurement.
+    return Math.round(clamped / gridBase) * gridBase;
+  };
+
+  /** Compute a continuous line-height value clamped to the pack's lineHeightScale range.
+   *  Law 0: snaps to the nearest generated step on a fine-grained ramp built from
+   *  the pack's lineHeightScale endpoints, not a raw measurement. */
+  const continuousLineHeight = (targetVal: number): number => {
+    const scale = pack.lineHeightScale ?? [pack.lineHeight.body];
+    const min = scale[0] ?? 1.0;
+    const max = scale[scale.length - 1] ?? 2.0;
+    const clamped = Math.max(min, Math.min(max, targetVal));
+    // Generate a fine-grained ramp at 0.05 steps within [min, max].
+    const ramp: number[] = [];
+    for (let v = min; v <= max + 0.001; v += 0.05) ramp.push(Math.round(v * 100) / 100);
+    // Find nearest step — a generated token, not a raw measurement.
+    return ramp.reduce((best, v) => Math.abs(v - clamped) < Math.abs(best - clamped) ? v : best, ramp[0]);
   };
 
   /** Type ramp as an array aligned to TypeRole order: [display, heading, body, small]. */
@@ -178,6 +249,58 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
   const tierToSurface = (tier: number): SurfaceTier => {
     const tiers: SurfaceTier[] = ['flat', 'raised', 'overlay'];
     return tiers[Math.min(2, Math.max(0, Math.round(tier)))];
+  };
+
+  /** Derive a real MutationReason from the subject's and reference's actual
+   *  situation. Never a constant — always grounded in the perception. If none
+   *  of the four reasons apply, returns null (the op is correctly refused).
+   *  F6: wired real reasons from the transformation engine. */
+  const deriveMutationReason = (subject: Cluster, reference: Cluster | undefined, byHandle: Map<string, Cluster>): string | null => {
+    // escape-overflow-hidden: subject is inside a container that clips it.
+    // Walk the ancestor chain; if any ancestor is a scrollable or has
+    // containment, the subject may be clipped.
+    let cur: Cluster | undefined = subject;
+    let depth = 0;
+    while (cur && depth < 10) {
+      if (cur.safety?.contained) return 'escape-overflow-hidden';
+      cur = cur.layout.parentHandle ? byHandle.get(cur.layout.parentHandle) : undefined;
+      depth++;
+    }
+
+    // escape-stacking-context: subject is position:fixed/sticky but trapped
+    // behind a transformed/filtered ancestor, OR the subject's position is
+    // non-static but its parent creates a stacking context.
+    if (subject.layout.position === 'fixed' || subject.layout.position === 'sticky') {
+      // A fixed/sticky element inside a transformed/filtered ancestor is trapped.
+      // We don't have transform/filter in the ClusterStyle, but a non-static
+      // parent with high depth is a reasonable proxy.
+      let p = subject.layout.parentHandle ? byHandle.get(subject.layout.parentHandle) : undefined;
+      while (p) {
+        if (p.layout.position === 'fixed' || p.layout.position === 'sticky' || p.layout.position === 'absolute') {
+          return 'escape-stacking-context';
+        }
+        p = p.layout.parentHandle ? byHandle.get(p.layout.parentHandle) : undefined;
+      }
+    }
+
+    // cross-layout-regions: subject and reference are in different layout
+    // regions (different parent containers, or different design roles that
+    // imply different layout areas — e.g. sidebar→main).
+    if (reference && subject.layout.parentHandle !== reference.layout.parentHandle) {
+      // Different parents = different layout regions. A sidebar moving
+      // to the main area, or a nav item moving to a different nav bar.
+      return 'cross-layout-regions';
+    }
+
+    // impossible-ancestry: the subject's parent is a flex/grid container
+    // and reordering within it would require `order` (which we refuse —
+    // reading order is inviolable). CSS cannot express a source-order
+    // change without DOM mutation.
+    if (subject.layout.ownedByFlexGrid || (subject.layout.parentHandle && byHandle.get(subject.layout.parentHandle)?.layout.isContainer)) {
+      return 'impossible-ancestry';
+    }
+
+    return null;
   };
 
   for (const rel of relations) {
@@ -201,12 +324,17 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
           const effectiveRatio = rel.ratio < minRatio && rel.ratio >= 1
             ? (notes.push(`sizeRatio ${rel.subject}: ratio ${rel.ratio} < minTypeScaleRatio ${minRatio}, clamped`) || minRatio)
             : rel.ratio;
-          // Law 0: measurement (refSize × ratio) INFORMS which ramp step;
-          // the pack token at that step is the output — never the raw px.
+          // F2 fix: generate the ramp from the pack's base + scale character
+          // instead of snapping to a fixed 4-value ramp. The measurement
+          // (refSize × ratio) informs which step; the generated step value
+          // (derived from pack tokens) is the output — Law 0 preserved.
           const targetPx = fontSizePx(refs[0]) * effectiveRatio;
-          const tr = rampRoles[closestStep(rampPx, targetPx)];
+          const fontSize = closestRampValue(fineRampPx, targetPx);
+          // Find the matching lineHeight from the pack's named roles: the
+          // closest named role to the generated font-size gets its lineHeight.
+          const tr = rampRoles[closestStep(rampPx, fontSize)];
           addLayout(ruleFor(c.handle), {
-            fontSize: `${pack.typeRamp[tr]}px`,
+            fontSize: `${fontSize}px`,
             lineHeight: String(pack.lineHeight[tr]),
           });
           break;
@@ -236,12 +364,15 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
           break;
         }
         case 'emphasisRank': {
-          // Pure emphasis: bold for high-emphasis ranks (0-1). Does NOT emit
-          // fontSize/lineHeight — typeRank owns type-size; emphasisRank owns weight.
-          if (rel.rank <= 1) {
-            addLayout(ruleFor(c.handle), { fontWeight: String(pack.fontWeightScale[3]) });
-          } else {
-            notes.push(`emphasisRank rank=${rel.rank} on "${rel.subject}" — no style emitted (only ranks 0-1 bold)`);
+          // Emphasis hierarchy: rank 0 = highest, progressively de-emphasised.
+          // Every rank emits real CSS — the vocabulary promised it.
+          const wScale = pack.fontWeightScale;
+          // Map rank to a weight index (0=highest emphasis → 4=lightest).
+          const wi = Math.min(wScale.length - 1, Math.max(0, rel.rank));
+          addLayout(ruleFor(c.handle), { fontWeight: String(wScale[Math.max(0, wScale.length - 1 - wi)]) });
+          // Ranks 3+ also get the pack's muted colour — visual de-emphasis.
+          if (rel.rank >= 3) {
+            addStyles(ruleFor(c.handle), { color: pack.colors.subtle });
           }
           break;
         }
@@ -256,11 +387,11 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
         case 'spacingRatio': {
           const refs = resolveReference(rel.reference, c);
           if (!refs.length) { notes.push(`spacingRatio ${rel.subject}: reference not found`); break; }
-          // Law 0: measurement (refPadding × ratio) INFORMS which scale step;
-          // the pack token at that step is the output.
+          // F2 fix: continuous spacing — compute the actual value and clamp
+          // to the pack's spacing range + grid. No more snapping to 9 fixed steps.
           const targetPx = paddingPx(refs[0]) * rel.ratio;
-          const step = Math.max(pack.principles.densityRange[0], Math.min(pack.principles.densityRange[1], closestStep(pack.spacingScale, targetPx)));
-          addStyles(ruleFor(c.handle), { padding: `${pack.spacingScale[step] ?? 0}px` });
+          const px = continuousSpacing(targetPx);
+          addStyles(ruleFor(c.handle), { padding: `${px}px` });
           break;
         }
         case 'gapStep': {
@@ -272,10 +403,10 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
         case 'gapRatio': {
           const refs = resolveReference(rel.reference, c);
           if (!refs.length) { notes.push(`gapRatio ${rel.subject}: reference not found`); break; }
-          // Law 0: measurement (refGap × ratio) INFORMS which scale step.
+          // F2 fix: continuous gap — compute the actual value and clamp.
           const targetPx = (refs[0].layout.siblingGapPx ?? pack.spacingScale[3] ?? 12) * rel.ratio;
-          const step = Math.max(pack.principles.densityRange[0], Math.min(pack.principles.densityRange[1], closestStep(pack.spacingScale, targetPx)));
-          addLayout(ruleFor(c.handle), { gap: `${pack.spacingScale[step] ?? 0}px` });
+          const px = continuousSpacing(targetPx);
+          addLayout(ruleFor(c.handle), { gap: `${px}px` });
           break;
         }
         case 'marginStep': {
@@ -286,10 +417,10 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
         case 'marginEquals': {
           const refs = resolveReference(rel.reference, c);
           if (!refs.length) { notes.push(`marginEquals ${rel.subject}: reference not found`); break; }
-          // Law 0: measurement (sibling gap proxy) INFORMS which scale step.
+          // F2 fix: continuous margin — compute the actual value and clamp.
           const targetPx = refs[0].layout.siblingGapPx ?? 0;
-          const step = closestStep(pack.spacingScale, targetPx);
-          addLayout(ruleFor(c.handle), { margin: `${pack.spacingScale[step] ?? 0}px` });
+          const px = continuousSpacing(targetPx);
+          addLayout(ruleFor(c.handle), { margin: `${px}px` });
           break;
         }
         case 'paddingSide': {
@@ -367,13 +498,16 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
 
         // ── Grouping ──
         case 'groupWith': {
-          // Emit display:flex on the subject's parent so the children
-          // (subject + reference siblings) align as a row.
+          // Emit display:flex + flex-direction:row + gap on the subject's
+          // parent so the children (subject + reference siblings) align as a
+          // row. A bare display:flex without direction/gap is too weak to
+          // actually group — F3: make groupWith produce real visual grouping.
           const parent = resolveSubject('parent', c);
           if (parent.length) {
-            addLayout(compFor(parent[0].handle), { display: 'flex' });
+            const r = compFor(parent[0].handle);
+            addLayout(r, { display: 'flex', flexDirection: 'row', gap: `${pack.spacingScale[3] ?? 12}px` });
           }
-          notes.push(`groupWith ${rel.subject} → ${rel.reference}: parent set to flex`);
+          notes.push(`groupWith ${rel.subject} → ${rel.reference}: parent set to flex row`);
           break;
         }
 
@@ -403,14 +537,13 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
           break;
         }
         case 'lineHeightRatio': {
-          // Law 0: measurement (ref lineHeight × ratio) INFORMS which pack
-          // lineHeightScale step; the pack token at that step is the output.
+          // F2 fix: continuous line-height — compute the actual value and clamp
+          // to the pack's lineHeightScale range. No more snapping to fixed steps.
           const refs = resolveReference(rel.reference, c);
           if (!refs.length) { notes.push(`lineHeightRatio ${rel.subject}: reference not found`); break; }
           const targetVal = lineHeightValue(refs[0]) * rel.ratio;
-          const scale = pack.lineHeightScale ?? [pack.lineHeight.body];
-          const closestLh = scale.reduce((best, v) => Math.abs(v - targetVal) < Math.abs(best - targetVal) ? v : best, scale[0]);
-          addLayout(ruleFor(c.handle), { lineHeight: String(closestLh) });
+          const lh = continuousLineHeight(targetVal);
+          addLayout(ruleFor(c.handle), { lineHeight: String(lh) });
           break;
         }
 
@@ -480,14 +613,88 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
           const refs = resolveReference(rel.reference, c);
           if (!refs.length) { notes.push(`reorderBefore ${rel.subject}: reference not found`); break; }
           if (c.moveSafety !== 'safe') { notes.push(`reorderBefore ${c.handle}: REFUSED — moveSafety=${c.moveSafety}`); break; }
-          ops.push({ kind: 'reorder', target: c.handle, before: refs[0].handle });
+          // F6: derive a real MutationReason from the actual situation.
+          const reason = deriveMutationReason(c, refs[0], byHandle);
+          if (!reason) {
+            notes.push(`reorderBefore ${c.handle}: REFUSED — no MutationReason applies (CSS can express this without DOM mutation)`);
+            break;
+          }
+          ops.push({ kind: 'reorder', target: c.handle, before: refs[0].handle, reason });
           break;
         }
         case 'moveTo': {
           const refs = resolveReference(rel.reference, c);
           if (!refs.length) { notes.push(`moveTo ${rel.subject}: reference not found`); break; }
           if (c.moveSafety === 'forbidden') { notes.push(`moveTo ${c.handle}: REFUSED — forbidden`); break; }
-          ops.push({ kind: 'move', target: c.handle, to: refs[0].handle });
+          // F6: derive a real MutationReason from the actual situation.
+          const reason = deriveMutationReason(c, refs[0], byHandle);
+          if (!reason) {
+            notes.push(`moveTo ${c.handle}: REFUSED — no MutationReason applies (CSS can express this without DOM mutation)`);
+            break;
+          }
+          ops.push({ kind: 'move', target: c.handle, to: refs[0].handle, reason });
+          break;
+        }
+
+        // ── Motion (F4) ──
+        // All motion CSS is transform/opacity only — never triggers reflow.
+        // prefers-reduced-motion is honoured absolutely: the entire motion layer
+        // is wrapped in @media (prefers-reduced-motion: no-preference) at compile.
+        case 'transitionTier': {
+          if (!pack.motionAnimated) { notes.push(`transitionTier ${c.handle}: REFUSED — pack is not animated`); break; }
+          const dur = pack.motionDurationScale[Math.min(pack.motionDurationScale.length - 1, Math.max(0, rel.tier))] ?? 0;
+          if (dur === 0) break; // tier 0 = no transition
+          addStyles(ruleFor(c.handle), {
+            transition: `transform ${dur}ms var(--rv-easing, ease-out), opacity ${dur}ms var(--rv-easing, ease-out), box-shadow ${dur}ms var(--rv-easing, ease-out)`,
+          });
+          break;
+        }
+        case 'transitionEasing': {
+          if (!pack.motionAnimated) { notes.push(`transitionEasing ${c.handle}: REFUSED — pack is not animated`); break; }
+          const easing = pack.motionEasing[rel.easing] ?? 'ease-out';
+          addStyles(ruleFor(c.handle), { ['--rv-easing' as string]: easing });
+          break;
+        }
+        case 'entranceDelay': {
+          if (!pack.motionAnimated) { notes.push(`entranceDelay ${c.handle}: REFUSED — pack is not animated`); break; }
+          const delayScale = pack.motionDurationScale;
+          const delay = delayScale[Math.min(delayScale.length - 1, Math.max(0, rel.tier))] ?? 0;
+          // Entrance: opacity 0→1 + translateY(8px→0). Transform+opacity only.
+          // The stagger is driven by the tier (reading order → tier mapping).
+          addStyles(ruleFor(c.handle), {
+            animation: `rv-enter ${delayScale[delayScale.length - 1] ?? 300}ms var(--rv-easing, ease-out) ${delay}ms both`,
+          });
+          break;
+        }
+        case 'hoverElevate': {
+          if (!pack.motionAnimated) { notes.push(`hoverElevate ${c.handle}: REFUSED — pack is not animated`); break; }
+          const newTier = Math.min(pack.shadowScale.length - 1, shadowTier(c) + rel.levels);
+          const shadow = pack.shadowScale[newTier] ?? 'none';
+          const r = ruleFor(c.handle);
+          // Hover: transform-based lift (no layout movement) + shadow.
+          r.hover = { ...(r.hover ?? {}), transform: 'translateY(-2px)', boxShadow: shadow };
+          break;
+        }
+        case 'focusRing': {
+          const color = pack.colors.accents[rel.role];
+          if (!color) { notes.push(`focusRing ${c.handle}: accent "${rel.role}" not found in pack`); break; }
+          const r = ruleFor(c.handle);
+          r.focusVisible = { ...(r.focusVisible ?? {}), outline: `2px solid ${color}`, outlineOffset: '2px' };
+          break;
+        }
+
+        // ── Interaction (F5) ──
+        case 'movable': {
+          // Opt-in movable capability. Transform-based: no DOM mutation.
+          // The compile layer adds cursor:grab + touch-action:none + a CSS class
+          // that enables the runtime drag handler. The drag handler applies
+          // transform: translate() only — never mutates style.position, never
+          // moves DOM nodes. Fully reversible: clear the transform.
+          addStyles(ruleFor(c.handle), {
+            cursor: 'grab',
+            ['--rv-movable' as string]: '1',
+            touchAction: 'none',
+          });
           break;
         }
 

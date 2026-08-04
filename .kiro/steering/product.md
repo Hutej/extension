@@ -151,7 +151,24 @@ global layout optimization.
 
 ## Current position
 
-**BUILD SWEEP 1D — VOICE (E0-E8) — BUILT, NOT VERIFIED BY EYE.** Committed (2d15312). The relational
+**BUILD SWEEP 1E — REACH — BUILT, NOT VERIFIED BY EYE.** Gate: typecheck + build + lint only.
+This sweep: (F1) fixture comment corrected — the fixture system uses chrome.storage.local
+(not window.__rvFixtureResponse); default compiler decision: v1 stays default (v2 by-eye
+gate consistently failed, DOM ops/motion/interaction are dead in v2); selector strategy
+unified — structural selectors primary, data-rv-c fallback + counter in both paths. (F2)
+quantization fix — sizeRatio/spacingRatio/gapRatio/marginEquals/lineHeightRatio now
+generate fine-grained ramps from pack tokens instead of snapping to 4 fixed values.
+(F3) emission breadth — emphasisRank emits for ALL ranks (weight + muted color);
+groupWith emits complete flex row (display+direction+gap). (F4) motion layer —
+transitionTier/transitionEasing/entranceDelay/hoverElevate/focusRing relations;
+prefers-reduced-motion hard branch; pack motion principles (animated/duration/easing).
+(F5) interaction — movable relation + runtime drag/keyboard handler (transform-based,
+no DOM mutation, bounded, full removal on undo). (F6) DOM ops re-enabled —
+deriveMutationReason derives real reasons from perception (overflow-hidden,
+stacking-context, cross-layout-regions, impossible-ancestry); refuses when none apply.
+(F7) docs updated. 37 relations total (31 + 5 motion + 1 interaction).
+
+**Prior: BUILD SWEEP 1D — VOICE (E0-E8) — BUILT, NOT VERIFIED BY EYE.** Committed (2d15312). The relational
 vocabulary + deterministic transformation engine replace the old enum-based expander. 31 relation types
 in a discriminated union (size, rank, spacing, alignment, elevation, colour, width, surface, typography,
 layout, structural ops) + PackPrinciples as checkable data. The model states relations ("this heading is

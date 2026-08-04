@@ -12,11 +12,11 @@
 - **`openai_api_key` path** (`popup/main.ts:25`) — the popup reads/writes a key the background never reads.
 
 ## Duplicated logic (drift risk)
-- **`buildSelector` (`solve:241-286`) duplicates `structuralPath` (`perceive:407-451`)** — two copies of fragile identity logic with different joiners (` > ` vs `/`). A change to one without the other silently targets the wrong element.
+- **`buildSelector` (`solve:241-286`) duplicates `structuralPath` (`perceive:407-451`)** — two copies of fragile identity logic with different joiners (` > ` vs `/`). A change to one without the other silently targets the wrong element. **BUILD SWEEP 1E partially resolved**: `perceive/index.ts` now has `buildCssSelector` (CSS-valid version) stored as `cluster.structuralSelector`, used by both v1 compile and v2 solve. The structuralPath (for handle hashing) and buildSelector (in solve.ts) remain separate but share the same anchor logic.
 - **`hash` is duplicated** — `perceive:1482` (fixed, modulo `2176782336`) vs `semantic:390` (unfixed `.slice(-6)`). The same bug class fixed in one place, live in another.
 
 ## Doc drift
-- **`solve.ts:23`** claims "data-rv-c is a DEBUG label only; nothing in emitted CSS depends on it" — **false for v1** (100% of v1 CSS is keyed on `data-rv-c`, `perceive:503`).
+- **`solve.ts:23`** claims "data-rv-c is a DEBUG label only; nothing in emitted CSS depends on it" — **BUILD SWEEP 1E RESOLVED for v1**: the compile path now uses `structuralSelector` as primary, with `[data-rv-c]` as a genuine fallback. The `selectorFallbackCount` in the compile result tracks how often the fallback fires. v2 already had this (buildSelector in solve.ts). The claim is now TRUE for both paths.
 - **`expand.ts:104`** comment says 5-char handles; code uses 6 (`:108`, `spec:510`).
 - **`ARCHITECTURE.md`** says hard gates = 6; `verify/index.ts` exposes 13 booleans; v2 uses 11 (`v2HardGates` since S9.4 added squeeze, S10.3a added captureFailed, S11.3 added planHonoured); the count was 6/7/9/10/11 across docs — now reconciled to 11 everywhere (S11.7).
 - **`--rv-step-1`** deleted token referenced in docs.
@@ -29,7 +29,7 @@
 - **Fixture mode leak to production** (`content.ts:1099` `RV_FIXTURES`) — only build-time-gated; no runtime assertion that `FIXTURE_MODE==='off'` in a production build. A dev build accidentally promoted → stale canned designs, no model call.
 
 ## Architectural debt
-- **v1 is still the default; v2 is behind a flag with fabricated telemetry** (`content.ts:716-722` zeros) → can't trust v2 metrics.
+- **v1 is still the default; v2 is behind a flag** — BUILD SWEEP 1E reviewed and decided to KEEP v1 as default (see ARCHITECTURE.md for the full reasoning). v2 cannot be the default until it passes the by-eye gate.
 - **Three "loosenings" were reverted in Step 9** (overflow-x:auto, contentsHandles exemption, overflow-wrap) — the codebase has a history of gaming gates.
 - **v1/v2 fork is sprinkled through `content.ts`** despite `ARCHITECTURE.md:17` claiming "the pipeline forks once; no conditionals sprinkled through compile." The two paths ARE intertwined in the orchestrator.
 - **`content.ts` is a 1603-line god orchestrator** coupled to every `core/*` module.

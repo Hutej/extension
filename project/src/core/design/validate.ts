@@ -28,6 +28,7 @@ const SIDES = new Set<string>(['top', 'right', 'bottom', 'left', 'all']);
 const CORNERS = new Set<string>(['tl', 'tr', 'br', 'bl', 'all']);
 const EDGES = new Set<string>(['start', 'center', 'end', 'stretch']);
 const TRANSFORMS = new Set<string>(['uppercase', 'lowercase', 'capitalize', 'none']);
+const EASING_CHARS = new Set<string>(['smooth', 'sharp', 'spring', 'linear']);
 
 /**
  * Validate an array of raw relation statements from the model. Each is checked
@@ -99,6 +100,9 @@ function validateOne(
     const rank = r.rank as number;
     if (rank < 1 || rank > 5 || !Number.isInteger(rank)) return { ok: false, reason: 'fontWeightRank.rank must be 1-5' };
   }
+  // F4 — motion relation validation
+  if (rel === 'transitionEasing' && !EASING_CHARS.has(r.easing as string)) return { ok: false, reason: 'transitionEasing.easing must be smooth|sharp|spring|linear' };
+  if (rel === 'focusRing' && !ACCENT_ROLES.has(r.role as string)) return { ok: false, reason: 'focusRing.role must be primary|secondary|muted' };
 
   // Contradiction check: two relations on the same subject with the same relation
   // type but different magnitudes is a contradiction (e.g. two emphasisRank with

@@ -24,7 +24,7 @@ function layout(over: Partial<ClusterLayout> = {}): ClusterLayout {
 
 function cluster(over: Partial<Cluster>): Cluster {
   return {
-    handle: 'c000000', selector: '[data-rv-c="c000000"]', count: 1, tag: 'div', role: null,
+    handle: 'c000000', selector: '[data-rv-c="c000000"]', structuralSelector: null, count: 1, tag: 'div', role: null,
     isNativeControl: false, isCheckboxRadio: false, hasSolidBg: true, rect: { x: 0, y: 0, w: 100, h: 100, vx: 0, vy: 0, aboveFold: true },
     samples: [], prominence: 1, layout: layout(), widthFractionOfParent: 1,
     emptinessScore: 0, moveSafety: 'safe', sourceOrder: 0,

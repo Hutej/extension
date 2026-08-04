@@ -63,7 +63,9 @@ export const BASE_PROPS: Record<string, string> = {
   filter: 'filter',
   opacity: 'opacity',
   transition: 'transition',
+  animation: 'animation',
   cursor: 'cursor',
+  touchAction: 'touch-action',
 };
 
 /**

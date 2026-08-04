@@ -54,8 +54,10 @@ const ARTIFACTS_DIR = path.join(import.meta.dirname, 'artifacts');
 // S6.1: fixture mode — record/replay model responses to eliminate model latency
 // from layout iteration. RV_FIXTURES is also inlined into the extension at build
 // time (wxt.config.ts define). The harness does the file I/O (node:fs); the
-// extension reads injected fixtures via window.__rvFixtures (replay) or stores
-// raw responses on window.__rvFixtureResponse (record).
+// extension reads injected fixtures via chrome.storage.local key
+// 'revueon_fixture_<role>' (replay) or stores raw responses there (record).
+// The old window.__rvFixtureResponse global was replaced by chrome.storage.local;
+// this comment was stale and is now corrected.
 const FIXTURE_MODE = (process.env.RV_FIXTURES ?? 'off') as 'off' | 'record' | 'replay';
 const FIXTURES_DIR = path.join(import.meta.dirname, 'fixtures', 'painter');
 

@@ -88,6 +88,13 @@ export interface DesignPack {
   fontWeightScale: number[];
   /** Structured design principles the engine enforces. */
   principles: PackPrinciples;
+  // ── Motion (F4) ──
+  /** Whether the pack uses motion at all. false = still (dense-terminal, minimal-editorial can declare themselves still). */
+  motionAnimated: boolean;
+  /** Duration scale in ms — transitionTier indexes into this. */
+  motionDurationScale: number[];
+  /** Easing functions per character — the pack resolves the named character to a cubic-bezier. */
+  motionEasing: Record<string, string>;
 }
 
 // ── The pack library (archetypes only — no named-site clones) ──────────
@@ -122,6 +129,9 @@ const MINIMAL_EDITORIAL: DesignPack = {
   lineHeightScale: LINE_HEIGHT_SCALE,
   fontWeightScale: FONT_WEIGHT_SCALE,
   principles: { minTypeScaleRatio: 1.2, maxAccentCount: 2, raiseSurface: 'on-emphasis', densityRange: [2, 6], surfaceDefinition: 'border' },
+  motionAnimated: false, // minimal-editorial: calm, type-led, still by default
+  motionDurationScale: [0, 100, 200, 400],
+  motionEasing: { smooth: 'ease-out', sharp: 'ease-in', spring: 'cubic-bezier(0.34, 1.56, 0.64, 1)', linear: 'linear' },
 };
 
 /** dense-terminal — a compact, high-information-density, monospace-leaning system. */
@@ -146,6 +156,9 @@ const DENSE_TERMINAL: DesignPack = {
   lineHeightScale: [1.0, 1.1, 1.25, 1.4, 1.5, 1.65, 1.8],
   fontWeightScale: FONT_WEIGHT_SCALE,
   principles: { minTypeScaleRatio: 1.15, maxAccentCount: 1, raiseSurface: 'never', densityRange: [1, 5], surfaceDefinition: 'border' },
+  motionAnimated: false, // dense-terminal: information density, no motion
+  motionDurationScale: [0, 80, 150, 300],
+  motionEasing: { smooth: 'ease-out', sharp: 'ease-in', spring: 'cubic-bezier(0.34, 1.56, 0.64, 1)', linear: 'linear' },
 };
 
 /** soft-glass — a translucent, layered, glassmorphic system (backdrop-blur surfaces). */
@@ -170,6 +183,9 @@ const SOFT_GLASS: DesignPack = {
   lineHeightScale: LINE_HEIGHT_SCALE,
   fontWeightScale: FONT_WEIGHT_SCALE,
   principles: { minTypeScaleRatio: 1.25, maxAccentCount: 2, raiseSurface: 'on-overlay', densityRange: [2, 6], surfaceDefinition: 'shadow' },
+  motionAnimated: true, // soft-glass: layered, glassmorphic — motion serves depth
+  motionDurationScale: [0, 150, 300, 500],
+  motionEasing: { smooth: 'cubic-bezier(0.4, 0, 0.2, 1)', sharp: 'ease-in', spring: 'cubic-bezier(0.34, 1.56, 0.64, 1)', linear: 'linear' },
 };
 
 /** warm-print — a warm, readable, book-like system (serif-leaning body type). */
@@ -194,6 +210,9 @@ const WARM_PRINT: DesignPack = {
   lineHeightScale: LINE_HEIGHT_SCALE,
   fontWeightScale: FONT_WEIGHT_SCALE,
   principles: { minTypeScaleRatio: 1.2, maxAccentCount: 2, raiseSurface: 'on-emphasis', densityRange: [2, 6], surfaceDefinition: 'either' },
+  motionAnimated: true, // warm-print: gentle, book-like motion
+  motionDurationScale: [0, 100, 250, 400],
+  motionEasing: { smooth: 'ease-out', sharp: 'ease-in', spring: 'cubic-bezier(0.25, 0.46, 0.45, 0.94)', linear: 'linear' },
 };
 
 /** The pack library. Style archetypes only — the model picks + adapts. */
@@ -242,6 +261,9 @@ export function resolvePack(id: string | undefined, overrides?: Partial<DesignPa
     lineHeightScale: overrides.lineHeightScale ?? base.lineHeightScale,
     fontWeightScale: overrides.fontWeightScale ?? base.fontWeightScale,
     principles: { ...base.principles, ...(overrides.principles ?? {}) },
+    motionAnimated: overrides.motionAnimated ?? base.motionAnimated,
+    motionDurationScale: overrides.motionDurationScale ?? base.motionDurationScale,
+    motionEasing: { ...base.motionEasing, ...(overrides.motionEasing ?? {}) },
   };
 }
 
@@ -249,7 +271,7 @@ export function resolvePack(id: string | undefined, overrides?: Partial<DesignPa
  *  picks by name and references the tokens. Pure. */
 export function summarizePack(p: DesignPack): string {
   const accents = Object.keys(p.colors.accents).join('/');
-  return `${p.id}: spacing[${p.spacingScale.join(',')}]px type{display:${p.typeRamp.display} heading:${p.typeRamp.heading} body:${p.typeRamp.body} small:${p.typeRamp.small}} measure{prose:${p.measurePx.prose} full:${p.measurePx.full} compact:${p.measurePx.compact}} radius[${p.radiusScale.join(',')}] border[${p.borderScale.join(',')}] shadow[${p.shadowScale.length}]tiers surfaces{flat/raised/overlay} accents{${accents}} canvas:${p.colors.canvas} text:${p.colors.text} principles{minTypeRatio:${p.principles.minTypeScaleRatio} maxAccent:${p.principles.maxAccentCount} raise:${p.principles.raiseSurface} density:[${p.principles.densityRange.join('-')}] surface:${p.principles.surfaceDefinition}}`;
+  return `${p.id}: spacing[${p.spacingScale.join(',')}]px type{display:${p.typeRamp.display} heading:${p.typeRamp.heading} body:${p.typeRamp.body} small:${p.typeRamp.small}} measure{prose:${p.measurePx.prose} full:${p.measurePx.full} compact:${p.measurePx.compact}} radius[${p.radiusScale.join(',')}] border[${p.borderScale.join(',')}] shadow[${p.shadowScale.length}]tiers surfaces{flat/raised/overlay} accents{${accents}} canvas:${p.colors.canvas} text:${p.colors.text} motion{${p.motionAnimated ? 'yes' : 'still'} dur[${p.motionDurationScale.join(',')}]ms} principles{minTypeRatio:${p.principles.minTypeScaleRatio} maxAccent:${p.principles.maxAccentCount} raise:${p.principles.raiseSurface} density:[${p.principles.densityRange.join('-')}] surface:${p.principles.surfaceDefinition}}`;
 }
 
 /** The full DESIGN PACKS block the serialized perception emits. */

@@ -57,6 +57,14 @@ export function buildDeclarations(input: StyleDecls, opts: BuildOptions): BuildR
   let bgValue = '';
 
   for (const [key, rawVal] of Object.entries(input)) {
+    // Custom properties (--rv-*) pass through directly — they are design tokens
+    // the engine sets (--rv-easing, --rv-movable) that other rules reference.
+    if (key.startsWith('--')) {
+      const val = rawVal.trim();
+      if (!isSafeValue(val)) { dropped.push(key + '(unsafe)'); continue; }
+      out.set(key, val);
+      continue;
+    }
     const cssProp = map[key];
     if (!cssProp) { dropped.push(key); continue; }
     let val = rawVal.trim();

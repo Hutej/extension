@@ -20,10 +20,17 @@ change.
 
 ## Pipelines: v1 legacy and v2 new (behind a flag)
 
-`layoutCompiler = 'v1' | 'v2'`. Default `'v1'`. Override via `RV_LAYOUT_COMPILER` env var and a popup
-dev toggle. The two implementations are NOT intertwined — the pipeline forks once; no shared mutable
-state, no conditionals sprinkled through `compile/`. Once v2 is stable we switch the flag and delete
-v1 — that deletion comes later, not now.
+`layoutCompiler = 'v1' | 'v2'`. Default `'v1'` (BUILD SWEEP 1E decision: v2 cannot
+be the default yet — the by-eye gate consistently failed on v2 across P2.5 steps
+1-9; MDN renders as 1 visual column, Wikipedia+GitHub overflow/collapse on SPA
+re-render. v2 is CSS-only by design so DOM ops, motion, and interaction relations
+are dead on arrival there. v1 is NOT dead weight — it is the path that produces
+designs the user accepts. The relational vocabulary + transformation engine +
+motion + interaction + DOM ops all flow through `compile/transform.ts →
+compile/index.ts`, the v1 path. Override via `RV_LAYOUT_COMPILER` env var and a
+popup dev toggle. The two implementations are NOT intertwined — the pipeline
+forks once; no shared mutable state, no conditionals sprinkled through `compile/`.
+Once v2 is stable we switch the flag and delete v1 — that deletion comes later.
 
 **v1 (legacy, current default):**
 `perceive -> reason (DesignSpec) -> compile(transform+laws) -> verify -> repair(patches CSS) -> apply`
@@ -284,3 +291,76 @@ Pixel gates assert physics only — readable, no overflow, no overlap, not blank
 succeeded. Design quality is the planner's job and the user's eye. Whether the relayout
 happened is asserted at emit time from the solver's own plan, never inferred from pixels.
 - Cheating a gate is the only way to fail a step. An honest blocked report is a success.
+
+## Selector strategy (BUILD SWEEP 1E)
+
+Both v1 and v2 now use **structural selectors as primary**, with `[data-rv-c]` as a
+genuine fallback. At perception time, each cluster gets a `structuralSelector`
+computed from the DOM: nearest stable attribute (id/data-testid/role/aria-label/
+name) + nth-of-type chain, uniqueness-checked. The compile path uses
+`cluster.structuralSelector` when available, falling back to `cluster.selector`
+(`[data-rv-c="handle"]`) when no stable anchor exists. The fallback count is
+reported as `selectorFallbackCount` in the compile result — a metric for how
+often the structural path fails. The v2 solver already had this (buildSelector
+in `solve.ts`); v1 now has it too (buildCssSelector in `perceive/index.ts`).
+One selector strategy across both paths — no more divergence.
+
+## Motion layer (BUILD SWEEP 1E — F4)
+
+Motion is expressed as RELATIONS, never as raw keyframes. The model emits:
+- `transitionTier` — duration at tier N on the pack's motionDurationScale
+- `transitionEasing` — easing character (smooth/sharp/spring/linear)
+- `entranceDelay` — entrance animation at delay tier N (stagger by reading order)
+- `hoverElevate` — hover elevation via transform (never layout)
+- `focusRing` — focus-visible ring using the named accent
+
+Motion is **transform and opacity only** — nothing that triggers reflow. The
+compile path emits `@keyframes rv-enter` and wraps motion CSS in a hard
+`@media (prefers-reduced-motion: reduce)` branch that zeros `animation` and
+`transition` on all `[data-rv-c]` elements. This is not a setting — it is a
+hard branch that disables the entire motion layer.
+
+Each pack declares: `motionAnimated` (boolean — dense-terminal and
+minimal-editorial declare themselves still), `motionDurationScale` (ms steps),
+`motionEasing` (character → cubic-bezier mapping).
+
+## Interaction layer (BUILD SWEEP 1E — F5)
+
+A `movable` relation opts a cluster into the movable-element capability. The
+compile path emits `cursor: grab`, `touch-action: none`, and a `--rv-movable`
+custom property. The runtime drag handler (content.ts) applies
+`transform: translate()` only — never mutates `style.position`, never moves DOM
+nodes. This is trivially reversible (clear the transform) and invisible to any
+framework watching the tree. Keyboard movement is a first-class path
+(Arrow keys + Shift for larger steps). Bounded to a sensible region so nothing
+can be dragged off-screen. Full removal on undo.
+
+## DOM ops with real reasons (BUILD SWEEP 1E — F6)
+
+DOM mutation was inert since 1A because no call site supplied a `MutationReason`.
+Sweep 1D added `reorderBefore` and `moveTo` relations — dead on arrival. F6
+wires real reasons from the transformation engine's `deriveMutationReason`:
+- `escape-overflow-hidden` — content clipped by a contained ancestor
+- `escape-stacking-context` — trapped behind a positioned ancestor
+- `cross-layout-regions` — subject and reference in different layout regions
+- `impossible-ancestry` — parent is a flex/grid container, CSS can't reorder
+
+If none apply, the op is correctly refused and the relation reports it could
+not be satisfied. Every op goes through the transaction log with a
+handle-resolved inverse for exact undo.
+
+## Quantization fix (BUILD SWEEP 1E — F2)
+
+`sizeRatio` previously snapped continuous ratios to a fixed 4-value type ramp —
+ratios 2.6, 2.8, 3.0, 3.4 all resolved to the same 48px. F2 generates a
+fine-grained ramp from the pack's base size + scale character
+(`minTypeScaleRatio`), giving many more distinct steps within the pack's
+[min small, max display] range. The same fix applies to `spacingRatio`,
+`gapRatio`, `marginEquals` (continuous spacing, clamped to the scale range +
+grid), and `lineHeightRatio` (continuous line-height, clamped to the
+lineHeightScale range).
+
+Legitimately discrete scales (kept as-is): `radiusCorner`, `borderWeight`,
+`elevationStep`, `surfaceTier`, `fontWeightRank`, `typeRank`, `emphasisRank`,
+`outranks`, and all `*Step` relations — these are ordinal ranks or finite
+design-token sets by design.

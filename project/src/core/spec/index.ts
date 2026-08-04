@@ -428,6 +428,18 @@ function validatePackOverrides(raw: unknown): Partial<DesignPack> | undefined {
   if (r.principles && typeof r.principles === 'object' && !Array.isArray(r.principles)) {
     (out as Record<string, unknown>).principles = r.principles;
   }
+  // F4 — motion pack overrides
+  if (typeof r.motionAnimated === 'boolean') (out as Record<string, unknown>).motionAnimated = r.motionAnimated;
+  if (Array.isArray(r.motionDurationScale) && r.motionDurationScale.every((v) => typeof v === 'number')) {
+    (out as Record<string, unknown>).motionDurationScale = r.motionDurationScale;
+  }
+  if (r.motionEasing && typeof r.motionEasing === 'object' && !Array.isArray(r.motionEasing)) {
+    const me: Record<string, string> = {};
+    for (const [k, v] of Object.entries(r.motionEasing as Record<string, unknown>)) {
+      if (typeof k === 'string' && typeof v === 'string') me[k] = v;
+    }
+    if (Object.keys(me).length) (out as Record<string, unknown>).motionEasing = me;
+  }
   return Object.keys(out).length ? out : undefined;
 }
 
