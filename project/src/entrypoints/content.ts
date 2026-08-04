@@ -1,4 +1,4 @@
-﻿/**
+/**
  * content — the page transform orchestrator, running in the page.
  *
  *   perceive -> (background: reason -> DesignSpec) -> compile -> apply CSS
@@ -727,7 +727,12 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const slotPreferredWidth = new Map<string, 'full' | 'side' | 'content'>();
     for (const s of DOCUMENTATION_SLOTS) slotPreferredWidth.set(s.id, s.preferredWidth);
     const fallbackTarget = buildFallbackTargetIR(sAssignment.handleToSlot, slotPreferredWidth);
-    const sTarget = resolveComposition(spec.relations, fallbackTarget);
+    // Build the DOM-order map (handle → sourceOrder) for readBefore/prominentFirst
+    // to check whether the relation can be satisfied through placement alone.
+    const domOrder = new Map<string, number>();
+    for (const node of sIR.nodes) domOrder.set(node.handle, node.computedRelationships.ordering);
+    const focalHandle = perception.spatial?.focalPoint?.handle ?? null;
+    const sTarget = resolveComposition(spec.relations, fallbackTarget, domOrder, focalHandle);
     try {
       const sSolveResult = solve({ ir: sIR, target: sTarget, excluded: sExcludedSet });
       solvePlacement = computeGridPlacementCss(sSolveResult);

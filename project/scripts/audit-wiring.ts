@@ -76,11 +76,34 @@ const allSrc = [...srcContent.values()].join('\n');
     const inComposition = compositionRels.has(rel);
     const hasEmission = hasCase || inComposition;
 
+    // H2: For composition relations, a validation path is not an emission
+    // path. The solver reads slotAssignment, spans, tracks, slotBehaviour —
+    // it does NOT read adjacency or readingOrder. A relation whose case
+    // block only pushes to adjacency/readingOrder/unsatisfiable has no
+    // emission path; its sole possible outcome is unsatisfiable. Check
+    // that the case block in composition.ts modifies at least one
+    // solver-read IR field.
+    let emissionHole = false;
+    if (inComposition) {
+      // Find the case block for this relation in composition.ts: from
+      // `case 'rel':` to the next `case ` (captures the entire block,
+      // including inner break; statements in nested if-blocks).
+      const caseMarker = `case '${rel}'`;
+      const caseStart = compModule.indexOf(caseMarker);
+      if (caseStart !== -1) {
+        const nextCase = compModule.indexOf('case ', caseStart + caseMarker.length);
+        const caseEnd = nextCase === -1 ? compModule.length : nextCase;
+        const caseBody = compModule.slice(caseStart, caseEnd);
+        if (!/\bslotAssignment\b|\bspans\b|\btracks\b|\bslotBehaviour\b/.test(caseBody)) emissionHole = true;
+      }
+    }
+
     const missing: string[] = [];
     if (!inSpecs) missing.push('RELATION_SPECS');
     if (!inPrompt) missing.push('prompt');
     if (!inValidator) missing.push('validator');
     if (!hasEmission) missing.push('emission');
+    if (emissionHole) missing.push('emission (case only pushes to adjacency/readingOrder/unsatisfiable — solver reads none of those)');
 
     findings.push({
       check: 'relation-wiring',
