@@ -948,7 +948,7 @@ async function transformSite(context: BrowserContext, popup: Page, site: SiteSpe
           const p = parsed.placement;
           console.log(`  PLACEMENT placed=${p.placed} proxies=${p.proxies} subgrid=${p.subgridProxies} singleTrack=${p.singleTrackProxies ?? '?'} childAssign=${p.subgridChildAssignments ?? '?'} notPlaceable=${p.notPlaceable} mixed=${p.mixedProxies}`);
           console.log(`  grid-template-columns: ${p.gridTemplate}`);
-          if (p.plan) console.log(`  PLAN trackCount=${p.plan.trackCount} expectedColumns=${p.plan.expectedColumns} slotToTrack=${JSON.stringify(p.plan.slotToTrack)} honoured=${p.planHonoured}`);
+          if (p.plan) console.log(`  PLAN trackCount=${p.plan.trackCount} expectedColumns=${p.plan.expectedColumns} handleToColumn=${JSON.stringify(p.plan.handleToColumn)} honoured=${p.planHonoured}`);
         }
         // S10.4: print verify details (column count before → after, layoutReshaped info).
         if (parsed.verify?.details) {

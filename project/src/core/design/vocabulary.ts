@@ -259,7 +259,7 @@ export const RELATION_SPECS: RelationSpec[] = [
   { relation: 'transitionTier', hasReference: false, magnitudeField: 'tier', magnitudeKind: 'step', description: 'transition at duration tier N on the pack motionDurationScale' },
   { relation: 'transitionEasing', hasReference: false, description: 'easing character for transitions (smooth|sharp|spring|linear)' },
   { relation: 'entranceDelay', hasReference: false, magnitudeField: 'tier', magnitudeKind: 'step', description: 'entrance animation at delay tier N (stagger by reading order)' },
-  { relation: 'hoverElevate', hasReference: true, magnitudeField: 'levels', magnitudeKind: 'count', description: 'hover elevation via transform (N levels on shadowScale)' },
+  { relation: 'hoverElevate', hasReference: false, magnitudeField: 'levels', magnitudeKind: 'count', description: 'hover elevation via transform (N levels on shadowScale)' },
   { relation: 'focusRing', hasReference: false, description: 'focus-visible ring using the named accent' },
   // F5 — interaction
   { relation: 'movable', hasReference: false, description: 'opt-in movable element capability (transform-based, no DOM mutation)' },

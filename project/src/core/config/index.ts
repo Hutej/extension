@@ -5,11 +5,6 @@
  */
 
 export const AI_CONFIG = {
-  // Pipeline flag: v1 (legacy compile) or v2 (Layout IR -> Solver). Default v1.
-  // Override via RV_LAYOUT_COMPILER env var or the popup dev toggle. The two
-  // paths are NOT intertwined — the pipeline forks once; no shared mutable state.
-  layoutCompiler: (process.env.RV_LAYOUT_COMPILER ?? 'v1') as 'v1' | 'v2',
-
   // Per-role models on Cloudflare Workers AI. GLM 5.2 is the flagship
   // (function calling + reasoning, 262K ctx); glm-4.7-flash is the fast
   // companion for the Critic.

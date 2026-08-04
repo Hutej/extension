@@ -13,9 +13,10 @@
  */
 
 import { perceive, clearHandles, serializePerception, clearRoleCache, waitForSettle } from '../../src/core/perceive/index.ts';
-import { extractLayoutIR, currentConstraints } from '../../src/core/layout/ir.ts';
+import { extractLayoutIR, currentConstraints, buildFallbackTargetIR } from '../../src/core/layout/ir.ts';
 import { detectExclusions } from '../../src/core/layout/exclusions.ts';
 import { assignSlots } from '../../src/core/layout/assign.ts';
+import { DOCUMENTATION_SLOTS } from '../../src/core/layout/languages/documentation.ts';
 import { solve, computeGridPlacementCss } from '../../src/core/layout/solve.ts';
 
 // Exposed on window by the bundled module (see probe.ts build).
@@ -33,7 +34,11 @@ import { solve, computeGridPlacementCss } from '../../src/core/layout/solve.ts';
 (globalThis as unknown as { __rvClearRoleCache: typeof clearRoleCache }).__rvClearRoleCache = clearRoleCache;
 // S3.4 — perception settle condition (MutationObserver quiet window).
 (globalThis as unknown as { __rvWaitForSettle: typeof waitForSettle }).__rvWaitForSettle = waitForSettle;
-// Step 2 — the v2 solver (behind layoutCompiler=v2 flag).
+// The unified solver. Takes the Current IR + Target Layout IR + exclusions.
 (globalThis as unknown as { __rvSolve: typeof solve }).__rvSolve = solve;
 // S7.1 — CSS-only grid placement (replaces wrapper DOM execution).
 (globalThis as unknown as { __rvComputeGridPlacementCss: typeof computeGridPlacementCss }).__rvComputeGridPlacementCss = computeGridPlacementCss;
+// G1 — Target Layout IR fallback builder (deterministic slot assignment → tracks).
+(globalThis as unknown as { __rvBuildFallbackTargetIR: typeof buildFallbackTargetIR }).__rvBuildFallbackTargetIR = buildFallbackTargetIR;
+// G1 — slot definitions (for building slotPreferredWidth in the test).
+(globalThis as unknown as { __rvDocumentationSlots: typeof DOCUMENTATION_SLOTS }).__rvDocumentationSlots = DOCUMENTATION_SLOTS;

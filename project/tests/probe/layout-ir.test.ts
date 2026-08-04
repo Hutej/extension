@@ -815,6 +815,8 @@ async function main(): Promise<void> {
       const assignS = (window as unknown as { __rvAssignSlots: (n: any[], e: Set<string>) => any }).__rvAssignSlots;
       const solve = (window as unknown as { __rvSolve: (i: any) => any }).__rvSolve;
       const computePlacement = (window as unknown as { __rvComputeGridPlacementCss: (r: any) => any }).__rvComputeGridPlacementCss;
+      const buildTargetIR = (window as unknown as { __rvBuildFallbackTargetIR: (h: Map<string, string>, s: Map<string, string>) => any }).__rvBuildFallbackTargetIR;
+      const docSlots = (window as unknown as { __rvDocumentationSlots: readonly any[] }).__rvDocumentationSlots;
       clearHandles();
       const p = perceive() as any;
       const ir = extractIR(p);
@@ -822,7 +824,10 @@ async function main(): Promise<void> {
       const excludedSet = new Set<string>();
       for (const [h] of excludedRaw) excludedSet.add(h);
       const assignment = assignS(ir.nodes, excludedSet);
-      const result = solve({ ir, assignment, excluded: excludedSet });
+      const slotPreferredWidth = new Map<string, string>();
+      for (const s of docSlots) slotPreferredWidth.set(s.id, s.preferredWidth);
+      const targetIR = buildTargetIR(assignment.handleToSlot, slotPreferredWidth);
+      const result = solve({ ir, target: targetIR, excluded: excludedSet });
       // S7.1 — CSS-only grid placement (no DOM mutation).
       const placementResult = computePlacement
         ? computePlacement(result)
@@ -831,7 +836,7 @@ async function main(): Promise<void> {
       const slotDist: Record<string, number> = {};
       for (const [_h, s] of assignment.handleToSlot) slotDist[s] = (slotDist[s] ?? 0) + 1;
       return { css: placementResult.css, rulesEmitted: result.rulesEmitted, matchedTargets: result.matchedTargets,
-        impossibleNodes: result.impossibleNodes, droppedOptionals: result.droppedOptionals,
+        impossibleNodes: [] as string[], droppedOptionals: result.droppedOptionals,
         nodeCount: ir.nodes.length, nodesPlaced: placementResult.nodesPlaced,
         nodesNotPlaceable: placementResult.nodesNotPlaceable.length,
         intermediatesCollapsed: placementResult.intermediatesCollapsed,

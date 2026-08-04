@@ -10,7 +10,7 @@
  * persistence (origin + normalized pathname).
  */
 
-import { perceive, serializePerception, serializePainterPerception, serializeV2Painter, clearHandles, clearRoleCache, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
+import { perceive, serializePerception, serializePainterPerception, clearHandles, clearRoleCache, captureLayoutFingerprint, lastSerializeBudget } from '@/core/perceive';
 import { compileSpec, deriveBaseTone, type CompileOptions } from '@/core/compile';
 import { transformIntent } from '@/core/compile/transform.ts';
 import { sanitizeCss } from '@/core/sanitize';
@@ -28,9 +28,10 @@ import type { Role } from '@/core/reason';
 import type { DesignSpec } from '@/core/spec';
 import { TransactionLog, type DomAdapter } from '@/core/ops/transaction';
 import { validateOps, type ValidatedOp } from '@/core/ops';
-import { extractLayoutIR } from '@/core/layout/ir';
+import { extractLayoutIR, buildFallbackTargetIR } from '@/core/layout/ir';
 import { detectExclusions } from '@/core/layout/exclusions';
 import { assignSlots } from '@/core/layout/assign';
+import { DOCUMENTATION_SLOTS } from '@/core/layout/languages/documentation';
 import { solve, computeGridPlacementCss, type SolverPlan } from '@/core/layout/solve';
 
 /** Redact sensitive data from a string before sending it to the model.
@@ -102,11 +103,11 @@ export interface Ledger {
   serializeChars: number;
   serializeCharsBefore: number;  // pre-budget char count (demote/drop tail to fit the budget)
   roleCalls: RoleCall[];          // per-role calls (architect/painter/critic) — observability
-  compileMs?: number;   // optional — v2 reports only when measured
+  compileMs?: number;   // optional — measured when the stage is instrumented
   applyMs?: number;
   verifyMs?: number;
-  pixelVerifyMs?: number;   // optional — v2 doesn't separate this from verifyMs
-  persistMs?: number;      // optional — v2 reports only when measured
+  pixelVerifyMs?: number;   // optional — separated from verifyMs when measured
+  persistMs?: number;      // optional — measured when the stage is instrumented
   unaccountedMs?: number;  // optional — computed from real stages, not invented
   totalMs: number;
   paidCalls: number;        // total HTTP requests across roles (includes retries)
@@ -170,8 +171,8 @@ const FAILED = 'revueonFailed';
 let inFlight: Promise<TransformOutcome> | null = null;
 let activeShadowRoots: ShadowRoot[] = [];
 let lastAppliedCss = '';   // last applied CSS — for immediate shadow-root injection on dynamic content
-// the v2 structural CSS (grid + display:contents). Stored separately so
-// restyleDynamic can re-apply it alongside re-compiled Painter CSS.
+// the solver's structural CSS (grid + display:contents). Stored separately so
+// restyleDynamic can re-apply it alongside re-compiled aesthetic CSS.
 let activeStructuralCss = '';
 
 // Dynamic-content defense: the stored spec + opts, used to re-stamp +
@@ -305,11 +306,14 @@ function assertPlanHonoured(plan: SolverPlan): boolean {
   }
   const measuredColumns = xBuckets.size || 1;
   if (measuredColumns !== plan.expectedColumns) return false;
-  // (2) per-slot: each slot must have at least one proxy at the expected track.
-  for (const [slotId, expectedTrack] of Object.entries(plan.slotToTrack)) {
+  // (2) each expected column must have at least one proxy at that grid-column-start.
+  const expectedTracks = new Set<number>();
+  for (const col of Object.values(plan.handleToColumn)) {
+    if (col > 0) expectedTracks.add(col);
+  }
+  for (const expectedTrack of expectedTracks) {
     let found = false;
     for (const el of proxies) {
-      if (el.getAttribute('data-rv-plan-slot') !== slotId) continue;
       const start = parseInt(getComputedStyle(el).gridColumnStart, 10);
       if (start === expectedTrack) { found = true; break; }
     }
@@ -612,250 +616,6 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     }
   };
 
-  // v2 path: solver structural CSS + Painter aesthetic CSS. One paid call
-  // (Painter only). The solver handles the page shell (grid + slot wrappers); the
-  // Painter handles the surface (colors, fonts, surfaces). Behind layoutCompiler=v2.
-  // Painter gets a v2 payload (role/slot only, no geometry).
-  // verify + deterministic repair + hard gates, same as v1.
-  if (AI_CONFIG.layoutCompiler === 'v2' && !restyleOnly) {
-    // CSS-only relayout. No DOM mutation, nothing for txnLog to undo.
-    // Undo = removeStyleEverywhere (the stylesheet carries the grid + display:contents).
-    // Clean up any stale data-rv-grid / data-rv-plan-slot debug attributes from a prior transform.
-    document.querySelectorAll('[data-rv-grid]').forEach((el) => el.removeAttribute('data-rv-grid'));
-    document.querySelectorAll('[data-rv-plan-slot]').forEach((el) => el.removeAttribute('data-rv-plan-slot'));
-    removeStyleEverywhere(activeShadowRoots);
-
-    // compute IR + slots BEFORE the Painter so the payload has slot info.
-    // The solver + assignment are free (synchronous, no model calls).
-    const v2IR = extractLayoutIR(perception);
-    const v2ExcludedRaw = detectExclusions(perception.clusters);
-    const v2ExcludedSet = new Set<string>();
-    for (const [h] of v2ExcludedRaw) v2ExcludedSet.add(h);
-    const v2Assignment = assignSlots(v2IR.nodes);
-
-    // v2 Painter payload — role/slot only, no geometry/rects/widths/positions.
-    const v2Serialized = redactSensitiveData(serializeV2Painter(perception, v2Assignment));
-    logDebug(`v2 painter payload: ${v2Serialized.length}chars (v1 painter=${painterSerialized.length}chars, full=${serializeChars}chars)`);
-
-    // Painter (one paid call). The solver handles structure.
-    const v2PaintRes = await askForSpec('painter', intent, v2Serialized);
-    recordCall('painter', v2PaintRes);
-    if (!v2PaintRes.ok || !v2PaintRes.spec) {
-      rollbackFailed(v2PaintRes.message || 'Painter failed');
-      return { ok: false, kind: v2PaintRes.kind, message: v2PaintRes.message, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
-    }
-    const v2Spec = v2PaintRes.spec;
-
-    // global abort after the model call — leaves the page untouched.
-    if (budgetExceeded()) {
-      rollbackFailed('global time budget exceeded');
-      return { ok: false, kind: 'timeout', message: 'The design exceeded the time budget and was rolled back.', paidCalls: paidCalls(), wallMs: Date.now() - t0 };
-    }
-
-    // Solver (free): placement data + grid template. CSS-only, no DOM mutation.
-    const v2SolveResult = solve({ ir: v2IR, assignment: v2Assignment, excluded: v2ExcludedSet });
-    const v2Placement = computeGridPlacementCss(v2SolveResult);
-    logDebug(`v2 solver: ${v2SolveResult.matchedTargets} matched, ${v2Placement.nodesPlaced} placed (proxies=${v2Placement.proxyCount}), ${v2Placement.nodesNotPlaceable.length} not placeable, ${v2Placement.intermediatesCollapsed} mixed-proxy (${v2Placement.subgridProxies} subgrid, ${v2Placement.singleTrackProxies} singleTrack, ${v2Placement.subgridChildAssignments} childAssign, mixed=${v2Placement.mixedProxies}), selectorFallback=${v2Placement.selectorFallback} (nca=${v2Placement.selectorFallbackNca} proxy=${v2Placement.selectorFallbackProxy} contents=${v2Placement.selectorFallbackContents} perNode=${v2Placement.selectorFallbackPerNode}), ${v2SolveResult.rulesEmitted} CSS rules`);
-    logDebug(`v2 placement diag: ${v2Placement.diagnostics}`);
-    logDebug(`v2 grid-template-columns: ${v2Placement.gridTemplateColumns}`);
-    logDebug(`v2 plan: ${JSON.stringify(v2Placement.plan)}`);
-    if (v2Placement.skippedReasons.length) logDebug(`v2 subgrid skips: ${v2Placement.skippedReasons.slice(0, 10).join('; ')}`);
-
-    // Compile aesthetic CSS from the Painter's spec.
-    let v2Options: CompileOptions = { paletteMode: v2Spec.paletteMode };
-    const v2Compiled = compileSpec(v2Spec, perception, v2Options);
-    const v2StructuralCss = v2Placement.css;
-    let v2CombinedCss = sanitizeCss(v2StructuralCss + '\n' + sanitizeCss(v2Compiled.css).css).css;
-    if (!v2CombinedCss.trim()) {
-      rollbackFailed('no styles');
-      return { ok: false, message: 'v2 produced no styles', paidCalls: paidCalls(), wallMs: Date.now() - t0 };
-    }
-
-    // Build modelAddressed set for the coverage gate (same as v1).
-    const v2ModelAddressed = new Set<string>();
-    for (const rule of v2Spec.rules) if (rule.styles || rule.layout || rule.hover || rule.focusVisible || rule.hide) v2ModelAddressed.add(rule.target);
-    if (v2Spec.composition) for (const rule of v2Spec.composition) if (rule.styles || rule.layout || rule.hide) v2ModelAddressed.add(rule.target);
-    if (v2Spec.relations?.length) for (const h of transformIntent(v2Spec, perception).expandedTargets) v2ModelAddressed.add(h);
-
-    // display:contents'd elements with [data-rv-c] have their box dissolved.
-    // Their content is visible in the children (now grid items), but the handle's
-    // region collapses. Exempt these handles from the contentIntact check so a
-    // real structural reshape isn't falsely flagged as content collapse.
-    // Paint 1: apply combined CSS (structural grid + aesthetic surface).
-    const v2ApplyMs = performance.now();
-    applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
-    let v2PaintCount = 1;
-    document.documentElement.dataset['revueonPaintCount'] = '1';
-    await new Promise<void>((r) => requestAnimationFrame(() => r()));
-
-    // verify (DOM + pixel) — the safety net v2 was missing.
-    const v2VerifyMs = performance.now();
-    // no moved handles — CSS-only placement, zero DOM mutation.
-    let v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), new Set(), reflowOpportunity);
-    let v2Px = await captureAndPixelVerify(beforeTop);
-    let v2Pixel = v2Px.result;
-    let v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
-    logDebug(`v2 paint1: checks=${JSON.stringify(v2Verify.checks)} pixel(passed=${v2Pixel.passed} voids=${v2Pixel.voids.length} invisible=${v2Pixel.invisibleText.length} squeeze=${v2Pixel.squeeze.length}) change=${v2Verify.changeScore.toFixed(3)}`);
-    if (v2Verify.details.length) logDebug(`v2 paint1 details: ${v2Verify.details.join(' | ')}`);
-
-    // deterministic repair (free — no paid reReason). forceContrast + squeeze
-    // repairs from planRepair, recompiled + re-applied as paint 2. Runs BEFORE the
-    // hard gate so repair can fix what's fixable; the hard gate is the FINAL check.
-    if (!v2Verify.checks.notBlank) {
-      // Content blanked — rollback immediately (no repair can fix this).
-      rollbackFailed('v2 content blanked');
-      logDebug(`v2 ROLLBACK — content blanked`);
-      return { ok: false, message: 'v2 content blanked', spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
-    }
-    const v2NeedsRepair = !v2Verify.checks.contrastOk || v2Pixel.invisibleText.length > 0 ||
-      v2Pixel.squeeze.length > 0 || !v2Verify.checks.noOverflow || !v2Verify.checks.noOverlap ||
-      !v2Verify.checks.contentIntact || !v2Verify.checks.contentVisible;
-    // Save paint1 state — if repair regresses a hard gate, revert to paint1.
-    const v2Paint1Css = v2CombinedCss;
-    const v2Paint1Verify = v2Verify;
-    const v2Paint1Pixel = v2Pixel;
-    if (v2NeedsRepair) {
-      const v2Repair = planRepair(v2Verify, v2Options, 0, v2Spec.paletteMode, v2Pixel, false, new Set());
-      logDebug(`v2 repair -> ${v2Repair.action}: ${v2Repair.reason}`);
-      if (v2Repair.action === 'rollback') {
-        rollbackFailed('v2 content blanked (repair)');
-        return { ok: false, message: 'v2 content blanked', spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0 };
-      }
-      if (v2Repair.action === 'recompile' && v2Repair.options) {
-        v2Options = { ...v2Repair.options, paletteMode: v2Spec.paletteMode };
-        const v2Compiled2 = compileSpec(v2Spec, perception, v2Options);
-        v2CombinedCss = sanitizeCss(v2StructuralCss + '\n' + sanitizeCss(v2Compiled2.css).css).css;
-        applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
-        // apply inline backstop to ALL contrast targets (DOM + pixel), not
-        // just pixel-invisible. The CSS forceContrast rules (specificity 0,2,0) don't
-        // beat id-level site !important; inline styles do. Without this, clusters with
-        // id-level !important survive forceContrast and become invisible after re-apply.
-        const allContrastTargets = [...new Set([...(v2Options.pixelInvisibleTargets ?? []), ...(v2Options.contrastTargets ?? [])])];
-        applyInlineBackstop(v2Spec, allContrastTargets, v2Options.contrastTargetBgs as Record<string, string> | undefined);
-        v2PaintCount = 2;
-        document.documentElement.dataset['revueonPaintCount'] = '2';
-        await new Promise<void>((r) => requestAnimationFrame(() => r()));
-        // Re-verify after repair.
-        v2Verify = verifyStyle(before, v2Spec.paletteMode, v2ModelAddressed, false, new Set(), new Set(), reflowOpportunity);
-        v2Px = await captureAndPixelVerify(beforeTop);
-        v2Pixel = v2Px.result;
-        v2Breakdown = classifyInvisible(v2Pixel.invisibleText);
-        logDebug(`v2 paint2(repair): checks=${JSON.stringify(v2Verify.checks)} pixel(passed=${v2Pixel.passed} voids=${v2Pixel.voids.length} invisible=${v2Pixel.invisibleText.length} squeeze=${v2Pixel.squeeze.length})`);
-        // repair regression guard — if paint2 broke a hard gate that paint1
-        // passed, the repair made things worse. Revert to paint1 CSS + state.
-        // The repair is supposed to help (fix contrast), not hurt (break overflow).
-        // layoutReshaped removed from regression guard (demoted to advisory).
-        // planHonoured is structural (same CSS at paint1/paint2) — not in the guard.
-        const p1Gates = v2Paint1Verify.checks.notBlank && v2Paint1Verify.checks.contentIntact &&
-          v2Paint1Verify.checks.contentVisible && v2Paint1Verify.checks.noOverflow &&
-          v2Paint1Verify.checks.noOverlap &&
-          v2Paint1Verify.checks.usesRoom && v2Paint1Pixel.voids.length === 0 &&
-          v2Paint1Pixel.invisibleText.length === 0 && v2Paint1Pixel.squeeze.length === 0 &&
-          !v2Paint1Pixel.captureFailed;
-        const p2Gates = v2Verify.checks.notBlank && v2Verify.checks.contentIntact &&
-          v2Verify.checks.contentVisible && v2Verify.checks.noOverflow &&
-          v2Verify.checks.noOverlap &&
-          v2Verify.checks.usesRoom && v2Pixel.voids.length === 0 &&
-          v2Pixel.invisibleText.length === 0 && v2Pixel.squeeze.length === 0 &&
-          !v2Pixel.captureFailed;
-        if (p1Gates && !p2Gates) {
-          logDebug(`v2 repair REGRESSION — paint1 hard gates passed, paint2 failed. Reverting to paint1.`);
-          v2CombinedCss = v2Paint1Css;
-          applyStyleEverywhere(v2CombinedCss, activeShadowRoots);
-          v2Verify = v2Paint1Verify;
-          v2Pixel = v2Paint1Pixel;
-          v2PaintCount = 1;
-          document.documentElement.dataset['revueonPaintCount'] = '1';
-        }
-      }
-    }
-    const v2VerifyMsTotal = Math.round(performance.now() - v2VerifyMs);
-
-    // capture the transformed frame at verify time (CSS still applied).
-    // Stored in chrome.storage.local for the harness to read and save to disk.
-    // This is the ONLY screenshot that shows the transformed state — the post-
-    // marker screenshot is taken after rollback (CSS gone) on hard-gate failure.
-    try {
-      await new Promise<void>((resolve) => {
-        chrome.runtime.sendMessage({ action: 'captureVisibleTab' }, (resp: { ok: boolean; dataUrl?: string }) => {
-          if (chrome.runtime.lastError || !resp?.ok || !resp.dataUrl) { resolve(); return; }
-          chrome.storage.local.set({ revueon_transformed_shot: resp.dataUrl }, () => resolve());
-        });
-      });
-    } catch { /* best effort — don't block the gate */ }
-
-    // HARD GATES (the final check, AFTER repair). These FAIL the run and
-    // roll back: overflow, hidden content, horizontal scrolling, element overlap.
-    // planHonoured is a HARD gate — the solver's emit-time plan (trackCount,
-    // slotToTrack, expectedColumns) must match the rendered DOM. Catches the
-    // track-inheritance defect: if all content auto-places into track 1 despite
-    // the plan saying 2 columns, planHonoured fails.
-    // layoutReshaped is DEMOTED to advisory (logged, not gated). It went
-    // green on a one-column MDN page — a width-delta proxy, not a structural truth.
-    // usesRoom stays a hard gate.
-    // movedAlive is N/A for v2 (zero moves → vacuously true) — NOT in the gate.
-    // squeeze is a HARD gate. captureFailed is a HARD gate.
-    const v2PlanHonoured = assertPlanHonoured(v2Placement.plan);
-    logDebug(`v2 plan: trackCount=${v2Placement.plan.trackCount} expectedColumns=${v2Placement.plan.expectedColumns} slotToTrack=${JSON.stringify(v2Placement.plan.slotToTrack)} honoured=${v2PlanHonoured}`);
-    const v2HardGates = v2Verify.checks.notBlank && v2Verify.checks.contentIntact &&
-      v2Verify.checks.contentVisible && v2Verify.checks.noOverflow && v2Verify.checks.noOverlap &&
-      v2Verify.checks.usesRoom &&
-      v2Pixel.voids.length === 0 && v2Pixel.invisibleText.length === 0 &&
-      v2Pixel.squeeze.length === 0 && !v2Pixel.captureFailed &&
-      v2PlanHonoured;
-    if (!v2HardGates) {
-      const failures = [
-        ...Object.entries(v2Verify.checks).filter(([k, v]) => !v && k !== 'layoutReshaped').map(([k]) => k),
-        ...(v2Pixel.voids.length ? v2Pixel.voids.map((h) => 'void:' + h) : []),
-        ...(v2Pixel.invisibleText.length ? v2Pixel.invisibleText.map((h) => 'invis:' + h) : []),
-        ...(v2Pixel.squeeze.length ? v2Pixel.squeeze.map((h) => 'squeeze:' + h) : []),
-        ...(v2Pixel.captureFailed ? ['captureFailed'] : []),
-        ...(!v2PlanHonoured ? ['planHonoured'] : []),
-      ].join(', ');
-      rollbackFailed('v2 hard gate: ' + failures);
-      logDebug(`v2 ROLLBACK — hard gate: ${failures}`);
-      return { ok: false, message: 'v2 hard gate: ' + failures, spec: v2Spec, verify: v2Verify, paidCalls: paidCalls(), wallMs: Date.now() - t0, placement: { placed: v2Placement.nodesPlaced, proxies: v2Placement.proxyCount, subgridProxies: v2Placement.subgridProxies, singleTrackProxies: v2Placement.singleTrackProxies, subgridChildAssignments: v2Placement.subgridChildAssignments, notPlaceable: v2Placement.nodesNotPlaceable.length, gridTemplate: v2Placement.gridTemplateColumns, mixedProxies: v2Placement.mixedProxies, plan: v2Placement.plan, planHonoured: v2PlanHonoured } };
-    }
-    // Persist + defend + mark applied.
-    const v2Key = storageKey();
-    const v2State = await loadSiteState(v2Key);
-    const v2Id = `style_${Date.now()}`;
-    v2State.enabled = true;
-    v2State.style = { id: v2Id, intent, spec: v2Spec, css: v2CombinedCss, structuralCss: v2StructuralCss, reasoning: v2Spec.reasoning, compileOptions: v2Options, createdAt: Date.now() };
-    await saveSiteState(v2Key, v2State);
-    startDefenseEverywhere(v2CombinedCss, activeShadowRoots);
-    activeSpec = v2Spec;
-    activeOpts = v2Options;
-    activeStructuralCss = v2StructuralCss;
-    startDynamicDefense();
-    ensureEscapeUI(toggleSiteState);
-    markApplied(v2Id);
-
-    const v2TotalMs = Date.now() - t0;
-    // v2ModelMs removed — unused variable (lint: no-unused-vars).
-    logDebug(`v2 LEDGER perceive=${perception.builtInMs}ms roles=[${roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ')}] verify=${v2VerifyMsTotal}ms total=${v2TotalMs}ms paidCalls=${paidCalls()} placed=${v2Placement.nodesPlaced} subgrid=${v2Placement.subgridProxies} singleTrack=${v2Placement.singleTrackProxies} childAssign=${v2Placement.subgridChildAssignments} notPlaceable=${v2Placement.nodesNotPlaceable.length} selectorFallback=${v2Placement.selectorFallback} planCols=${v2Placement.plan.expectedColumns} planHonoured=${v2PlanHonoured} paints=${v2PaintCount}`);
-
-    return {
-      ok: true, spec: v2Spec, verify: v2Verify,
-      pixel: { passed: v2Pixel.passed, voids: v2Pixel.voids.length, invisibleText: v2Pixel.invisibleText.length, squeeze: v2Pixel.squeeze.length, captureFailed: v2Pixel.captureFailed },
-      invisibleBreakdown: v2Breakdown,
-      changeScore: v2Verify.changeScore,
-      modelCoverageFraction: v2Verify.modelCoverageFraction,
-      paidCalls: paidCalls(), wallMs: v2TotalMs, paintCount: v2PaintCount,
-      clusters: perception.clusters.length,
-      placement: { placed: v2Placement.nodesPlaced, proxies: v2Placement.proxyCount, subgridProxies: v2Placement.subgridProxies, singleTrackProxies: v2Placement.singleTrackProxies, subgridChildAssignments: v2Placement.subgridChildAssignments, notPlaceable: v2Placement.nodesNotPlaceable.length, gridTemplate: v2Placement.gridTemplateColumns, mixedProxies: v2Placement.mixedProxies, plan: v2Placement.plan, planHonoured: v2PlanHonoured },
-      usage: roleCalls.length ? { total: roleCalls.reduce((s, c) => s + (c.promptTokens ?? 0) + (c.completionTokens ?? 0), 0) } : undefined,
-      perceptionTruncated: perception.truncated,
-      ledger: {
-        perceiveMs: perception.builtInMs, serializeChars: v2Serialized.length, serializeCharsBefore: lastSerializeBudget.before, roleCalls,
-        applyMs: Math.round(performance.now() - v2ApplyMs), verifyMs: v2VerifyMsTotal,
-        totalMs: v2TotalMs,
-        paidCalls: paidCalls(), repairRounds: v2PaintCount - 1, paintCount: v2PaintCount,
-        opsExecuted: 0, opsRefused: 0, opsRefusedReasons: [],
-      },
-    };
-  }
-
   // ── Design call: Architect + Painter in PARALLEL, then merge ──
   // The Architect sets the structure (composition/layout/canvasLayout/hide); the
   // Painter sets the surface (canvas/variables/paletteMode/styles). Independent
@@ -947,6 +707,36 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   const removedHandles = txnLog.removedHandles();
   const movedHandles = txnLog.movedHandles();
 
+  // ── Structural CSS from the solver (free, no model calls) ──
+  // The solver produces grid placement CSS from the Target Layout IR. The Target
+  // IR is built from the deterministic slot assignment (fallback — G3 will wire
+  // the model's composition relations to drive the Target IR). The structural CSS
+  // is combined with the aesthetic CSS from the compiler.
+  let structuralCss = '';
+  let solvePlacement: ReturnType<typeof computeGridPlacementCss> | null = null;
+  let planHonoured = true;
+  if (!restyleOnly) {
+    document.querySelectorAll('[data-rv-grid]').forEach((el) => el.removeAttribute('data-rv-grid'));
+    document.querySelectorAll('[data-rv-plan-slot]').forEach((el) => el.removeAttribute('data-rv-plan-slot'));
+    const sIR = extractLayoutIR(perception);
+    const sExcludedRaw = detectExclusions(perception.clusters);
+    const sExcludedSet = new Set<string>();
+    for (const [h] of sExcludedRaw) sExcludedSet.add(h);
+    const sAssignment = assignSlots(sIR.nodes);
+    const slotPreferredWidth = new Map<string, 'full' | 'side' | 'content'>();
+    for (const s of DOCUMENTATION_SLOTS) slotPreferredWidth.set(s.id, s.preferredWidth);
+    const sTarget = buildFallbackTargetIR(sAssignment.handleToSlot, slotPreferredWidth);
+    try {
+      const sSolveResult = solve({ ir: sIR, target: sTarget, excluded: sExcludedSet });
+      solvePlacement = computeGridPlacementCss(sSolveResult);
+      structuralCss = solvePlacement.css;
+      planHonoured = assertPlanHonoured(solvePlacement.plan);
+      logDebug(`solver: matched=${sSolveResult.matchedTargets} placed=${solvePlacement.nodesPlaced} notPlaceable=${solvePlacement.nodesNotPlaceable.length} collapsed=${solvePlacement.intermediatesCollapsed} selectorFallback=${solvePlacement.selectorFallback} planCols=${solvePlacement.plan.expectedColumns} planHonoured=${planHonoured}`);
+    } catch (e) {
+      logDebug(`solver failed (non-fatal): ${(e as Error).message}`);
+    }
+  }
+
   // Build modelAddressed set for the model coverage gate.
   const modelAddressed = new Set<string>();
   for (const rule of spec.rules) {
@@ -985,7 +775,10 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const tcCompile = performance.now();
     const compiled = compileSpec(curSpec, perception, opts);
     compileMsTotal += performance.now() - tcCompile;
-    const sanitized = sanitizeCss(compiled.css).css;
+    const aestheticCss = sanitizeCss(compiled.css).css;
+    const sanitized = structuralCss
+      ? sanitizeCss(structuralCss + '\n' + aestheticCss).css
+      : aestheticCss;
     if (!sanitized.trim()) return Promise.reject(new Error('no styles'));
     const tcApply = performance.now();
     applyStyleEverywhere(sanitized, activeShadowRoots);
@@ -1172,7 +965,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   const appliedCss = document.getElementById('revueon-style')?.textContent ?? attempts[attempts.length - 1]?.css ?? '';
   lastAppliedCss = appliedCss;
   state.enabled = true;
-  state.style = { id, intent, spec, css: appliedCss, reasoning: spec.reasoning, compileOptions: options, createdAt: Date.now() };
+  state.style = { id, intent, spec, css: appliedCss, structuralCss: structuralCss || undefined, reasoning: spec.reasoning, compileOptions: options, createdAt: Date.now() };
   const tPersist = performance.now();
   await saveSiteState(key, state);
   const persistMs = Math.round(performance.now() - tPersist);
@@ -1223,6 +1016,9 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     usage: roleCalls.length ? { total: roleCalls.reduce((s, c) => s + (c.promptTokens ?? 0) + (c.completionTokens ?? 0), 0) } : undefined,
     paidCalls: paidCalls(), paintCount: finalPaintCount, ledger,
     perceptionTruncated: perception.truncated,
+    ...(solvePlacement ? {
+      placement: { placed: solvePlacement.nodesPlaced, proxies: solvePlacement.proxyCount, subgridProxies: solvePlacement.subgridProxies, singleTrackProxies: solvePlacement.singleTrackProxies, subgridChildAssignments: solvePlacement.subgridChildAssignments, notPlaceable: solvePlacement.nodesNotPlaceable.length, gridTemplate: solvePlacement.gridTemplateColumns, mixedProxies: solvePlacement.mixedProxies, plan: solvePlacement.plan, planHonoured },
+    } : {}),
   };
 }
 
@@ -1325,22 +1121,23 @@ async function reapplyStored(): Promise<boolean> {
   }
   txnLog.clear(); // fresh session — the log is session-only
   const opts = state.style.compileOptions ?? { paletteMode: state.style.spec.paletteMode };
-  // for v2, use the stored combined CSS directly (the exact CSS from paint2).
-  // Re-compilation with a fresh perception can produce slightly different forceContrast
-  // text colors (stale contrastTargetBgs vs fresh cl.style.background), causing text
-  // to become invisible after undo-fidelity toggle. The stored CSS is authoritative.
+  // When structural CSS is present, use the stored combined CSS directly (the exact
+  // CSS from paint2). Re-compilation with a fresh perception can produce slightly
+  // different forceContrast text colors (stale contrastTargetBgs vs fresh
+  // cl.style.background), causing text to become invisible after undo-fidelity
+  // toggle. The stored CSS is authoritative.
   // Dynamic content is handled by the MutationObserver defense (restyleDynamic).
   const structuralCss = state.style.structuralCss ?? '';
   let css: string;
   if (structuralCss) {
-    // v2 path: stored CSS already includes structural + Painter + forceContrast repair.
+    // Structural CSS present: stored CSS already includes structural + aesthetic + repair.
     css = state.style.css;
     // Still re-stamp handles so [data-rv-c] selectors match on the live page.
     clearHandles();
     perception = perceive();
     activeShadowRoots = perception.shadowRoots;
   } else {
-    // v1 path: re-compile (ops may have changed the DOM).
+    // No structural CSS (restyle-only): re-compile (ops may have changed the DOM).
     const compiled = compileSpec(state.style.spec, perception, opts);
     css = sanitizeCss(compiled.css).css || state.style.css;
   }

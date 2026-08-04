@@ -1,8 +1,5 @@
 /**
- * core/layout/solve — the v1 responsive solver.
- *
- * Behind the runtime flag `layoutCompiler = 'v2'`. PARALLEL PATH — never
- * intertwined with the v1 compile path.
+ * core/layout/solve — the unified responsive solver.
  *
  * The one architectural rule: the AI owns design decisions, the Layout IR owns
  * structure, the SOLVER owns constraints, the compiler owns CSS. The solver
@@ -39,11 +36,7 @@
  * rebuild the tree. matched-targets = 0 is a HARD ERROR.
  */
 
-import type { LayoutIR, LayoutConstraint, ConstraintPriority } from './ir.ts';
-import { currentConstraints } from './ir.ts';
-import type { SlotAssignment } from './assign.ts';
-import type { SlotDef } from './languages/documentation.ts';
-import { DOCUMENTATION_SLOTS } from './languages/documentation.ts';
+import type { LayoutIR, TargetLayoutIR, TargetTrack } from './ir.ts';
 import { assertNoRawPxSizing } from '../laws/index.ts';
 
 // ── Fluid token set (from ARCHITECTURE.md, applied at semantic text levels only) ──
@@ -69,43 +62,40 @@ const FLUID_TOKENS = `
 
 export interface SolveInput {
   ir: LayoutIR;
-  assignment: SlotAssignment;
+  target: TargetLayoutIR;
   excluded: Set<string>;
 }
 
-/** Placement info for one node: which slot, which grid column. */
+/** Placement info for one node: which track, which grid column. */
 export interface PlacementInfo {
-  slotId: string;
-  gridColumn: string;  // '1 / -1' (full) | '1' (side) | '2' (content)
-  preferredWidth: 'full' | 'side' | 'content';
+  trackIndex: number;  // 0-based track index (-1 for spans)
+  gridColumn: string;  // '1 / -1' (full) | '1' | '2' | etc.
+  isSpan: boolean;      // true if spanning all tracks
 }
 
 export interface SolveResult {
   /** Map of handle → placement info for nodes that should be grid items. */
   placement: Map<string, PlacementInfo>;
-  /** The INTENDED grid-template-columns (from the placement map, before DOM resolution). */
+  /** The grid-template-columns string, built from the Target IR's tracks. */
   gridTemplate: string;
-  /** Whether the grid has a side column (intent, before DOM resolution). */
-  hasSide: boolean;
-  /** Raw side-track min-width in px (intent — actual template built from placed proxies). */
-  sideMin: number;
-  /** Raw content-track min-width in px (intent). */
-  contentMin: number;
+  /** Number of tracks in the grid. */
+  trackCount: number;
+  /** Track definitions from the Target IR (for DOM-side CSS emission). */
+  tracks: TargetTrack[];
   /** Per-node CSS declarations (handle → decls) for fluid text + overflow safety. */
   perNodeDecls: Map<string, string[]>;
   rulesEmitted: number;
   matchedTargets: number;
-  // impossibleNodes deleted — populated but never read downstream.
   droppedOptionals: { handle: string; kind: string; reason: string }[];
 }
 
 /** the solver's emit-time plan — what the CSS intends, asserted at verify time. */
 export interface SolverPlan {
-  /** Number of grid tracks (1 or 2). */
+  /** Number of grid tracks. */
   trackCount: number;
-  /** Slot ID → grid-column-start (1 for side/full, 2 for content). */
-  slotToTrack: Record<string, number>;
-  /** Intended distinct column count (=== trackCount when both tracks have proxies). */
+  /** Handle → grid-column-start (1-based, 0 for spans). */
+  handleToColumn: Record<string, number>;
+  /** Intended distinct column count (=== trackCount when all tracks have proxies). */
   expectedColumns: number;
 }
 
@@ -151,195 +141,80 @@ export interface PlacementResult {
   diagnostics: string;
 }
 
-// ── Constraint → CSS translation layer ──────────────────────────
-// Every emitted declaration must originate from a constraint in the IR or from
-// a design token. This function is the explicit translation: one constraint kind
-// at a time. Where a declaration has no corresponding constraint, the constraint
-// is missing from the IR — add it. Do not fall back to geometry.
-
-/** Map a MaxWidth constraint value ('prose'|'full'|'compact'|'side'|'partial') to a CSS value. */
-function maxWidthToken(value?: string): string | null {
-  switch (value) {
-    case 'prose': return 'var(--rv-content-max)';   // character-based measure (intrinsic)
-    case 'compact':
-    case 'side': return 'var(--rv-side-max)';
-    case 'full': return 'none';                       // no max — fill parent
-    case 'partial': return 'var(--rv-content-max)';  // a partial-width node → prose measure
-    default: return null;
-  }
-}
-
-/** Map a Gap constraint value ('s'|'m'|'l') to a CSS token. */
-function gapToken(value?: string): string {
-  if (value === 's') return 'var(--rv-space-s)';
-  if (value === 'l') return 'var(--rv-space-l)';
-  return 'var(--rv-space-m)';  // default
-}
-
-/** Translate a single constraint to CSS declarations. Returns [] for constraints
- *  that are structural (Ordering — preserved by DOM order, not emitted) or that
- *  don't produce a declaration on this element. */
-function constraintToCss(c: LayoutConstraint): string[] {
-  switch (c.kind) {
-    case 'FillParent':
-      return ['width: 100%'];
-    case 'Centered':
-      return ['margin-inline: auto'];
-    case 'MaxWidth': {
-      const v = maxWidthToken(c.value);
-      return v ? [`max-width: ${v}`] : [];
-    }
-    case 'AspectRatio':
-      return c.value ? [`aspect-ratio: ${c.value}`] : [];
-    case 'Gap':
-      return [`gap: ${gapToken(c.value)}`];
-    case 'StackVertically':
-      return ['flex-direction: column'];
-    case 'WrapOnOverflow':
-      return ['flex-wrap: wrap'];
-    case 'Alignment':
-      return c.value && c.value !== 'mixed'
-        ? [`align-items: ${c.value}`, `justify-content: ${c.value === 'stretch' ? 'normal' : c.value}`]
-        : [];
-    case 'Ordering':
-      return [];  // inviolable — preserved by DOM order, never emitted as `order`
-    default:
-      return [];
-  }
-}
-
-// ── Author constraint constants (also emitted as CSS tokens in FLUID_TOKENS) ──
-// the hardcoded 320px content floor is now a named constant, linked to the
-// --rv-content-min token. Both are authorConstraint provenance (the layout
-// language's requirement), never measurements.
-const CONTENT_MIN_PX = 320;  // == --rv-content-min token
-
 // ── Solve (pure: no DOM access, no model calls) ─────────────────────
 
-/** The v1 solver. Takes the Current Layout IR + slot assignment + exclusions,
+/** The unified solver. Takes the Current Layout IR + Target Layout IR + exclusions,
  *  builds a placement map, and returns data for the DOM-grounded CSS emitter.
- *  Pure: no DOM, no model calls. */
+ *  Pure: no DOM, no model calls. The Target IR provides the tracks and slot
+ *  assignments; the solver does not reach back into perception. */
 export function solve(input: SolveInput): SolveResult {
-  const { ir, assignment, excluded } = input;
-  const slotById = new Map<string, SlotDef>();
-  for (const s of DOCUMENTATION_SLOTS) slotById.set(s.id, s);
+  const { ir, target, excluded } = input;
 
-  // ── 1. Validate constraints (detect impossible + dropped optionals) ──
-  // impossibleNodes removed — populated but never read downstream.
-  const droppedOptionals: { handle: string; kind: string; reason: string }[] = [];
-  for (const node of ir.nodes) {
-    const current = currentConstraints(ir.byHandle.get(node.handle)!);
-    const slotId = assignment.handleToSlot.get(node.handle) ?? 'overflow';
-    const slot = slotById.get(slotId);
-    const slotConstraints: LayoutConstraint[] = slot
-      ? slot.constraints.map((c) => ({ kind: c.kind as LayoutConstraint['kind'], priority: c.priority, source: 'language' as const, value: c.value }))
-      : [];
-    mergeConstraints(node.handle, current, slotConstraints, droppedOptionals);
-  }
-
-  // ── 2. Build placement map ───────────────────────────────────────────
-  // CSS-only placement. No wrappers, no moves. Each top-level slot-assigned
-  // node gets a grid-column based on its slot's preferredWidth. A node whose parent
-  // is in the SAME slot is NOT placed (it flows within its parent, which is placed).
-  // Skip position:fixed (viewport-relative, can't be a grid item) and position:absolute
-  // (out-of-flow, doesn't participate in grid layout).
-  const allSlotHandles = new Set<string>();
-  for (const node of ir.nodes) {
-    const slotId = assignment.handleToSlot.get(node.handle) ?? 'overflow';
-    if (slotId !== 'overflow' && !excluded.has(node.handle) &&
-        node.authoredLayout.position !== 'fixed' &&
-        node.authoredLayout.position !== 'absolute')
-      allSlotHandles.add(node.handle);
-  }
-
+  // ── 1. Build placement map from the Target IR ────────────────────────
+  const spansSet = new Set(target.spans);
   const placement = new Map<string, PlacementInfo>();
-  for (const node of ir.nodes) {
-    const slotId = assignment.handleToSlot.get(node.handle) ?? 'overflow';
-    if (slotId === 'overflow' || excluded.has(node.handle)) continue;
-    // skip fixed AND absolute — neither participates in grid layout.
-    if (node.authoredLayout.position === 'fixed' || node.authoredLayout.position === 'absolute') continue;
-    // Skip if parent is in the SAME slot — the parent carries this node.
-    if (node.computedRelationships.parent && allSlotHandles.has(node.computedRelationships.parent)) {
-      const parentSlot = assignment.handleToSlot.get(node.computedRelationships.parent) ?? 'overflow';
-      if (parentSlot === slotId) continue;
-    }
-    const slot = slotById.get(slotId);
-    if (!slot) continue;
-    placement.set(node.handle, {
-      slotId,
-      preferredWidth: slot.preferredWidth,
-      gridColumn: '',  // filled below after we know hasSide
+  for (const [handle, trackIndex] of target.slotAssignment) {
+    if (excluded.has(handle)) continue;
+    const node = ir.byHandle.get(handle);
+    if (node && (node.authoredLayout.position === 'fixed' || node.authoredLayout.position === 'absolute')) continue;
+    placement.set(handle, {
+      trackIndex,
+      gridColumn: spansSet.has(handle) ? '1 / -1' : String(trackIndex + 1),
+      isSpan: spansSet.has(handle),
     });
   }
-
-  // ── 3. Determine grid columns from slot definitions ──────────────────
-  const placedSlots = new Set<string>();
-  for (const info of placement.values()) placedSlots.add(info.slotId);
-  const hasSide = [...placedSlots].some((id) => slotById.get(id)?.preferredWidth === 'side');
-  const sideMin = Math.max(0, ...[...placedSlots]
-    .filter((id) => slotById.get(id)?.preferredWidth === 'side')
-    .map((id) => slotById.get(id)?.minWidth ?? 0));
-  const contentMin = Math.max(CONTENT_MIN_PX, ...[...placedSlots]
-    .filter((id) => slotById.get(id)?.preferredWidth === 'content')
-    .map((id) => slotById.get(id)?.minWidth ?? CONTENT_MIN_PX));
-
-  // Fill in gridColumn now that we know hasSide.
-  for (const info of placement.values()) {
-    if (info.preferredWidth === 'full' || !hasSide) info.gridColumn = '1 / -1';
-    else if (info.preferredWidth === 'side') info.gridColumn = '1';
-    else info.gridColumn = '2';
+  // Spans not in slotAssignment
+  for (const handle of target.spans) {
+    if (excluded.has(handle) || placement.has(handle)) continue;
+    const node = ir.byHandle.get(handle);
+    if (node && (node.authoredLayout.position === 'fixed' || node.authoredLayout.position === 'absolute')) continue;
+    placement.set(handle, { trackIndex: -1, gridColumn: '1 / -1', isSpan: true });
   }
 
-  // ── 4. Build per-node declarations (constraint-driven + fluid text) ──
-  // every emitted declaration originates from a constraint in the IR (slot
-  // constraints) or from a design token (fluid text). No captured-rect values.
+  // ── 2. Grid template from the Target IR's tracks ─────────────────────
+  const gridTemplate = target.tracks.map((t) => `minmax(${t.min}, ${t.max})`).join(' ');
+  const trackCount = target.tracks.length;
+
+  // ── 3. Per-node declarations from slotBehaviour + current constraints ──
   const perNodeDecls = new Map<string, string[]>();
   for (const node of ir.nodes) {
     if (excluded.has(node.handle)) continue;
     const decls: string[] = [];
-    // translate slot constraints to CSS. The slot defines what the layout
-    // language requires for this role (StackVertically, MaxWidth, FillParent, etc.).
-    const slotId = assignment.handleToSlot.get(node.handle) ?? 'overflow';
-    const slot = slotById.get(slotId);
-    if (slot) {
-      for (const sc of slot.constraints) {
-        const constraint: LayoutConstraint = {
-          kind: sc.kind as LayoutConstraint['kind'],
-          priority: sc.priority,
-          source: 'language' as const,
-          value: sc.value,
-        };
-        decls.push(...constraintToCss(constraint));
+    // Slot behaviour from the Target IR
+    const trackIdx = target.slotAssignment.get(node.handle);
+    if (trackIdx != null) {
+      const behaviour = target.slotBehaviour.get(trackIdx);
+      if (behaviour) {
+        if (behaviour.direction === 'column') decls.push('flex-direction: column');
+        else if (behaviour.direction === 'row') decls.push('flex-direction: row');
+        if (behaviour.wrap) decls.push('flex-wrap: wrap');
+        if (behaviour.alignment !== 'stretch') {
+          decls.push(`align-items: ${behaviour.alignment}`);
+        }
       }
     }
-    // Fluid text tokens (design tokens — provenance: token).
+    // Fluid text tokens for semantic text roles
     if (isSemanticText(node.semantic.role)) {
       const ft = fontSizeToken(node.semantic.role);
       if (ft) decls.push(`font-size: ${ft}`);
     }
-    // measured heights → height: auto (intrinsic).
+    // Fixed-width nodes get max-width: 100%
     if (node.authoredLayout.intrinsicSizing === 'fixed') {
       decls.push('max-width: 100%');
     }
-    // Dedup (slot + current constraints may produce the same declaration).
     if (decls.length > 0) perNodeDecls.set(node.handle, [...new Set(decls)]);
   }
 
-  const gridCols = hasSide
-    ? `minmax(min(${sideMin}px, 100%), var(--rv-side-max)) minmax(0, 1fr)`
-    : `minmax(min(${contentMin}px, 100%), 1fr)`;
-
   const matchedTargets = placement.size;
-  // matched-targets = 0 is a HARD COMPILER ERROR.
   if (matchedTargets === 0) {
     throw new Error('solve: matched-targets = 0 — no nodes placed. This is a compiler error.');
   }
 
   return {
-    placement, gridTemplate: gridCols, hasSide, sideMin, contentMin,
+    placement, gridTemplate, trackCount, tracks: target.tracks,
     perNodeDecls,
-    rulesEmitted: 1 /* :root */ + placement.size + perNodeDecls.size,
-    matchedTargets, droppedOptionals,
+    rulesEmitted: 1 + placement.size + perNodeDecls.size,
+    matchedTargets, droppedOptionals: [],
   };
 }
 
@@ -435,25 +310,16 @@ function nearestCommonAncestor(els: HTMLElement[]): HTMLElement | null {
   return null;
 }
 
-// deterministic slot priority for proxy slot assignment (no model input).
-const SLOT_PRIORITY = ['masthead', 'toc', 'nav-local', 'main', 'footer'];
-function slotPriority(slotId: string): number {
-  const i = SLOT_PRIORITY.indexOf(slotId);
-  return i === -1 ? 99 : i;
-}
-
 /** Execute the placement against the live DOM and emit all structural CSS.
  *  Zero DOM mutation — only CSS (and data-* attribute stamps for targeting) is emitted.
  *
  *  PROXY PLACEMENT. For each placed handle, the PLACEMENT PROXY is the
  *  NCA's direct child that is an ancestor-or-self of the handle. We place the
  *  PROXY with grid-column — its background, border and padding are preserved,
- *  nothing is collapsed. A proxy whose subtree spans >1 non-overflow slot is
- *  "mixed": it gets subgrid (, replacing display:contents) and its children
- *  are recursed. That is the ONLY use of subgrid. Two handles sharing a proxy:
- *  keep one, it takes the highest-priority slot (SLOT_PRIORITY — no randomness).
+ *  nothing is collapsed. A proxy whose subtree spans >1 track is
+ *  "mixed": it gets subgrid and its children are recursed. That is the ONLY use of subgrid.
  *
- *  template from ACTUALLY placed proxies (not the intended set).
+ *  Template from the Target IR (not recomputed from placed proxies).
  *  min-width:0 propagated up the NCA ancestor chain to body. min-height:100vh
  *  DELETED (compiler was making a design decision). overflow-x:clip BANNED.
  *
@@ -478,7 +344,7 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     nodesPlaced: 0, nodesNotPlaceable: [...nodesNotPlaceable],
     intermediatesCollapsed: 0, subgridProxies: 0, singleTrackProxies: 0,
     subgridChildAssignments: 0, gridTemplateColumns: '',
-    plan: { trackCount: 0, slotToTrack: {}, expectedColumns: 0 },
+    plan: { trackCount: 0, handleToColumn: {}, expectedColumns: 0 },
     intermediatesSkipped: 0, skippedReasons: [],
     mixedProxies: 0, proxyCount: 0, diagnostics: '(empty)',
   });
@@ -505,39 +371,26 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     return empty(`:root {${FLUID_TOKENS}\n}`);
   }
 
-  // d. Build handle data: for each placed handle, its element + slotId.
-  const handleData: { handle: string; el: HTMLElement; slotId: string }[] = [];
+  // d. Build handle data: for each placed handle, its element + track info.
+  const handleData: { handle: string; el: HTMLElement; trackIndex: number; gridColumn: string; isSpan: boolean }[] = [];
   for (const [handle, info] of placement) {
     const el = placedEls.get(handle);
     if (!el) continue;  // already in nodesNotPlaceable from step b
-    handleData.push({ handle, el, slotId: info.slotId });
+    handleData.push({ handle, el, trackIndex: info.trackIndex, gridColumn: info.gridColumn, isSpan: info.isSpan });
   }
 
-  // For an element, return the set of non-overflow slots of placed handles in its subtree.
-  const nonOverflowSlotsUnder = (el: HTMLElement): Set<string> => {
-    const slots = new Set<string>();
+  // For an element, return the set of non-span track indices of placed handles in its subtree.
+  const tracksUnder = (el: HTMLElement): Set<number> => {
+    const tracks = new Set<number>();
     for (const hd of handleData) {
-      if (hd.slotId === 'overflow') continue;
-      if (el === hd.el || el.contains(hd.el)) slots.add(hd.slotId);
+      if (hd.isSpan) continue;  // spans are full-width, not in a specific track
+      if (el === hd.el || el.contains(hd.el)) tracks.add(hd.trackIndex);
     }
-    return slots;
+    return tracks;
   };
 
-  // a proxy earns subgrid ONLY if its descendants span both a side-track
-  // slot AND a content slot (two different slot KINDS, not just two slot IDs).
-  // A proxy spanning two content slots (e.g. main + comments) does NOT earn
-  // subgrid — it goes to a single track. This stops track inheritance.
-  const slotById = new Map<string, SlotDef>();
-  for (const s of DOCUMENTATION_SLOTS) slotById.set(s.id, s);
-  const earnsSubgrid = (slots: Set<string>): boolean => {
-    let hasSide = false, hasContent = false;
-    for (const s of slots) {
-      const pw = slotById.get(s)?.preferredWidth;
-      if (pw === 'side') hasSide = true;
-      if (pw === 'content') hasContent = true;
-    }
-    return hasSide && hasContent;
-  };
+  // a proxy earns subgrid ONLY if its subtree spans more than 1 distinct track.
+  const earnsSubgrid = (tracks: Set<number>): boolean => tracks.size > 1;
 
   // e. BFS proxy placement. Level 0 = NCA's direct children containing placed handles.
   //     Non-mixed proxy (≤1 non-overflow slot) → place with grid-column.
@@ -546,8 +399,8 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   //     don't auto-place into a narrow side track and squeeze content.
   let singleTrackProxies = 0;
   let subgridChildAssignments = 0;
-  const placedProxies = new Map<HTMLElement, string>();  // proxy el → assigned slotId
-  const contentsEls: HTMLElement[] = [];  // earned-subgrid proxies 
+  const placedProxies = new Map<HTMLElement, number>();  // proxy el → trackIndex
+  const contentsEls: HTMLElement[] = [];  // earned-subgrid proxies
   const fullWidthEls: HTMLElement[] = [];  // non-handle grid items → full width
   const seenEls = new Set<HTMLElement>();  // dedup across BFS levels
 
@@ -566,21 +419,14 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     const nextLevel: HTMLElement[] = [];
     for (const candidate of currentLevel) {
       if (placedProxies.has(candidate) || contentsEls.includes(candidate)) continue;
-      const slots = nonOverflowSlotsUnder(candidate);
-      if (!earnsSubgrid(slots)) {
-        // does NOT earn subgrid — place as a single-track grid item.
-        // Assign the highest-priority non-overflow slot (deterministic; "keep one"
-        // when multiple handles share this proxy). Multi-slot proxies that don't
-        // span side+content (e.g. two content slots) go here — no track inheritance.
-        let slotId = 'overflow';
-        for (const s of slots) {
-          if (slotId === 'overflow' || slotPriority(s) < slotPriority(slotId)) slotId = s;
-        }
-        placedProxies.set(candidate, slotId);
-        if (slots.size > 1) singleTrackProxies++;
+      const tracks = tracksUnder(candidate);
+      if (!earnsSubgrid(tracks)) {
+        // Single-track proxy — place in its one track (or full-width if only spans).
+        let trackIdx = -1;
+        for (const t of tracks) trackIdx = t;
+        placedProxies.set(candidate, trackIdx);
       } else {
-        // EARNS subgrid — spans both a side track and a content track.
-        // every child gets explicit grid-column (derived from its slot).
+        // Multi-track proxy — earns subgrid. Children get explicit grid-column.
         contentsEls.push(candidate);
         mixedProxies++;
         for (const child of candidate.children) {
@@ -599,20 +445,8 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     currentLevel = nextLevel;
   }
 
-  // f. compute grid-template-columns from the ACTUALLY placed proxies.
-  // (slotById was constructed before the BFS.)
-  const placedSlots = new Set<string>();
-  for (const slotId of placedProxies.values()) placedSlots.add(slotId);
-  const hasSide = [...placedSlots].some((id) => slotById.get(id)?.preferredWidth === 'side');
-  const sideMin = Math.max(0, ...[...placedSlots]
-    .filter((id) => slotById.get(id)?.preferredWidth === 'side')
-    .map((id) => slotById.get(id)?.minWidth ?? 0));
-  const contentMin = Math.max(CONTENT_MIN_PX, ...[...placedSlots]
-    .filter((id) => slotById.get(id)?.preferredWidth === 'content')
-    .map((id) => slotById.get(id)?.minWidth ?? CONTENT_MIN_PX));
-  const gridTemplate = hasSide
-    ? `minmax(min(${sideMin}px, 100%), var(--rv-side-max)) minmax(0, 1fr)`
-    : `minmax(min(${contentMin}px, 100%), 1fr)`;
+  // f. Grid template from the Target IR (not recomputed from placed proxies).
+  const gridTemplate = result.gridTemplate;
 
   // g. Emit layout on the NCA, PRESERVING its existing formatting context.
   // Establish container containment for container-query responsiveness.
@@ -715,10 +549,11 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   // j. Emit placement on proxies. The proxy's box (bg/border/padding) is preserved.
   // stamp each placed proxy with data-rv-plan-slot for the plan assertion.
   // for flex NCA, use flex properties; for grid/block NCA, use grid-column.
-  for (const [el, slotId] of placedProxies) {
-    const slot = slotById.get(slotId);
-    const pw = slot?.preferredWidth ?? 'full';
-    el.setAttribute('data-rv-plan-slot', slotId);
+  // Determine which tracks are "side" (max includes side-max) for flex sizing.
+  const trackIsSide = result.tracks.map((t) => t.max.includes('side-max'));
+
+  for (const [el, trackIdx] of placedProxies) {
+    el.setAttribute('data-rv-plan-slot', String(trackIdx));
     const sel = buildSelector(el);
     let cssSelector: string;
     if (sel && selectorIsUnique(sel, el)) {
@@ -730,18 +565,17 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     }
     // flex NCA → flex properties; grid/block NCA → grid-column.
     let decls: string[];
-    if (ncaIsFlex) {
-      if (pw === 'side' && hasSide) {
+    if (trackIdx < 0) {
+      // No tracks (only spans) → full width
+      decls = ncaIsFlex ? ['flex: 0 0 100%'] : ['grid-column: 1 / -1'];
+    } else if (ncaIsFlex) {
+      if (trackIdx < trackIsSide.length && trackIsSide[trackIdx]) {
         decls = ['flex: 0 0 min(var(--rv-side-max), 100%)', 'max-width: var(--rv-side-max)'];
-      } else if (pw === 'content' && hasSide) {
-        decls = ['flex: 1 1 0', 'min-width: var(--rv-content-min)'];
       } else {
-        decls = ['flex: 0 0 100%'];
+        decls = ['flex: 1 1 0', 'min-width: var(--rv-content-min)'];
       }
     } else {
-      const gridColumn = (pw === 'full' || !hasSide) ? '1 / -1'
-        : pw === 'side' ? '1' : '2';
-      decls = [`grid-column: ${gridColumn}`];
+      decls = [`grid-column: ${trackIdx + 1}`];
     }
     blocks.push(`${cssSelector} {\n${decls.map((d) => `  ${d};`).join('\n')}\n}`);
   }
@@ -782,17 +616,18 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
   assertNoRawPxSizing(css);
 
   // build the emit-time plan — what the CSS INTENDS, asserted at verify time.
-  const trackCount = hasSide ? 2 : 1;
-  const slotToTrack: Record<string, number> = {};
-  for (const slotId of placedSlots) {
-    const pw = slotById.get(slotId)?.preferredWidth ?? 'full';
-    slotToTrack[slotId] = (pw === 'content' && hasSide) ? 2 : 1;
+  const trackCount = result.trackCount;
+  const handleToColumn: Record<string, number> = {};
+  for (const [handle, info] of placement) {
+    handleToColumn[handle] = info.isSpan ? 0 : info.trackIndex + 1;
   }
   // expectedColumns = number of tracks that actually have placed proxies.
-  const track1Used = Object.values(slotToTrack).includes(1);
-  const track2Used = Object.values(slotToTrack).includes(2);
-  const expectedColumns = (track1Used ? 1 : 0) + (track2Used ? 1 : 0) || 1;
-  const plan: SolverPlan = { trackCount, slotToTrack, expectedColumns };
+  const placedTracks = new Set<number>();
+  for (const trackIdx of placedProxies.values()) {
+    if (trackIdx >= 0) placedTracks.add(trackIdx);
+  }
+  const expectedColumns = placedTracks.size || 1;
+  const plan: SolverPlan = { trackCount, handleToColumn, expectedColumns };
 
   // nodesPlaced = handles placed (every found handle gets a proxy by
   // construction — the BFS always terminates at the handle's non-mixed element).
@@ -808,36 +643,6 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
     intermediatesSkipped: 0, skippedReasons,
     mixedProxies, proxyCount: placedProxies.size, diagnostics,
   };
-}
-
-// ── Constraint merge (priority sort, never "first wins") ─────────────
-
-/** Merge current (law) + slot (language) constraints. Required beats preferred
- *  beats optional. If two REQUIRED of the same kind conflict, mark IMPOSSIBLE.
- *  Dropped optionals are logged. Used for validation only. */
-function mergeConstraints(
-  handle: string,
-  current: LayoutConstraint[],
-  slot: LayoutConstraint[],
-  droppedOptionals: { handle: string; kind: string; reason: string }[],
-): void {
-  const byKind = new Map<string, LayoutConstraint[]>();
-  for (const c of [...current, ...slot]) {
-    const arr = byKind.get(c.kind) ?? [];
-    arr.push(c);
-    byKind.set(c.kind, arr);
-  }
-  for (const [, candidates] of byKind) {
-    const priorityRank: Record<ConstraintPriority, number> = { required: 0, preferred: 1, optional: 2 };
-    candidates.sort((a, b) => priorityRank[a.priority] - priorityRank[b.priority]);
-    // impossibleNodes removed — the conflict is logged in droppedOptionals.
-    const winner = candidates[0];
-    for (let i = 1; i < candidates.length; i++) {
-      if (candidates[i].priority === 'optional') {
-        droppedOptionals.push({ handle, kind: candidates[i].kind, reason: `dropped for ${winner.priority} ${candidates[i].kind}` });
-      }
-    }
-  }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
