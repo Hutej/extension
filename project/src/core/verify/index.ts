@@ -280,11 +280,21 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   // A restyle-only (pure palette) request isn't claiming to be a redesign, so the
   // "is this a real redesign" checks (layoutReshaped + usesRoom) are computed for the
   // report but NOT enforced in `passed` when skipReshapeChecks is set. The by-eye-
-  // safety bars (notBlank, noOverflow, noOverlap, contrastOk, covered,
+  // safety bars (notBlank, noOverflow, noOverlap, contrastOk,
   // contentIntact, contentVisible) still hold — a palette change must not break
   // the page. The recolor pixel detector is skipped at the call site (no `before`).
   const enforcedReshape = skipReshapeChecks ? true : (layoutReshaped && usesRoom);
-  const passed = notBlank && noOverflow && noOverlap && contrastOk && changed && coherent && covered && contentIntact && contentVisible && movedAlive && enforcedReshape && !reflowSkipped;
+  // Proxy gates RETIRED: changed, coherent, covered, layoutReshaped, usesRoom
+  // can all pass on a page that visibly did not change (they measure side-effects
+  // or taste, not declared intent). They stay in `checks` + `details` as advisory
+  // signals. The structural conformance checks in verify/conformance.ts compare
+  // the rendered result against the TargetLayoutIR — those are the real gates.
+  // Physics gates (notBlank, noOverflow, noOverlap, contrastOk, contentIntact,
+  // contentVisible, movedAlive) and the reflow check (!reflowSkipped) stay as
+  // hard gates — they cannot false-pass on a broken or unchanged page.
+  // No aesthetic score — not as a gate, not as a number.
+  void enforcedReshape; // computed for reporting only, no longer in `passed`
+  const passed = notBlank && noOverflow && noOverlap && contrastOk && contentIntact && contentVisible && movedAlive && !reflowSkipped;
   return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentIntact, contentVisible, layoutReshaped, usesRoom, movedAlive, reflowAddressed }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, collapseTargets: [...collapsedRegions], contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), contentWidthBefore: beforeW, contentWidthAfter: afterW, repeatedAccent, contrastNoHandle: noHandle.count, movedDead, reflowSkippedHandles, details };
 }
 
