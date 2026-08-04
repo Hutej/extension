@@ -132,7 +132,17 @@ LAYOUT:
 - {"relation":"proseColumns","subject":"article-body","count":2} — multi-column text flow inside a prose region (for page layout tracks, use trackAllocation instead)
 
 GROUPING:
-- {"relation":"groupWith","subject":"card","reference":"card2"} — subject grouped with reference
+- {"relation":"groupWith","subject":"card","reference":"card2"} — subject grouped with reference (advisory — sets display:flex; use stackDirection/wrapBehavior for direction)
+
+MOTION (gated by pack.motionAnimated — still packs refuse):
+- {"relation":"transitionTier","subject":"card","tier":1} — transition duration at motion scale tier N (0=none,1=fast,2=normal,3=deliberate)
+- {"relation":"transitionEasing","subject":"card","easing":"smooth"} — easing character (smooth|sharp|spring|linear)
+- {"relation":"entranceDelay","subject":"card","tier":1} — entrance stagger at motion scale tier N
+- {"relation":"hoverElevate","subject":"card","levels":1} — hover lift + shadow step (transform-based, no layout)
+- {"relation":"focusRing","subject":"button","role":"primary"} — focus-visible outline using pack accent (role: primary|secondary|muted)
+
+INTERACTION:
+- {"relation":"movable","subject":"panel"} — opt-in movable element (transform-based, no DOM mutation)
 
 STRUCTURAL:
 - {"relation":"hide","subject":"ad-or-void"} — remove the subject (guarded — the engine REFUSES hide on a low-confidence role)

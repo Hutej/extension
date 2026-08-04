@@ -10,7 +10,8 @@
     "typecheck": "tsc --noEmit",
     "test": "node --experimental-strip-types tests/compile.test.ts",
     "test:e2e": "node --experimental-strip-types --env-file=.env tests/popup.test.ts",
-    "lint": "eslint src/ --ext .ts"
+    "lint": "eslint src/ --ext .ts",
+    "audit:wiring": "node --experimental-strip-types scripts/audit-wiring.ts"
   },
   "devDependencies": {
     "@types/chrome": "^0.2.2",
