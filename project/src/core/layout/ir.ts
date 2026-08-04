@@ -202,6 +202,135 @@ export function currentConstraints(node: LayoutIRNode): LayoutConstraint[] {
   return out;
 }
 
+// ── Target Layout IR ────────────────────────────────────────────────
+
+/** A track in the target layout, expressed as a proportional allocation
+ *  (fr) with a browser-native minmax() floor — never a measured width.
+ *  The solver emits `minmax(min, max)` for each track. */
+export interface TargetTrack {
+  /** The minmax() floor. A pack token (var(--rv-side-max)),
+   *  a content-intrinsic keyword (min-content, fit-content, auto), or 0.
+   *  Never a measured pixel width — Law 0. */
+  min: string;
+  /** The track's sizing max: 'Xfr' for flexible tracks (e.g. '1fr', '2fr'),
+   *  or a bounded CSS value for fixed tracks (e.g. 'var(--rv-side-max)'). */
+  max: string;
+}
+
+/** Per-slot behaviour: how the contents of a track are arranged. */
+export interface TargetSlotBehaviour {
+  /** Stacking direction: 'column' (vertical) or 'row' (horizontal). */
+  direction: 'row' | 'column';
+  /** Whether the slot reflows (wraps) when content exceeds the track.
+   *  The browser decides when — auto-fit, minmax() — never a computed breakpoint. */
+  wrap: boolean;
+  /** Cross-axis alignment. */
+  alignment: 'start' | 'center' | 'end' | 'stretch';
+}
+
+/** A constraint the solver could not satisfy, with the reason.
+ *  Unsatisfiable is a reported outcome, never a silent drop. */
+export interface UnsatisfiableConstraint {
+  handle: string;
+  constraint: string;
+  reason: string;
+}
+
+/** The Target Layout IR — the declared destination page, expressed as
+ *  constraints the browser re-solves. The solver receives this and the
+ *  Current IR, and nothing else. Per-element cosmetic declarations continue
+ *  through the existing compiler path — they are NOT part of this IR.
+ *
+ *  Sufficiency: every decision the solver needs is in this IR. If the solver
+ *  needs to reach back into perception, that decision belongs here, not in
+ *  the solver. The Current IR provides existing-structure context (NCA,
+ *  formatting context); the Target IR provides the desired structure. */
+export interface TargetLayoutIR {
+  /** The archetype the model chose (one of ARCHETYPES). */
+  archetype: string;
+  /** Track definitions — one per grid track. The solver emits
+   *  `grid-template-columns: minmax(min, max) ...`. */
+  tracks: TargetTrack[];
+  /** Slot assignments: handle → track index (0-based into tracks).
+   *  Handles not in this map are not placed (they flow in the overflow). */
+  slotAssignment: Map<string, number>;
+  /** Handles that span all tracks (grid-column: 1 / -1). */
+  spans: string[];
+  /** Adjacent region pairs (handle → handle). The solver uses these to
+   *  verify adjacent regions are in adjacent tracks. */
+  adjacency: [string, string][];
+  /** Reading order: handles in the order they should be read. The solver
+   *  asserts DOM order is preserved (no `order` or arbitrary grid-area). */
+  readingOrder: string[];
+  /** Per-track behaviour: track index → how contents are arranged. */
+  slotBehaviour: Map<number, TargetSlotBehaviour>;
+  /** Constraints the solver could not satisfy, with reasons. Empty when
+   *  all constraints are satisfiable. Never a silent drop. */
+  unsatisfiable: UnsatisfiableConstraint[];
+}
+
+/** The archetype shortlist. The model picks from this list; it does not
+ *  invent one. Each archetype defines a default track structure expressed
+ *  as fr proportions + browser-native bounds (minmax), never measured widths. */
+export const ARCHETYPES: Record<string, { tracks: TargetTrack[]; description: string }> = {
+  'single-column': {
+    tracks: [{ min: 'var(--rv-content-min)', max: '1fr' }],
+    description: 'One column. Everything flows vertically. Use for articles, simple pages.',
+  },
+  'two-column-rail-left': {
+    tracks: [
+      { min: 'min-content', max: 'var(--rv-side-max)' },
+      { min: 'var(--rv-content-min)', max: '1fr' },
+    ],
+    description: 'Two columns, side rail on the left. Track 0 = rail, track 1 = content.',
+  },
+  'two-column-rail-right': {
+    tracks: [
+      { min: 'var(--rv-content-min)', max: '1fr' },
+      { min: 'min-content', max: 'var(--rv-side-max)' },
+    ],
+    description: 'Two columns, side rail on the right. Track 0 = content, track 1 = rail.',
+  },
+  'three-column': {
+    tracks: [
+      { min: 'min-content', max: 'var(--rv-side-max)' },
+      { min: 'var(--rv-content-min)', max: '1fr' },
+      { min: 'min-content', max: 'var(--rv-side-max)' },
+    ],
+    description: 'Three columns: nav + content + aside. Track 0 = left rail, 1 = content, 2 = right rail.',
+  },
+};
+
+/** The set of valid archetype ids. */
+export const ARCHETYPE_IDS = new Set<string>(Object.keys(ARCHETYPES));
+
+/** Build a default Target Layout IR from a deterministic slot assignment
+ *  (the fallback when the model emits no composition relations). Converts
+ *  the Documentation slot definitions into track-based Target IR.
+ *  Pure: takes the slot assignment + current IR as data. */
+export function buildFallbackTargetIR(
+  handleToSlot: Map<string, string>,
+  slotPreferredWidth: Map<string, 'full' | 'side' | 'content'>,
+): TargetLayoutIR {
+  const hasSide = [...handleToSlot.values()].some((slot) => slotPreferredWidth.get(slot) === 'side');
+  const archetype = hasSide ? 'two-column-rail-left' : 'single-column';
+  const tracks = ARCHETYPES[archetype].tracks;
+
+  const slotAssignment = new Map<string, number>();
+  const spans: string[] = [];
+  for (const [handle, slot] of handleToSlot) {
+    const pw = slotPreferredWidth.get(slot);
+    if (pw === 'full' || !hasSide) {
+      spans.push(handle);
+    } else if (pw === 'side') {
+      slotAssignment.set(handle, 0);
+    } else {
+      slotAssignment.set(handle, 1);
+    }
+  }
+  return { archetype, tracks, slotAssignment, spans, adjacency: [], readingOrder: [], slotBehaviour: new Map(), unsatisfiable: [] };
+}
+
 // ── Immutability ────────────────────────────────────────────────────
 
 /** Deep-freeze (dev) -- the immutability contract, not a convention. Recursively Object.freeze;
