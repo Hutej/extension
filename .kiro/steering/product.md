@@ -152,7 +152,25 @@ global layout optimization.
 
 ## Current position
 
-**BUILD SWEEP 1F — CONVERGENCE — BUILT, NOT VERIFIED BY EYE.** Gate: typecheck + build + lint +
+**BUILD SWEEP 1G — CONFORMANCE — BUILT, NOT VERIFIED BY EYE.** Gate: typecheck (with `tests/`) +
+build + lint + `npm run audit:wiring` on a clean tree. No site runs, no paid calls. BUILD FIRST,
+VERIFY LATER. This sweep: (H1) three relationship relations (adjacentTo, readBefore, prominentFirst)
+now satisfy through placement (slotAssignment adjustment), not validation + unsatisfiable. The
+honest accessibility constraint replaces the Law 0 misattribution: Law 0 governs measurement-derived
+lengths, not ordering; grid placement IS browser-solved ordering. (H2) wiring audit hole closed —
+emission path (solver-read IR fields: slotAssignment, spans, tracks, slotBehaviour), not validation
+path (adjacency/readingOrder/unsatisfiable). 46/46 pass. (H3) 131 orphan-export warnings triaged —
+every one gets a verdict (wired up or deleted), no informational tier. (H4) file split — content.ts
+(1585→1218 lines) extracts 6 implementation blocks; transform.ts (743→412 lines) splits into 9
+relation-domain modules. Pure moves, no behaviour change. (H5) constraints removed — reasoning_effort
+raised to 'medium' for the Architect; no intent cap in the relational path; Law 0 rule 5 amended
+(dvh/svh); --rv-side-max proportional bound; 65ch prose-only (--rv-prose-max); call budget restated
+as 1 round trip of latency + cost separately. (H6) 10 structural conformance checks comparing rendered
+DOM against TargetLayoutIR; proxy gates (changed, coherent, covered, layoutReshaped, usesRoom)
+demoted to advisory; no aesthetic score. (H7) docs — 18_UNIFIED_PLAN.md, ARCHITECTURE.md, risk
+register H21 correction, product.md updated.
+
+**Prior: BUILD SWEEP 1F — CONVERGENCE — BUILT, NOT VERIFIED BY EYE.** Gate: typecheck + build + lint +
 `npm run audit:wiring`. The v1/v2 fork is DELETED; there is now ONE pipeline. The `layoutCompiler`
 flag is gone (no `RV_LAYOUT_COMPILER` env, no popup dev toggle). Pipeline: perceive → Architect+Painter
 (parallel) → mergeSpecs → ops → solver (structural CSS via `computeGridPlacementCss`) → compileSpec

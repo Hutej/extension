@@ -81,6 +81,77 @@ Three pixel-provenance leaks are now pack-derived instead of hardcoded:
 `columnCount` is renamed to `proseColumns` (multi-column text flow). Page layout tracks no longer route
 through `columnCount`; they route through the `trackAllocation` composition relation.
 
+## BUILD SWEEP 1G — Conformance
+
+### Three relationship relations made real (H1)
+
+`adjacentTo`, `readBefore`, `prominentFirst` were silently dropped in 1F (populated IR fields the
+solver never reads). They now satisfy through **placement** — they adjust `slotAssignment`, which
+the solver emits as `grid-column`. That IS the emission path. The `adjacency`/`readingOrder` arrays
+remain as records for conformance verification, not emission.
+
+The honest accessibility constraint replaces the Law 0 misattribution: Law 0 governs measurement-
+derived lengths, not ordering. Ordering is a valid IR constraint kind, and grid placement IS
+browser-solved ordering. The real constraint: visual order diverging from DOM order breaks screen
+readers and tab sequence. Handling: prefer placement (grid-column, preserves DOM order via auto-row-
+placement) over CSS `order` (breaks it). Where DOM order must change, use the DOM op path
+(`reorderBefore` with a real `MutationReason`).
+
+`prominentFirst` now consumes the focal point perception (`perception.spatial.focalPoint`), which
+was computed but never had a consumer.
+
+### Wiring audit hole closed (H2)
+
+A validation path is not an emission path. The audit now checks that a composition relation's case
+block modifies a solver-read IR field (`slotAssignment`, `spans`, `tracks`, `slotBehaviour`), not just
+pushes to `adjacency`/`readingOrder`/`unsatisfiable` (which the solver never reads). A relation whose
+sole possible outcome is unsatisfiable fails the audit. After the fix: 46/46 pass.
+
+### File split (H4)
+
+`content.ts` (1585→1218 lines) extracts 6 implementation blocks into modules. `transform.ts`
+(743→412 lines) splits the relation switch into 9 domain modules (spacing, typography, hierarchy,
+surface, color, layout, motion, ops, interaction). Pure moves, no behaviour change. The dispatcher
+iterates relations in original order (accent budget + style merge are order-sensitive).
+
+### Constraints removed (H5)
+
+- `reasoning_effort`: per-role. Architect 'medium' (structure needs thinking), Painter 'low' (parallel
+  — adds cost, not latency), Critic 'low'. `RV_EFFORT` env is a global floor.
+- Intent cap: not found in the relational path (deleted with the old enum system). Bounded by model
+  token budget + time budget.
+- Law 0 rule 5 amended: viewport units (vw, vh) are a defect when the viewport is not the reference.
+  Where it genuinely is, use dvh/svh — never vh or vw for content sizing.
+- `--rv-side-max`: 280px → `min(280px, 30cqi)` (proportional bound: 30% of container inline-size,
+  capped at 280px).
+- `65ch`: renamed `--rv-content-max` → `--rv-prose-max`. Applied ONLY to prose roles
+  (article-body, metadata, toc) via `max-width` in per-node declarations. Never to listings, navs,
+  or chrome.
+- Call budget restated: one round trip of latency (parallel design stage), cost reported separately
+  (call count). 2 calls + 1 round trip = happy path.
+
+### Conformance verification (H6)
+
+10 structural checks in `verify/conformance.ts`, all comparing rendered DOM against the
+`TargetLayoutIR` (not taste):
+1. Archetype conformance — declared vs measured column count. Distinguishes "chose single-column"
+   (PASS) from "declared multi but collapsed" (FAIL).
+2. Track conformance — declared fr ratios vs measured track proportions (25% tolerance).
+3. Slot conformance — every declared slot renders in its assigned track.
+4. Reading order conformance — rendered + DOM order match declared order (accessibility).
+5. Spacing conformance — every emitted spacing traces to a pack scale step.
+6. Type ramp conformance — sizes on ramp, monotonic across hierarchy.
+7. Accent budget — accent count within `maxAccentCount`.
+8. Elevation — shadow/border from pack scale.
+9. Measure — prose line length + line-height in readable band.
+10. Unsatisfiable reporting — every solver-unsatisfiable constraint in report. A run with
+    unsatisfiables is not a clean run.
+
+Proxy gates retired: `changed`, `coherent`, `covered`, `layoutReshaped`, `usesRoom` demoted to
+advisory (can pass on an unchanged page). Physics gates (notBlank, noOverflow, noOverlap,
+contrastOk, contentIntact, contentVisible, movedAlive) + reflow check stay as hard gates.
+**No aesthetic score** — not as a gate, not as a number.
+
 ## The Layout IR type schema (`src/core/layout/ir.ts`)
 
 Four sections per node, no more. **Immutability is a contract, not a convention:** the Current IR is

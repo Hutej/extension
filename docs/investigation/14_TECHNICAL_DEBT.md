@@ -32,7 +32,16 @@
 - **~~v1 is still the default; v2 is behind a flag~~** — **BUILD SWEEP 1F RESOLVED**: the v1/v2 fork is DELETED; there is now ONE pipeline and the `layoutCompiler` flag is gone. This item described the codebase at investigation time.
 - **Three "loosenings" were reverted in Step 9** (overflow-x:auto, contentsHandles exemption, overflow-wrap) — the codebase has a history of gaming gates.
 - **~~v1/v2 fork is sprinkled through `content.ts`~~** — **BUILD SWEEP 1F RESOLVED**: the fork is deleted; the sprinkled `if (v2)` branches are gone with it. Historical only.
-- **`content.ts` is a 1603-line god orchestrator** coupled to every `core/*` module.
+- **`content.ts` is a 1603-line god orchestrator** coupled to every `core/*` module. → **BUILD SWEEP 1G
+  PARTIALLY RESOLVED**: content.ts split to 1218 lines (6 implementation blocks extracted to modules).
+  Still above the ~800-line target — the remaining bulk is orchestration (runStyleImpl), fast-path
+  runners, listeners, SPA navigation. The entrypoint is significantly thinner but not yet a pure
+  wiring file.
+- **`transform.ts` 742-line switch** — **BUILD SWEEP 1G RESOLVED**: split to 412 lines with 9
+  relation-domain modules. The dispatcher iterates relations in original order (order-sensitive
+  accent budget + style merge preserved).
+- **131 orphan-export warnings** — **BUILD SWEEP 1G H3 target**: every one gets a verdict (wired
+  up or deleted), no informational tier. After triage, the audit fails on any new orphan.
 - **Two rollback paths** (CSS rollback on failure vs DOM-ops undo on user action) — the failure path doesn't undo ops (RC3).
 - **No circuit breakers** in product loops (`startDefense` re-insert, retry re-billing); the fix-cycle cap exists only in the harness (`product.md` S9.6).
 
