@@ -29,9 +29,9 @@
 - **Fixture mode leak to production** (`content.ts:1099` `RV_FIXTURES`) — only build-time-gated; no runtime assertion that `FIXTURE_MODE==='off'` in a production build. A dev build accidentally promoted → stale canned designs, no model call.
 
 ## Architectural debt
-- **v1 is still the default; v2 is behind a flag** — BUILD SWEEP 1E reviewed and decided to KEEP v1 as default (see ARCHITECTURE.md for the full reasoning). v2 cannot be the default until it passes the by-eye gate.
+- **~~v1 is still the default; v2 is behind a flag~~** — **BUILD SWEEP 1F RESOLVED**: the v1/v2 fork is DELETED; there is now ONE pipeline and the `layoutCompiler` flag is gone. This item described the codebase at investigation time.
 - **Three "loosenings" were reverted in Step 9** (overflow-x:auto, contentsHandles exemption, overflow-wrap) — the codebase has a history of gaming gates.
-- **v1/v2 fork is sprinkled through `content.ts`** despite `ARCHITECTURE.md:17` claiming "the pipeline forks once; no conditionals sprinkled through compile." The two paths ARE intertwined in the orchestrator.
+- **~~v1/v2 fork is sprinkled through `content.ts`~~** — **BUILD SWEEP 1F RESOLVED**: the fork is deleted; the sprinkled `if (v2)` branches are gone with it. Historical only.
 - **`content.ts` is a 1603-line god orchestrator** coupled to every `core/*` module.
 - **Two rollback paths** (CSS rollback on failure vs DOM-ops undo on user action) — the failure path doesn't undo ops (RC3).
 - **No circuit breakers** in product loops (`startDefense` re-insert, retry re-billing); the fix-cycle cap exists only in the harness (`product.md` S9.6).

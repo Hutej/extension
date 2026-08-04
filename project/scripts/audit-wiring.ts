@@ -53,14 +53,12 @@ const allSrc = [...srcContent.values()].join('\n');
   // Transform engine — case statements + COMPOSITION_RELATIONS.
   const transformPath = join(srcDir, 'core/compile/transform.ts');
   const transform = readFileSync(transformPath, 'utf8');
-  // Composition relations are resolved by resolveComposition, not case statements.
+  // Composition relations are resolved by resolveComposition (in relations/composition.ts),
+  // not case statements in transform.ts. Check both files for the COMPOSITION_RELATIONS set.
   const compositionRels = new Set<string>();
-  for (const m of transform.matchAll(/'([a-z]+)'/g)) {
-    const name = m[1];
-    // Check if it's in the COMPOSITION_RELATIONS set
-  }
-  // Simpler: extract names from the COMPOSITION_RELATIONS set literal.
-  const compMatch = transform.match(/COMPOSITION_RELATIONS\s*=\s*new Set\(\[([\s\S]*?)\]\)/);
+  const compModulePath = join(srcDir, 'core/compile/relations/composition.ts');
+  const compModule = readFileSync(compModulePath, 'utf8');
+  const compMatch = compModule.match(/COMPOSITION_RELATIONS\s*=\s*new Set\(\[([\s\S]*?)\]\)/);
   if (compMatch) {
     for (const m of compMatch[1].matchAll(/'([^']+)'/g)) compositionRels.add(m[1]);
   }

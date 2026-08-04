@@ -8,8 +8,10 @@ This is not just an extension — this is an AI agent that lives in your browser
 
 - **One architectural rule:** the AI owns design decisions, the Layout IR owns structure, the solver
   owns constraints, the compiler owns CSS. No layer takes over another's responsibility.
-- **Pipeline flag:** `layoutCompiler = 'v1' | 'v2'` (default `v1`; `RV_LAYOUT_COMPILER` env + popup dev
-  toggle). v2 is the Layout IR -> Solver path; the two are not intertwined.
+- **One pipeline (BUILD SWEEP 1F):** the v1/v2 fork is DELETED; the `layoutCompiler` flag is gone
+  (no `RV_LAYOUT_COMPILER` env, no popup dev toggle). One pipeline: perceive → Architect+Painter
+  parallel → mergeSpecs → ops → solver (`computeGridPlacementCss`) → `compileSpec` → combine → apply
+  → verify → repair → persist.
 - **Ponytail ladder:** walk it before every change (below). Stop at the first rung that holds.
 
 ## Repo map (root = Revueon/)
@@ -29,8 +31,8 @@ This is not just an extension — this is an AI agent that lives in your browser
 4. **All or nothing:** any original-looking region after a redesign = FAILURE, even if every automated check is green. The human eye is the final gate.
 6. **Do not rebuild `perceive/`** unless the audit proves it wrong. No vision/screenshot input to the design model. (Enrichment of `perceive/` is allowed — additive fields like `designRole`; a rebuild is not.)
 7. **Security/git:** `.env` stays gitignored (public repo); push only after proven slices. Quality over speed.
-8. **Layout flag:** `layoutCompiler = 'v1' | 'v2'` (default `v1`). v2 is built behind the flag; never
-   intertwine the two paths.
+8. **One pipeline (BUILD SWEEP 1F):** the `layoutCompiler` flag is deleted — there is ONE pipeline,
+   not a v1/v2 fork.
 
 ## Run the harness
 
