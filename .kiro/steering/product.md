@@ -73,8 +73,9 @@ Each phase gets an explicit `GATE:` line. A phase is not done until its gate pas
   the moved P2.5 gate rebase decision and the pixel-gate standing rule.
 - **P2.6 Stress sites BBC + YouTube — 5/5-applied beauty gate.** GATE: 5/5 sites applied + by-eye
   beauty on BBC + YouTube under the exclusion registry.
-- **P3 Migration completion + BRUTAL DELETION.** Only AFTER the v2 flag is switched on and parity
-  holds. Deletion is LAST, never first. GATE: v2 is the default path, v1 deleted, parity holds on the grid.
+- **P3 Migration completion + BRUTAL DELETION.** The v1/v2 fork was deleted in BUILD SWEEP 1F
+  (convergence) — there is now ONE pipeline. Residual dead code from the old fork, if any, is
+  deleted here. GATE: one pipeline, parity holds on the grid vs the ORIGINAL PAGE.
 - **P4 Prevention-by-construction** — repair becomes structurally rare.
 - **P5 Structural identity + sticky roles — DONE.** Handles derived from DOM structure (tag +
   nth-of-type chain + stable attrs), not appearance. Role/slot stability 1.000 on all 5 sites.
@@ -151,7 +152,25 @@ global layout optimization.
 
 ## Current position
 
-**BUILD SWEEP 1E — REACH — BUILT, NOT VERIFIED BY EYE.** Gate: typecheck + build + lint only.
+**BUILD SWEEP 1F — CONVERGENCE — BUILT, NOT VERIFIED BY EYE.** Gate: typecheck + build + lint +
+`npm run audit:wiring`. The v1/v2 fork is DELETED; there is now ONE pipeline. The `layoutCompiler`
+flag is gone (no `RV_LAYOUT_COMPILER` env, no popup dev toggle). Pipeline: perceive → Architect+Painter
+(parallel) → mergeSpecs → ops → solver (structural CSS via `computeGridPlacementCss`) → compileSpec
+(aesthetic CSS) → combine → apply → verify → repair → persist. Happy path: 2 paid calls (Architect +
+Painter in parallel). This sweep: (G1) Target Layout IR — `TargetLayoutIR` in `layout/ir.ts` with
+archetype, tracks (fr + minmax() floors), slotAssignment, spans, adjacency, readingOrder, slotBehaviour,
+unsatisfiable; 4 archetypes; `buildFallbackTargetIR()` + `resolveComposition()`. (G2) Composition
+vocabulary — 9 new relations (archetype, assignSlot, trackAllocation, adjacentTo, spansTracks,
+readBefore, stackDirection, wrapBehavior, prominentFirst); typed, validated, resolved into Target IR,
+satisfiable by the solver, present in the Architect prompt; no magnitude is a pixel; solver emits
+fr/minmax()/fit-content. (G3) wiring audit — `npm run audit:wiring` is a permanent gate (missing
+RELATION_SPECS/prompt/validator/emission, unread PackPrinciples field, or exported symbol with no
+non-test caller). (G4) pixel leaks fixed — hoverElevate translateY, focusRing outline width/offset,
+movable keyboard step now pack-derived; groupWith returned to advisory. (G5) `columnCount` renamed
+to `proseColumns`; page layout tracks route through `trackAllocation`. (G6) v1/v2 fork deleted; flag
+removed. (G7-G8) docs + investigation notes updated to reflect the single-pipeline convergence.
+
+**Prior: BUILD SWEEP 1E — REACH — BUILT, NOT VERIFIED BY EYE.** Gate: typecheck + build + lint only.
 This sweep: (F1) fixture comment corrected — the fixture system uses chrome.storage.local
 (not window.__rvFixtureResponse); default compiler decision: v1 stays default (v2 by-eye
 gate consistently failed, DOM ops/motion/interaction are dead in v2); selector strategy

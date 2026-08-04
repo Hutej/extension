@@ -4,6 +4,13 @@ A hostile, evidence-grounded investigation of the Revueon browser extension.
 **Default stance: every subsystem is broken until the code proves otherwise.**
 Every claim cites `file:line` / function names. Speculation is marked **UNVERIFIED**.
 
+> **UPDATE (BUILD SWEEP 1F — convergence):** this investigation was written against the two-pipeline
+> codebase (`layoutCompiler = 'v1' | 'v2'`, `RV_LAYOUT_COMPILER` env, popup dev toggle). That fork is
+> now DELETED. There is ONE pipeline and the flag is gone. Every reference below to "v1"/"v2", the
+> `layoutCompiler` flag, `RV_LAYOUT_COMPILER`, "the v2 path", or the two pipelines being separate is
+> HISTORICAL — read it as describing the codebase at investigation time, not the current architecture.
+> See `docs/ARCHITECTURE.md` ("One pipeline") for the current state.
+
 ## Method
 Three parallel `explore` agents read **every** module in `project/src/` end-to-end and traced call chains. The 7 highest-impact claims were then re-verified directly with `read`/`grep` (shadow-DOM resolution gap, dead `clearRoleCache`, dead `bestNonBroken`, unfixed `.slice(-6)` hash, un-frozen `Map` in `deepFreeze`, dead popup auth UI, false "zero DOM mutation"). Additional cited references (`exclusions.ts:116`, `transaction.ts:95`, `documentation.ts:38`) were spot-checked and confirmed.
 

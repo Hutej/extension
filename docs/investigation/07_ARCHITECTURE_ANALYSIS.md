@@ -44,6 +44,9 @@ CSS rollback (failure, `content.ts:913`) vs DOM-ops undo (user action, `:1225`) 
 Grid auto-places rows in DOM order; `order`/`grid-area` are banned for a11y (`solve:34-36`). A footer-first DOM template renders the footer above main, and the redesign **cannot correct it**. A fundamental limitation of the "reading order inviolable + CSS-only" combination.
 
 ### W6 — v1/v2 fork is sprinkled, not separated
+> **UPDATE (BUILD SWEEP 1F — convergence):** RESOLVED by deletion. The v1/v2 fork is gone; there is
+> now ONE pipeline and the `layoutCompiler` flag is deleted. This weakness described the codebase at
+> investigation time, not the current architecture.
 `ARCHITECTURE.md:17` says "the pipeline forks once; no shared mutable state, no conditionals sprinkled through compile." But `content.ts` is full of `if (v2)`/`if (layoutCompiler==='v2')` branches. The two paths ARE intertwined in the orchestrator.
 
 ### W7 — No circuit breakers in product loops

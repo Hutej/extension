@@ -3,6 +3,11 @@
 > Beginner-friendly architecture overview of the Revueon browser extension.
 > Every claim cites `file:line` or a function name. Speculation is marked **UNVERIFIED**.
 
+> **UPDATE (BUILD SWEEP 1F — convergence):** the two-pipeline / `layoutCompiler` flag described below
+> is DELETED. There is now ONE pipeline; `RV_LAYOUT_COMPILER` and the popup dev toggle are gone. Read
+> the v1/v2 sections below as HISTORICAL (the codebase at investigation time). See
+> `docs/ARCHITECTURE.md` ("One pipeline") for the current architecture.
+
 ## What is Revueon?
 
 Revueon is a **Chrome MV3 browser extension** built with the [WXT](https://wxt.dev) framework that reshapes *any* website from a plain-English prompt — entirely inside the user's browser. It never calls the site's backend. The user types a vibe (e.g. "1970s sci-fi paperback cover"), and Revueon re-skins and (in the v2 path) re-lays-out the page using a hosted AI model plus a deterministic CSS compiler.

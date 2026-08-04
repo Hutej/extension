@@ -18,30 +18,68 @@ and measurement-derived values are purged. Container queries replace viewport br
 existing formatting context is preserved, not flattened. Read the law before any layout emission
 change.
 
-## Pipelines: v1 legacy and v2 new (behind a flag)
+## One pipeline (BUILD SWEEP 1F — convergence)
 
-`layoutCompiler = 'v1' | 'v2'`. Default `'v1'` (BUILD SWEEP 1E decision: v2 cannot
-be the default yet — the by-eye gate consistently failed on v2 across P2.5 steps
-1-9; MDN renders as 1 visual column, Wikipedia+GitHub overflow/collapse on SPA
-re-render. v2 is CSS-only by design so DOM ops, motion, and interaction relations
-are dead on arrival there. v1 is NOT dead weight — it is the path that produces
-designs the user accepts. The relational vocabulary + transformation engine +
-motion + interaction + DOM ops all flow through `compile/transform.ts →
-compile/index.ts`, the v1 path. Override via `RV_LAYOUT_COMPILER` env var and a
-popup dev toggle. The two implementations are NOT intertwined — the pipeline
-forks once; no shared mutable state, no conditionals sprinkled through `compile/`.
-Once v2 is stable we switch the flag and delete v1 — that deletion comes later.
+The v1/v2 fork is DELETED. There is now ONE pipeline; the `layoutCompiler` flag is gone
+(no `RV_LAYOUT_COMPILER` env, no popup dev toggle).
 
-**v1 (legacy, current default):**
-`perceive -> reason (DesignSpec) -> compile(transform+laws) -> verify -> repair(patches CSS) -> apply`
+```
+perceive -> Architect+Painter (parallel) -> mergeSpecs -> ops -> solver (structural CSS via
+computeGridPlacementCss) -> compileSpec (aesthetic CSS) -> combine -> apply -> verify -> repair -> persist
+```
 
-**v2 (new):**
-`perceive -> semantic model -> extractLayoutIR (Current) -> transform (relations+archetype+slots ->
-Target IR) -> solver (Target IR -> CSS) -> verify (hard gates + advisory scores) -> repair
-(re-solve, never patch CSS) -> apply`
+Happy path: **2 paid calls** — Architect (structure/relations/pack) and Painter (surface) run in
+parallel on the same perception. The relation language SURVIVES: the model still emits relations;
+the engine maps relations → Target IR constraints. The solver sits BELOW the engine and emits
+structural CSS via `computeGridPlacementCss`; `compileSpec` emits aesthetic CSS. The two are combined
+and applied, then verified, repaired (re-solve, never patch CSS), and persisted.
 
-The relation language SURVIVES in v2. The model still emits relations; the engine still maps
-relations→Target IR constraints. The solver sits BELOW the engine.
+## Target Layout IR
+
+The declared destination page expressed as constraints the browser re-solves. `TargetLayoutIR` in
+`layout/ir.ts` carries: `archetype` (from a shortlist), `tracks` (fr proportions + `minmax()` floors —
+never measured widths), `slotAssignment` (handle → track index), `spans`, `adjacency`, `readingOrder`,
+`slotBehaviour` (per-track direction/wrap/alignment), `unsatisfiable` (reported, never silent).
+
+Four archetypes: `single-column`, `two-column-rail-left`, `two-column-rail-right`, `three-column`.
+
+`buildFallbackTargetIR()` converts a deterministic `assignSlots` result → Target IR when the model
+emits no composition relations. `resolveComposition()` in `compile/transform.ts` builds the Target IR
+from the model's composition relations when they are present.
+
+## Composition vocabulary (BUILD SWEEP 1F)
+
+Nine new relations let the model declare page structure (added to the existing relation language):
+
+`archetype`, `assignSlot`, `trackAllocation` (fr ratios with `minmax()` floors), `adjacentTo`,
+`spansTracks`, `readBefore`, `stackDirection`, `wrapBehavior`, `prominentFirst`.
+
+Each is a typed relation, validated at the boundary, resolved into the Target IR, satisfiable by the
+solver, and present in the Architect prompt. **No magnitude is a pixel.** The solver emits
+`fr` / `minmax()` / `fit-content` — never fixed tracks derived from measured widths.
+
+## Wiring audit (permanent gate)
+
+`npm run audit:wiring` is a permanent gate. It fails when:
+- a vocabulary relation is missing `RELATION_SPECS` / prompt / validator / emission, or
+- a `PackPrinciples` field is never read, or
+- an exported symbol has no non-test caller (warn).
+
+Run it with `npm run audit:wiring`.
+
+## Pixel leaks fixed (BUILD SWEEP 1F)
+
+Three pixel-provenance leaks are now pack-derived instead of hardcoded:
+- `hoverElevate` `translateY` — from `spacingScale`/`borderScale`.
+- `focusRing` outline width/offset — from `borderScale`.
+- `movable` keyboard step — from `spacingScale`.
+
+`groupWith` returned to advisory (display:flex only, no forced direction).
+
+## columnCount split (BUILD SWEEP 1F)
+
+`columnCount` is renamed to `proseColumns` (multi-column text flow). Page layout tracks no longer route
+through `columnCount`; they route through the `trackAllocation` composition relation.
 
 ## The Layout IR type schema (`src/core/layout/ir.ts`)
 
@@ -88,7 +126,7 @@ for flex-column/block containers; `Alignment` (preferred) for flex-row container
 
 A layout language is NOT CSS and NOT HTML. It defines slots, relationships, constraints, grid
 preference and priority rules. Each slot declares: `id`, `allowedRoles[]`, `preferredWidth`,
-`flow`, `ordering`, `minWidth`, `constraints[]` (each with priority). v1 ships exactly ONE language:
+`flow`, `ordering`, `minWidth`, `constraints[]` (each with priority). The pipeline ships exactly ONE language:
 **Documentation** (predictable, information-dense, mostly static, responsive, few JS layout
 assumptions). Do NOT build a second language yet.
 
@@ -113,17 +151,17 @@ matched-targets = 0):
 
 ## Solver stages (`src/core/layout/solve.ts`)
 
-IN SCOPE for v1, all five:
+IN SCOPE, all five:
 1. validate constraints
 2. propagate parent constraints to children
 3. choose the Flex or Grid algorithm per container
 4. normalize sizing (auto, %, `clamp()`, `minmax()`)
 5. emit responsive CSS
 
-OUT OF SCOPE for v1 — do NOT build: complex constraint relaxation, multi-pass optimization, global
+OUT OF SCOPE — do NOT build: complex constraint relaxation, multi-pass optimization, global
 layout optimization.
 
-Conflict handling in v1 is a deterministic priority sort, NEVER "first wins": required beats
+Conflict handling is a deterministic priority sort, NEVER "first wins": required beats
 preferred beats optional. Every dropped optional constraint is logged with its node and reason. If
 two REQUIRED constraints conflict, mark that node IMPOSSIBLE and hand it to the ops fallback. Never
 silently pick one.
@@ -198,7 +236,7 @@ ADVISORY SCORES (computed, logged, never blocking):
 
 ## Repair-as-re-solve + ops fallback
 
-Repair today patches emitted CSS. In v2 it becomes: **Target IR -> relax constraints -> re-resolve ->
+Repair is: **Target IR -> relax constraints -> re-resolve ->
 re-emit CSS.** Repair must not edit CSS directly; it modifies the constraint graph and regenerates.
 
 **OPS FALLBACK:** keep move/remove/reorder. They are no longer primary — they are the fallback for
@@ -214,7 +252,7 @@ layer STAYS; it defines the invariants the solver must respect.
 | `languages/documentation.ts` | the Documentation layout language as PURE DATA (slots + constraints) |
 | `assign.ts` | deterministic slot assignment + invariant assertions |
 | `candidates.ts` | deterministic composition detection -> 3–5 archetype candidates |
-| `solve.ts` | the v1 solver (validate, propagate, flex/grid, normalize, emit CSS) |
+| `solve.ts` | the solver (validate, propagate, flex/grid, normalize, emit CSS) |
 | `verify.ts` | hard gates + advisory scores on the applied DOM |
 
 ## IR stability probe methodology + measured numbers
@@ -259,7 +297,7 @@ role-label instability (treat role as advisory; the IR structure is stable), rev
 viewport-coupled thresholds, or pull role-anchored stable handles ahead of the solver —
 which would stabilize BOTH role and YouTube identity by decoupling from geometry/signature.
 
-## Model transport (unchanged by v1/v2 split)
+## Model transport
 
 Architect (structure/relations/pack) + Painter (surface) run in parallel on `@cf/zai-org/glm-5.2`;
 Critic repairs on `@cf/zai-org/glm-4.7-flash`. Archetype choice folds into the existing Architect call
@@ -292,18 +330,15 @@ succeeded. Design quality is the planner's job and the user's eye. Whether the r
 happened is asserted at emit time from the solver's own plan, never inferred from pixels.
 - Cheating a gate is the only way to fail a step. An honest blocked report is a success.
 
-## Selector strategy (BUILD SWEEP 1E)
+## Selector strategy
 
-Both v1 and v2 now use **structural selectors as primary**, with `[data-rv-c]` as a
-genuine fallback. At perception time, each cluster gets a `structuralSelector`
-computed from the DOM: nearest stable attribute (id/data-testid/role/aria-label/
-name) + nth-of-type chain, uniqueness-checked. The compile path uses
-`cluster.structuralSelector` when available, falling back to `cluster.selector`
-(`[data-rv-c="handle"]`) when no stable anchor exists. The fallback count is
-reported as `selectorFallbackCount` in the compile result — a metric for how
-often the structural path fails. The v2 solver already had this (buildSelector
-in `solve.ts`); v1 now has it too (buildCssSelector in `perceive/index.ts`).
-One selector strategy across both paths — no more divergence.
+The pipeline uses **structural selectors as primary**, with `[data-rv-c]` as a genuine
+fallback. At perception time, each cluster gets a `structuralSelector` computed from the
+DOM: nearest stable attribute (id/data-testid/role/aria-label/name) + nth-of-type chain,
+uniqueness-checked. The compile path uses `cluster.structuralSelector` when available,
+falling back to `cluster.selector` (`[data-rv-c="handle"]`) when no stable anchor exists.
+The fallback count is reported as `selectorFallbackCount` in the compile result — a metric
+for how often the structural path fails.
 
 ## Motion layer (BUILD SWEEP 1E — F4)
 
