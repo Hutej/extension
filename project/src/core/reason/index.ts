@@ -129,7 +129,7 @@ SURFACE:
 - {"relation":"surfaceTier","subject":"card","tier":1} — surface treatment (0=flat,1=raised,2=overlay)
 
 LAYOUT:
-- {"relation":"columnCount","subject":"article-body","count":2} — column count within the region
+- {"relation":"proseColumns","subject":"article-body","count":2} — multi-column text flow inside a prose region (for page layout tracks, use trackAllocation instead)
 
 GROUPING:
 - {"relation":"groupWith","subject":"card","reference":"card2"} — subject grouped with reference

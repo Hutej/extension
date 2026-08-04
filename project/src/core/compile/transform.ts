@@ -594,7 +594,7 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
         }
 
         // ── Layout ──
-        case 'columnCount': {
+        case 'proseColumns': {
           addLayout(ruleFor(c.handle), { columnCount: String(rel.count) });
           break;
         }

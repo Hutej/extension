@@ -79,7 +79,7 @@ export type Subject = string;
  *  - Colour: accentRole, accentOn
  *  - Width: widthFraction
  *  - Surface: radiusCorner, borderWeight, surfaceTier
- *  - Layout: columnCount
+ *  - Layout: proseColumns
  *  - Grouping: groupWith
  *  - Structural ops: hide, reorderBefore, moveTo
  */
@@ -160,7 +160,7 @@ export type RelationStatement =
 
   // ── Layout ──
   /** "this region has 3 columns" — column-count within the region. */
-  | { relation: 'columnCount'; subject: Subject; count: number }
+  | { relation: 'proseColumns'; subject: Subject; count: number }
 
   // ── Structural ops ──
   /** "remove this region" — hide (display:none). Gated by confidence (same hard-safety rule as the old hidden emphasis). */
@@ -271,7 +271,7 @@ export const RELATION_SPECS: RelationSpec[] = [
   { relation: 'radiusCorner', hasReference: false, magnitudeField: 'step', magnitudeKind: 'step', description: 'per-corner radius at scale step N' },
   { relation: 'borderWeight', hasReference: false, magnitudeField: 'step', magnitudeKind: 'step', description: 'border width at scale step N' },
   { relation: 'surfaceTier', hasReference: false, magnitudeField: 'tier', magnitudeKind: 'rank', description: 'surface treatment (0=flat, 1=raised, 2=overlay)' },
-  { relation: 'columnCount', hasReference: false, magnitudeField: 'count', magnitudeKind: 'count', description: 'column count within the region' },
+  { relation: 'proseColumns', hasReference: false, magnitudeField: 'count', magnitudeKind: 'count', description: 'multi-column text flow inside a prose region (not page layout — use trackAllocation for that)' },
   { relation: 'hide', hasReference: false, description: 'remove the subject (display:none)' },
   { relation: 'reorderBefore', hasReference: true, description: 'reorder subject before reference in DOM order' },
   { relation: 'moveTo', hasReference: true, description: 'relocate subject into reference' },
