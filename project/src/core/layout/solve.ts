@@ -45,7 +45,14 @@ import { assertNoRawPxSizing } from '../laws/index.ts';
 // container-relative units (fr, minmax, fit-content). The type/spacing clamp() are
 // tokens (provenance: token), not measurements.
 // --rv-content-min replaces the hardcoded 320px content floor (now a token).
-// --rv-content-max is a character-based prose measure (ch = intrinsic, not px).
+// --rv-prose-max is a character-based prose measure (ch = intrinsic, not px).
+// Applied ONLY to prose regions (article-body, metadata, toc) — never to
+// listings, navs, or chrome. A listing or nav constrained to 65ch would
+// truncate or wrap badly; the prose measure is for reading flow.
+// --rv-side-max is a proportional bound: at most 30% of the container inline
+// size, capped at 280px. The cap prevents a giant side rail on wide screens;
+// the proportional floor lets it shrink on narrow containers (cqi = container
+// query inline-size — the NCA has container-type: inline-size).
 
 const FLUID_TOKENS = `
   --rv-step-0: clamp(1rem, 0.95rem + 0.3vw, 1.125rem);
@@ -54,8 +61,8 @@ const FLUID_TOKENS = `
   --rv-space-m: clamp(16px, 2vw, 24px);
   --rv-space-l: clamp(24px, 3vw, 40px);
   --rv-content-min: 320px;
-  --rv-content-max: 65ch;
-  --rv-side-max: 280px;
+  --rv-prose-max: 65ch;
+  --rv-side-max: min(280px, 30cqi);
 `;
 
 // ── Types ────────────────────────────────────────────────────────────
@@ -197,6 +204,13 @@ export function solve(input: SolveInput): SolveResult {
     if (isSemanticText(node.semantic.role)) {
       const ft = fontSizeToken(node.semantic.role);
       if (ft) decls.push(`font-size: ${ft}`);
+    }
+    // Prose measure: constrain line length for reading-flow roles only.
+    // --rv-prose-max (65ch) applies to article-body, metadata, toc — never
+    // to listings, navs, or chrome (a listing constrained to 65ch truncates
+    // or wraps badly; the measure is for prose reading flow).
+    if (isProse(node.semantic.role)) {
+      decls.push('max-width: var(--rv-prose-max)');
     }
     // Fixed-width nodes get max-width: 100%
     if (node.authoredLayout.intrinsicSizing === 'fixed') {
@@ -651,6 +665,12 @@ export function computeGridPlacementCss(result: SolveResult): PlacementResult {
 function isSemanticText(role: string): boolean {
   return role === 'article-body' || role === 'page-title' || role === 'metadata' ||
     role === 'listing' || role === 'comments' || role === 'toc';
+}
+
+/** Is this role a prose reading-flow region? (The 65ch prose measure applies
+ *  here — never to listings, navs, or chrome.) */
+function isProse(role: string): boolean {
+  return role === 'article-body' || role === 'metadata' || role === 'toc';
 }
 
 /** Map a role to a fluid clamp() token. page-title → step-2 (display), body → step-0. */

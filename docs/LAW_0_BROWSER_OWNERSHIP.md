@@ -34,6 +34,11 @@
 5. **Container queries, not viewport breakpoints.** Establish containment on
    the regions we transform. Express component-level responsive behaviour with
    `@container`. The default is container-relative, not viewport-relative.
+   Viewport units (`vw`, `vh`) are a defect when the viewport is not the actual
+   reference frame — a sidebar, a dialog, a shadow root each have their own
+   context. Where the viewport genuinely IS the reference (full-bleed canvas,
+   fixed positioning), use `dvh`/`svh` (dynamic/small viewport) — never `vh`
+   or `vw` for content sizing; they ignore the scrollbar and the URL bar.
 
 ## Named violations and their fixes
 

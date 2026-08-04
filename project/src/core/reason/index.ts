@@ -376,7 +376,7 @@ async function callModel(role: Role, intent: string, perception: string, account
   let httpRequests = 0;
 
   while (true) {
-    const effort = reasoning && useReasoningEffort ? AI_CONFIG.styleReasoningEffort : undefined;
+    const effort = reasoning && useReasoningEffort ? perRoleEffort(role) : undefined;
     const bodyObj: Record<string, unknown> = {
       model,
       max_completion_tokens: AI_CONFIG.styleMaxTokens,
@@ -483,6 +483,19 @@ function retryWaitMs(bodyTxt: string, transient: number): number {
  *  Matches the Cloudflare Workers AI GLM family (glm-5.2 + glm-4.7-flash both
  *  support reasoning_effort). */
 function isReasoningModel(model: string): boolean { return /glm/i.test(model); }
+
+/** Per-role reasoning effort. The Architect gets 'medium' (structure needs
+ *  thinking); the Painter gets 'low' (runs in parallel — adds cost, not
+ *  latency); the Critic gets the shared 'low' (fast repair, not design). The
+ *  RV_EFFORT env override is a global floor: if set to 'medium', all roles use
+ *  at least 'medium'. */
+function perRoleEffort(role: Role): 'low' | 'medium' {
+  const floor = AI_CONFIG.styleReasoningEffort; // RV_EFFORT global floor
+  const perRole = role === 'architect' ? AI_CONFIG.architectReasoningEffort
+    : role === 'painter' ? AI_CONFIG.painterReasoningEffort
+    : AI_CONFIG.styleReasoningEffort;
+  return floor === 'medium' ? 'medium' : perRole;
+}
 
 async function fetchWithTimeout(url: string, options: RequestInit, timeoutMs: number): Promise<Response> {
   const controller = new AbortController();

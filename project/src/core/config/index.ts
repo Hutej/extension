@@ -2,6 +2,14 @@
  * core/config — model + pipeline settings.
  * No fallback chain (honest error > recolor), raised maxTokens,
  * DEBUG gated on dev env.
+ *
+ * Call budget: the design stage runs Architect + Painter IN PARALLEL — that
+ * is ONE round trip of LATENCY (wall-clock = max(architect, painter)), but
+ * TWO calls of COST (both charge). The Critic (if triggered) is a second
+ * round trip (one more call, one more latency step). Report both numbers
+ * always: latency in round trips, cost in call count. A run with 2 paid calls
+ * and 1 round trip is the happy path. 3 calls + 2 round trips means the
+ * Critic ran (a repair). 2 calls + 1 round trip is NOT 2 round trips.
  */
 
 export const AI_CONFIG = {
@@ -19,12 +27,22 @@ export const AI_CONFIG = {
   // JSON truncation when the model thinks at higher effort.
   styleMaxTokens: 24000,
 
-  // Latency knob. The DESIGN THINKING lives in our system prompt (baked lessons),
-  // so we ask for 'low' effort: near-full quality at a fraction of the wait.
-  // 6a test: 'medium' timed out at 130s (hard abort) on GLM 5.2 / Cloudflare
-  // Workers AI — the model's thinking time dominates wall-clock. 'low' runs
-  // 59-90s with good quality (invisible=0, coverage=1.0). REVERT to 'low'.
-  // Env-overridable (RV_EFFORT) kept for future re-testing with a faster model.
+  // Per-role reasoning effort. The Architect makes STRUCTURE decisions — it
+  // needs to think. We built a designer and told it not to think; that was
+  // the defect. The Painter runs in PARALLEL with the Architect (same wall-
+  // clock round trip), so its effort adds to COST but not to LATENCY. We keep
+  // the Painter at 'low' for cost; the Architect goes to 'medium' for quality.
+  // The Critic is a fast repair pass — stays at 'low' (it corrects, it doesn't
+  // design). Env override: RV_EFFORT sets a global floor (all roles use at
+  // least that effort).
+  // ponytail: 'medium' for the Architect on GLM 5.2 / Cloudflare Workers AI
+  // timed out at 130s in a prior test — but that was the SINGLE shared
+  // styleReasoningEffort. The Architect now has its own 70s timeout
+  // (architectTimeoutMs); if 'medium' exceeds it, the call fails fast and the
+  // Painter + Critic carry the design (a partial design beats a timeout).
+  architectReasoningEffort: (process.env.RV_EFFORT_ARCHITECT ?? 'medium') as 'low' | 'medium',
+  painterReasoningEffort: (process.env.RV_EFFORT_PAINTER ?? 'low') as 'low' | 'medium',
+  // Legacy: the shared effort, used by the Critic and the restyle-only path.
   styleReasoningEffort: (process.env.RV_EFFORT ?? 'low') as 'low' | 'medium',
 
   // Time budget (replaces the call-count cap). The wall-clock owns the run:
