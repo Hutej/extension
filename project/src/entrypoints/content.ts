@@ -35,7 +35,7 @@ import { liveDom, executeOps } from '@/core/ops/execute';
 import { extractLayoutIR, buildFallbackTargetIR } from '@/core/layout/ir';
 import { detectExclusions } from '@/core/layout/exclusions';
 import { assignSlots } from '@/core/layout/assign';
-import { DOCUMENTATION_SLOTS } from '@/core/layout/languages/documentation';
+import { getLanguage, LANGUAGE_IDS, proposeLanguageCandidates, formatCandidates } from '@/core/layout/languages';
 import { solve, computeGridPlacementCss, type SolverPlan } from '@/core/layout/solve';
 import { assertPlanHonoured } from '@/core/layout/plan-assert';
 
@@ -212,6 +212,12 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   const serialized = serializePerception(perception);
   // redact sensitive data (form values, credentials) before sending to the model.
   const serializedRedacted = redactSensitiveData(serialized);
+  // The Architect chooses the layout language. Perception proposes a shortlist;
+  // the Architect sees ONLY those candidates (their ids + one-line descriptions),
+  // never all seven, never the full slot tables. Measurement proposes; the model
+  // decides.
+  const candidates = proposeLanguageCandidates(perception);
+  const architectPerception = serializedRedacted + '\nLAYOUT CANDIDATES (pick one `language`):\n' + formatCandidates(candidates);
   const serializeChars = serializedRedacted.length;
   // flag serialization truncation (budget hit → demoted/dropped entries).
   if (perception.truncated) perception.truncated.serialize = lastSerializeBudget.before > lastSerializeBudget.after;
@@ -263,7 +269,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     recordCall('painter', paintRes);
   } else {
     [archRes, paintRes] = await Promise.all([
-      askForSpec('architect', intent, serializedRedacted),
+      askForSpec('architect', intent, architectPerception),
       askForSpec('painter', intent, painterSerialized),
     ]);
     recordCall('architect', archRes);
@@ -356,16 +362,22 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const sExcludedRaw = detectExclusions(perception.clusters);
     const sExcludedSet = new Set<string>();
     for (const [h] of sExcludedRaw) sExcludedSet.add(h);
-    const sAssignment = assignSlots(sIR.nodes);
-    const slotPreferredWidth = new Map<string, 'full' | 'side' | 'content'>();
-    for (const s of DOCUMENTATION_SLOTS) slotPreferredWidth.set(s.id, s.preferredWidth);
-    const fallbackTarget = buildFallbackTargetIR(sAssignment.handleToSlot, slotPreferredWidth);
+    // The model picks the layout language; perception proposes a shortlist. An
+    // unknown id falls back to documentation (reported below). A language outside
+    // the shortlist that exists is honoured and recorded as a divergence.
+    const langId = spec.language;
+    const lang = getLanguage(langId);
+    const divergence = langId && !LANGUAGE_IDS.has(langId) ? langId : null;
+    if (divergence) logDebug(`language: unknown id '${divergence}' — fell back to documentation`);
+    else if (langId && lang.id === 'documentation' && langId !== 'documentation') logDebug(`language: '${langId}' not in registry — fell back to documentation`);
+    const sAssignment = assignSlots(sIR.nodes, lang);
+    const fallbackTarget = buildFallbackTargetIR(sAssignment.handleToSlot, lang);
     // Build the DOM-order map (handle → sourceOrder) for readBefore/prominentFirst
     // to check whether the relation can be satisfied through placement alone.
     const domOrder = new Map<string, number>();
     for (const node of sIR.nodes) domOrder.set(node.handle, node.computedRelationships.ordering);
     const focalHandle = perception.spatial?.focalPoint?.handle ?? null;
-    const sTarget = resolveComposition(spec.relations, fallbackTarget, domOrder, focalHandle);
+    const sTarget = resolveComposition(spec.relations, fallbackTarget, domOrder, focalHandle, lang);
     try {
       const sSolveResult = solve({ ir: sIR, target: sTarget, excluded: sExcludedSet });
       solvePlacement = computeGridPlacementCss(sSolveResult);

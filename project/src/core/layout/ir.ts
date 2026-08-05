@@ -20,6 +20,7 @@
 
 import type { Perception, Cluster } from '../perceive/index.ts';
 import type { DesignRole } from '../perceive/semantic.ts';
+import type { LayoutLanguage } from './languages/types.ts';
 
 // ── Constraint vocabulary (semantic, not measurements) ───────────
 
@@ -299,33 +300,79 @@ export const ARCHETYPES: Record<string, { tracks: TargetTrack[]; description: st
     ],
     description: 'Three columns: nav + content + aside. Track 0 = left rail, 1 = content, 2 = right rail.',
   },
+  'grid-2': {
+    tracks: [
+      { min: 'var(--rv-content-min)', max: '1fr' },
+      { min: 'var(--rv-content-min)', max: '1fr' },
+    ],
+    description: 'Two equal tracks. A tile/panel grid that wraps to one column on a narrow container.',
+  },
+  'grid-3': {
+    tracks: [
+      { min: 'var(--rv-content-min)', max: '1fr' },
+      { min: 'var(--rv-content-min)', max: '1fr' },
+      { min: 'var(--rv-content-min)', max: '1fr' },
+    ],
+    description: 'Three equal tracks. A bento or dashboard panel grid; auto-fit wraps to fewer.',
+  },
+  'grid-4': {
+    tracks: [
+      { min: 'var(--rv-content-min)', max: '1fr' },
+      { min: 'var(--rv-content-min)', max: '1fr' },
+      { min: 'var(--rv-content-min)', max: '1fr' },
+      { min: 'var(--rv-content-min)', max: '1fr' },
+    ],
+    description: 'Four equal tracks. A dense gallery or bento; auto-fit wraps down.',
+  },
+  'split-list-detail': {
+    tracks: [
+      { min: 'min-content', max: 'var(--rv-side-max)' },
+      { min: 'var(--rv-content-min)', max: '1fr' },
+    ],
+    description: 'Two columns: a narrow list pane and a wide detail pane. Track 0 = list, 1 = detail.',
+  },
 };
 
 /** The set of valid archetype ids. */
 export const ARCHETYPE_IDS = new Set<string>(Object.keys(ARCHETYPES));
 
-/** Build a default Target Layout IR from a deterministic slot assignment
- *  (the fallback when the model emits no composition relations). Converts
- *  the Documentation slot definitions into track-based Target IR.
- *  Pure: takes the slot assignment + current IR as data. */
+/** Build a default Target Layout IR from a deterministic slot assignment + the
+ *  chosen layout language (the fallback when the model emits no composition
+ *  relations). Converts the language's slot definitions into track-based
+ *  Target IR. Pure: takes the slot assignment + the language as data. */
 export function buildFallbackTargetIR(
   handleToSlot: Map<string, string>,
-  slotPreferredWidth: Map<string, 'full' | 'side' | 'content'>,
+  lang: LayoutLanguage,
 ): TargetLayoutIR {
+  // Map each slot id -> its preferredWidth from the language's slots.
+  const slotPreferredWidth = new Map<string, 'full' | 'side' | 'content'>();
+  for (const s of lang.slots) slotPreferredWidth.set(s.id, s.preferredWidth);
+
   const hasSide = [...handleToSlot.values()].some((slot) => slotPreferredWidth.get(slot) === 'side');
-  const archetype = hasSide ? 'two-column-rail-left' : 'single-column';
-  const tracks = ARCHETYPES[archetype].tracks;
+  // The language's default archetype (first in its archetypes list), or the
+  // documentation fallback when the language's archetypes can't resolve a side.
+  let archetype = lang.archetypes[0] ?? 'single-column';
+  if (hasSide && ARCHETYPES[archetype]?.tracks.length === 1) {
+    // A side rail needs a multi-track archetype; fall back to the rail-left form.
+    archetype = lang.archetypes.find((a) => ARCHETYPES[a]?.tracks.length >= 2) ?? 'two-column-rail-left';
+  }
+  if (!hasSide && ARCHETYPES[archetype]?.tracks.length === 1) {
+    // No side rail — single-column-shaped archetypes are fine.
+  }
+  const tracks = ARCHETYPES[archetype]?.tracks ?? ARCHETYPES['single-column'].tracks;
 
   const slotAssignment = new Map<string, number>();
   const spans: string[] = [];
+  // Multi-track archetypes assign side->0, content->1; single-track spans everything.
+  const trackCount = tracks.length;
   for (const [handle, slot] of handleToSlot) {
     const pw = slotPreferredWidth.get(slot);
-    if (pw === 'full' || !hasSide) {
+    if (trackCount <= 1 || pw === 'full') {
       spans.push(handle);
     } else if (pw === 'side') {
       slotAssignment.set(handle, 0);
     } else {
-      slotAssignment.set(handle, 1);
+      slotAssignment.set(handle, Math.min(1, trackCount - 1));
     }
   }
   return { archetype, tracks, slotAssignment, spans, adjacency: [], readingOrder: [], slotBehaviour: new Map(), unsatisfiable: [] };

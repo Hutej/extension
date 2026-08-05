@@ -30,6 +30,7 @@
 
 import type { RelationStatement } from '../../design/vocabulary.ts';
 import { ARCHETYPES, ARCHETYPE_IDS, type TargetLayoutIR, type TargetSlotBehaviour, type UnsatisfiableConstraint } from '../../layout/ir.ts';
+import type { LayoutLanguage } from '../../layout/languages/types.ts';
 
 /** The composition relation names. */
 export const COMPOSITION_RELATIONS = new Set([
@@ -52,6 +53,7 @@ export function resolveComposition(
   fallback: TargetLayoutIR,
   domOrder?: Map<string, number>,
   focalHandle?: string | null,
+  lang?: LayoutLanguage,
 ): TargetLayoutIR {
   if (!relations?.length) return fallback;
   const compRels = relations.filter((r) => COMPOSITION_RELATIONS.has(r.relation));
@@ -76,6 +78,10 @@ export function resolveComposition(
       case 'archetype': {
         if (!ARCHETYPE_IDS.has(rel.archetype)) {
           unsatisfiable.push({ handle: rel.subject, constraint: 'archetype', reason: `unknown archetype '${rel.archetype}'` });
+        } else if (lang && !lang.archetypes.includes(rel.archetype)) {
+          // The archetype exists but the chosen language does not support it.
+          // Report the divergence and keep the language's default archetype.
+          unsatisfiable.push({ handle: rel.subject, constraint: 'archetype', reason: `archetype '${rel.archetype}' not supported by language '${lang.id}'; keeping default '${archetype}'` });
         } else {
           archetype = rel.archetype;
           tracks = [...ARCHETYPES[rel.archetype].tracks];

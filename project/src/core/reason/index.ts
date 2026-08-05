@@ -150,7 +150,8 @@ STRUCTURAL:
 - {"relation":"moveTo","subject":"sidebar","reference":"main"} — relocate subject into reference
 
 COMPOSITION (page structure — declare the page's macro shape):
-- {"relation":"archetype","subject":"article-body","archetype":"two-column-rail-right"} — pick from: single-column, two-column-rail-left, two-column-rail-right, three-column
+- Emit "language" at the JSON ROOT (not a relation): one id from the LAYOUT CANDIDATES block. The engine assigns regions into that language's slots; the wrong language for the page is a failure.
+- {"relation":"archetype","subject":"article-body","archetype":"two-column-rail-right"} — pick a column structure: single-column, two-column-rail-left, two-column-rail-right, three-column, grid-2, grid-3, grid-4, split-list-detail. The engine validates it is supported by your chosen language; an unsupported pick falls back to the language's default.
 - {"relation":"assignSlot","subject":"nav-local","track":1} — assign subject to 0-based track index
 - {"relation":"trackAllocation","subject":"article-body","ratios":[3,1]} — proportional split between tracks (ratios → fr with minmax() floors)
 - {"relation":"adjacentTo","subject":"nav-local","reference":"article-body"} — subject sits beside reference
@@ -170,10 +171,10 @@ You MAY emit a raw "rules" entry (styles/layout on a specific handle) ONLY when 
 
 ## Non-negotiables
 1. A pack choice.
-2. canvasLayout (the page-level content-width / arrangement decision).
-3. An archetype + slot assignments when the structure changes — declare the page's macro shape with composition relations. Without them, the solver uses a deterministic fallback (rarely what you want).
-4. Relations covering the major roles — size the page title, set body density, reflow side-rails. A spec with no structural relation is a failure.
-5. Address EVERY warranted reflow (the perception's REFLOW line names the side-rail handles) — a "widthFraction"/"reorderBefore"/"hide" on each, OR a widthFraction that reflows it. A rail marked "forbid-move"/"risky-move" CANNOT be reordered — use "hide" or "widthFraction" instead.
+2. A language choice — one id from the LAYOUT CANDIDATES block.
+3. canvasLayout (the page-level content-width / arrangement decision).
+4. An archetype + slot assignments when the structure changes — declare the page's macro shape with composition relations. Without them, the solver uses a deterministic fallback (rarely what you want).
+5. Relations covering the major roles — size the page title, set body density. A spec with no structural relation is a failure.
 
 ## Directives
 1. USE THE ROOM. Compose the full viewport; match the measure to the page's purpose.
@@ -186,6 +187,7 @@ Respond with exactly this JSON (NO raw colors; relational statements + the pack 
 {
   "reasoning": "1-2 sentences on the structural direction + the pack choice",
   "pack": "minimal-editorial",
+  "language": "documentation",
   "canvasLayout": { "maxWidth": "92%", "marginInline": "auto" },
   "relations": [
     { "relation": "archetype", "subject": "article-body", "archetype": "two-column-rail-right" },

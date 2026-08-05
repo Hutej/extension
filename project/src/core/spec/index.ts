@@ -107,6 +107,10 @@ export interface DesignSpec {
   /** Which design-language pack the model chose (a pack id, or
    *  undefined for the default). The engine resolves the pack + packOverrides. */
   pack?: string;
+  /** Which layout language the model chose (a language id, or undefined for
+   *  the documentation fallback). Perception proposes a shortlist; the Architect
+   *  picks one. The engine assigns regions into the chosen language's slots. */
+  language?: string;
   /** Pack-field overrides (blending a novel prompt). Every pack field
    *  is model-overridable; these overlay the chosen pack's defaults so a novel
    *  prompt can adapt any pack without inventing a whole new system. */
@@ -173,6 +177,9 @@ export function validateSpec(raw: unknown): ValidateResult {
     // The rejection count is surfaced via report.rejected.length if needed for logging.
   }
   if (typeof r.pack === 'string' && r.pack) spec.pack = r.pack;
+  // The layout language choice. Validated against the registry by the caller
+  // (getLanguage falls back to documentation on an unknown id); stored as-is.
+  if (typeof r.language === 'string' && r.language) spec.language = r.language;
   // validate packOverrides with a real schema check, not a bare cast.
   // The model output is untrusted — reject anything that fails the check.
   const validatedOverrides = validatePackOverrides(r.packOverrides);
@@ -320,6 +327,8 @@ export function mergeSpecs(architect?: DesignSpec, painter?: DesignSpec): Design
   // the Architect may name one too (Painter wins). packOverrides: deep-merge.
   const pack = painter?.pack ?? architect?.pack;
   const packOverrides = mergePackOverrides(architect?.packOverrides, painter?.packOverrides);
+  // Language: Architect-only (a structural choice). Take the Architect's.
+  const language = architect?.language;
 
   return {
     reasoning: [architect?.reasoning, painter?.reasoning].filter(Boolean).join(' | ') || '',
@@ -332,6 +341,7 @@ export function mergeSpecs(architect?: DesignSpec, painter?: DesignSpec): Design
     ...(relations.length ? { relations } : {}),
     ...(pack ? { pack } : {}),
     ...(packOverrides ? { packOverrides } : {}),
+    ...(language ? { language } : {}),
     rules,
   };
 }
