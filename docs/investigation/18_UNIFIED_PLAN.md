@@ -15,6 +15,7 @@
 | 1E | Reach (F1-F7) | DONE | Fixture comment fix, quantization fix (closestStep), emission breadth (all 31 relations produce CSS), motion layer (prefers-reduced-motion), interaction (movable), DOM ops re-enabled (MutationReasons), docs. 37 relations total. |
 | 1F | Convergence (G1-G8) | DONE | Target Layout IR, composition vocabulary (9 new relations, 46 total), v1/v2 fork deleted (ONE pipeline), wiring audit (audit:wiring), pixel leaks fixed, file split (content.ts/transform.ts first split), docs. Review subagent found 3 silently-dropped relations. |
 | 1G | Conformance (H1-H7) | DONE (this sweep) | Three dead relations made real (adjacentTo/readBefore/prominentFirst via placement). Audit hole closed (emission path ≠ validation path). File split finished (content.ts 1585→1218, transform.ts 743→412, 9 domain modules). Constraints removed (reasoning_effort, --rv-side-max proportional, 65ch prose-only, Law 0 rule 5 dvh/svh, call budget restated). 10 structural conformance checks. Proxy gates retired (changed/coherent/covered demoted to advisory). No aesthetic score. Docs unified. |
+| 1H | Languages (I0-I7) | BUILT, NOT VERIFIED BY EYE | Six layout languages as data (dashboard, bento, editorial, feed, split-view, gallery) + documentation as 7th/fallback. `language` is a top-level spec field; the model CHOOSES from a 3-5 candidate shortlist perception proposes. ConstraintPriority restored (assigned in 7 places, read in none): solver relaxes the lowest-priority on a width-axis conflict, records every relaxation, reports required-vs-required as unsatisfiable. Colour-coverage invisible-text fixed structurally (text colour only emitted when contrast is provable against a known effective background). Conformance is three counts (applicable/not-applicable/pass); zero-applicable = "nothing was declared", not a pass. !reflowSkipped hard gate retired (archetype conformance carries reflow). Architect reverted to 'low' (medium measured ~130s vs ceilings); fallback carries `architectFallback:true` the ledger reports. Browser-free relaxation unit test. Gate: tsc+eslint+build+audit:wiring (no site runs). |
 
 ## Phases (product-level)
 
@@ -29,7 +30,7 @@
 | P4 | Prevention-by-construction | NOT STARTED | |
 | P5 | Structural identity + sticky roles | DONE | Handle stability 1.000 on 5 sites. |
 | P6 | Conditional post-render visual verifier | NOT STARTED | Kimi, fired only on uncertainty. |
-| P7 | Additional layout languages | NOT STARTED | After one language proven end-to-end. |
+| P7 | Additional layout languages | IN PROGRESS | Six languages + documentation committed in 1H; not yet verified by eye on real sites. |
 | P8 | Remaining primitives (motion, depth, density) | NOT STARTED | |
 
 ## Investigation docs
@@ -57,6 +58,4 @@
 
 ## Current position
 
-**BUILD SWEEP 1G — CONFORMANCE — BUILT, NOT VERIFIED BY EYE.** After this sweep, testing resumes
-(real site runs, popup.test.ts, fixture grid, screenshots, paid calls). The gate for 1G: typecheck
-(with `tests/` included) + build + lint + `npm run audit:wiring` on a clean tree. All items committed.
+**BUILD SWEEP 1H — LANGUAGES — BUILT, NOT VERIFIED BY EYE.** Six layout languages + documentation committed; constraint-priority relaxation, colour-contrast guard, three-count conformance, reflow-gate retirement, and timing fallback wired and committed. Gate was build-only (tsc + eslint + wxt build + audit:wiring, all green); a browser-free relaxation unit test passes. After this sweep, testing resumes (real site runs, popup.test.ts, fixture grid, screenshots, paid calls) to verify the languages by eye. Outstanding from 1H (flagged, not built): the full 46-relation golden emission test (executing every relation against a synthetic fixture) — the standing structural audit:wiring remains the coverage gate; and the 46 test-only-export verdicts (the audit already fails orphan exports, so the standing gate holds — a dedicated per-export triage is the next sweep's work).

@@ -52,3 +52,19 @@
 
 ## UNVERIFIED
 - The Playwright harness (`project/tests/`) was not read deeply; the "fix-cycle cap = 3 across ALL gates" claim rests on `product.md`, not the harness source.
+
+## BUILD SWEEP 1H — closed and opened
+
+### Closed by 1H
+- **One layout language (the over-perceive/under-transform root cause)** — the engine shipped exactly ONE language (documentation); every page landed in documentation slots; "make this a dashboard/bento/magazine" was inexpressible. 1H adds six languages as data + documentation as fallback; the model CHOOSES from a 3–5 candidate shortlist.
+- **ConstraintPriority assigned in 7 places, read in NONE** — `droppedOptionals` was always `[]`; no relaxation logic existed. 1H adds `resolveNodeConstraints` (the `.priority` read site) in `solve.ts`: relaxes the lowest-priority on a width-axis conflict, records every relaxation, reports required-vs-required as unsatisfiable. Browser-free unit test in `tests/relaxation.test.ts`.
+- **Colour-coverage invisible-text** — the coverage loop assigned `pack.colors.text` to every addressed cluster with no explicit colour, skipping only clusters that set a background; a cluster inheriting a LIGHT bg got a light pack text (invisible). 1H guards behind `contrastRatio(packText, cluster.background.effectiveColor) >= MIN_CONTRAST_RATIO` (the single law constant).
+- **`!reflowSkipped` hard gate** — retired. Sidebar→topbar reflow is now expressible as language + archetype + assignSlot; archetype conformance carries it. Two mechanisms for one job was how the vocabulary drifted apart.
+- **Architect fallback indistinguishable from a bad design** — 1G raised reasoning_effort to 'medium' (130s) but left ceilings at 70s/120s, so the Architect aborted on most runs. 1H reverts to 'low' and makes the fallback loud: `architectFallback: true` on `TransformOutcome` + the ledger.
+- **Conformance zero-applicable = pass** — a restyle-only run with no relations passed all checks. 1H makes conformance three counts (applicable/not-applicable/pass); zero-applicable is "nothing was declared", `ok: false`.
+
+### Opened by 1H (new debt)
+- **`checkStructuralConformance` is browser-bound and not yet wired into the production pipeline.** It carries `applicable?` on each `ConformanceCheck` so the three counts are computable when it is called, but its consumer is the site-tested sweep (it needs `getComputedStyle` + `[data-rv-plan-slot]` proxies). The live three-count conformance today is `checkConformance` (CSS-parse-based, browser-free). Wiring the structural check is the next sweep's work.
+- **The full 46-relation golden emission test was not built this sweep.** Constructing a faithful synthetic perception fixture + a valid spec statement for each of the 46 relations is a dedicated effort. The standing `audit:wiring` structural check (handler presence + composition emission-path) remains the coverage gate; it was not downgraded. A per-relation execution test against a synthetic fixture is the next sweep's work.
+- **The 46 test-only-export verdicts were not individually triaged this sweep.** `audit:wiring` already FAILS on orphan runtime exports (no informational tier), so the standing gate holds. A dedicated per-export verdict (wired into production vs deleted) is deferred.
+- **`resolveNodeConstraints` only detects width-axis conflicts** (`FillParent` vs `MaxWidth`). Other axis pairs (e.g. alignment vs stacking) are treated as non-conflicting and coexist. This is honest for the conflicts that actually arise today; extending the conflict catalogue is additive when a real conflict surface appears.

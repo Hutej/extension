@@ -41,7 +41,8 @@ The declared destination page expressed as constraints the browser re-solves. `T
 never measured widths), `slotAssignment` (handle → track index), `spans`, `adjacency`, `readingOrder`,
 `slotBehaviour` (per-track direction/wrap/alignment), `unsatisfiable` (reported, never silent).
 
-Four archetypes: `single-column`, `two-column-rail-left`, `two-column-rail-right`, `three-column`.
+Eight archetypes: `single-column`, `two-column-rail-left`, `two-column-rail-right`, `three-column`,
+`grid-2`, `grid-3`, `grid-4`, `split-list-detail`.
 
 `buildFallbackTargetIR()` converts a deterministic `assignSlots` result → Target IR when the model
 emits no composition relations. `resolveComposition()` in `compile/transform.ts` builds the Target IR
@@ -149,8 +150,97 @@ iterates relations in original order (accent budget + style merge are order-sens
 
 Proxy gates retired: `changed`, `coherent`, `covered`, `layoutReshaped`, `usesRoom` demoted to
 advisory (can pass on an unchanged page). Physics gates (notBlank, noOverflow, noOverlap,
-contrastOk, contentIntact, contentVisible, movedAlive) + reflow check stay as hard gates.
-**No aesthetic score** — not as a gate, not as a number.
+contrastOk, contentIntact, contentVisible, movedAlive) stay as hard gates. The reflow check is
+RETIRED as a hard gate (1H): sidebar→topbar reflow is now expressible as language + archetype +
+assignSlot, and archetype conformance carries it. `reflowAddressed` stays advisory. **No aesthetic
+score** — not as a gate, not as a number.
+
+## BUILD SWEEP 1H — Languages
+
+### Seven layout languages (I0–I3)
+
+The single largest cause of over-perceiving/under-transforming was exactly ONE layout language
+(documentation): every page, on every prompt, landed in documentation slots. "Make this a
+dashboard / bento / magazine" was inexpressible. 1H makes languages DATA and lets the model CHOOSE.
+
+`LayoutLanguage` contract (`layout/languages/types.ts`): `id`, `name`, `description` (written for
+the model to read), an ordered `slots: SlotDef[]`, the `archetypes` it supports, and `suits`
+(role inventory, component types, card count, media count, prose volume). Each slot declares the
+roles it accepts, its constraints, and each constraint's `priority`. Every language has an
+overflow slot (the last slot) so no region is ever left unplaceable. `slotForRole(lang, role)` is
+first-match-wins; `overflowSlot(lang)` is the last slot.
+
+Seven languages in `LANGUAGES` (documentation last = fallback):
+
+| id | slots | archetypes |
+|---|---|---|
+| dashboard | toolbar, filter-rail, metric-strip, panel-grid, detail-drawer, overflow | two-column-rail-left, grid-3 |
+| bento | hero-tile, feature-tiles, filler-tiles, overflow | grid-3, grid-4, grid-2 |
+| editorial | masthead, lede, prose-column, pull-aside, figure-band, overflow | single-column, two-column-rail-right, three-column |
+| feed | header, filter-bar, item-stream, side-meta, overflow | single-column, two-column-rail-right, three-column |
+| split-view | nav-list, list-pane, detail-pane, overflow | split-list-detail, three-column, two-column-rail-left |
+| gallery | header, media-grid, caption-strip, overflow | grid-3, grid-4, grid-2 |
+| documentation | (the fallback — supports all four base archetypes) | single-column, two-column-rail-left, two-column-rail-right, three-column |
+
+`language` is a TOP-LEVEL spec field (like `pack`), NOT a relation. The Architect emits `"language"`
+at the JSON root; `validateSpec` stores it; `content.ts` reads `spec.language` → `getLanguage` →
+`assignSlots`/`buildFallbackTargetIR`/`resolveComposition`. It is NOT in `RELATION_SPECS`/
+`COMPOSITION_RELATIONS` so `audit:wiring` does not check it as a relation (correct — it selects
+which slot set `assignSlots` uses; it has no CSS emission of its own).
+
+### Candidate shortlist — the model chooses, measurement only proposes (I3)
+
+A language is never selected by measurement alone. `proposeLanguageCandidates(perception)` in
+`layout/languages/index.ts` scores each language by overlap with the perception's role inventory,
+component types, card count, media count, and prose volume (`clusters[].textProfile.readingLength`),
+returns the top 3–5, and ALWAYS includes documentation. `formatCandidates` renders the shortlist as
+prose the Architect reads. The Architect prompt lists only those candidates' descriptions + the
+archetypes they support; the model CHOOSES the language (and the archetype within it). If the
+model's chosen archetype is not in the language's `archetypes`, `resolveComposition` records
+unsatisfiable and keeps the language's default archetype.
+
+### Constraint priority + relaxation (I4)
+
+`ConstraintPriority` (`required`/`preferred`/`optional`) was assigned in seven places (the
+Current-IR derivation `currentConstraints` + every language's slot constraints) and read in NONE
+— `droppedOptionals` was always `[]`. `resolveNodeConstraints` in `solve.ts` is the call site that
+reads `.priority`: it attempts every constraint on a node (the language slot it landed in + the
+page's current arrangement), and on a width-axis conflict (`FillParent` vs `MaxWidth`) relaxes the
+lowest-priority one first, recording every relaxation with its reason. A required-vs-required
+conflict is reported `unsatisfiable`, never silently dropped. `solve()` populates
+`SolveResult.droppedOptionals` and pushes required conflicts to `target.unsatisfiable`. A
+browser-free unit test (`tests/relaxation.test.ts`) proves an optional/preferred constraint is
+relaxed + reported and a required-vs-required pair is unsatisfiable.
+
+### Colour-coverage invisible-text fix (I5)
+
+The coverage loop in `compile/transform.ts` previously assigned `pack.colors.text` to every
+addressed cluster with no explicit colour, skipping only clusters that set a background. A cluster
+inheriting a LIGHT background still received the pack text colour (e.g. `#d8dde3` on white) — the
+invisible-text vector. The structural rule now: never emit a text colour unless contrast is
+provable against a known background — the cluster's effective background from the surface model
+(`cluster.background.effectiveColor`, always populated). If `contrastRatio(packText, effBg) <
+MIN_CONTRAST_RATIO` (the single law constant — no duplicate threshold), the author text colour
+stands.
+
+### Three-count conformance (I6)
+
+Conformance is THREE counts on the live path (`checkConformance`): `applicable` /
+`notApplicable` / `pass` over its four categories (spacing, type, color, family). A run with zero
+applicable is "nothing was declared", NOT a pass — the early return for a restyle-only run now
+reports `applicable: 0, ok: false`. `ok` requires `applicable > 0`. The counts are surfaced in the
+ledger + the `CONFORMANCE` log. (The browser-bound structural 10-check in `verify/conformance.ts`
+retains `applicable?` on each `ConformanceCheck` so the same counts are computable when it is wired
+in the site-tested sweep.)
+
+### Timing + architect fallback (I1)
+
+1G raised Architect `reasoning_effort` to `medium` (measured ~130s) but left `architectTimeoutMs`
+at 70s and `designMaxMs` at 120s — the Architect aborted and fell back on nearly every run, and a
+fallback was indistinguishable from a bad design. 1H REVERTS the Architect to `low` (raising
+ceilings to fit medium is movement in the wrong direction vs the standing 5–10s target). A
+fallback now carries explicit `architectFallback: true` on `TransformOutcome` + the ledger, so a
+Painter-only recolor never reads as a quality result.
 
 ## The Layout IR type schema (`src/core/layout/ir.ts`)
 
@@ -193,13 +283,15 @@ for flex-column/block containers; `Alignment` (preferred) for flex-row container
 `Centered` (optional) when `centered`; `AspectRatio` (preferred) when `naturalAspect` present;
 `MaxWidth` (value `partial`) when an authored fixed/fluid width < parent.
 
-## Layout language schema + the Documentation instance
+## Layout language schema + the language registry
 
 A layout language is NOT CSS and NOT HTML. It defines slots, relationships, constraints, grid
 preference and priority rules. Each slot declares: `id`, `allowedRoles[]`, `preferredWidth`,
-`flow`, `ordering`, `minWidth`, `constraints[]` (each with priority). The pipeline ships exactly ONE language:
-**Documentation** (predictable, information-dense, mostly static, responsive, few JS layout
-assumptions). Do NOT build a second language yet.
+`flow`, `ordering`, `minWidth`, `constraints[]` (each with priority). The pipeline ships SEVEN
+languages (BUILD SWEEP 1H): dashboard, bento, editorial, feed, split-view, gallery, and
+**Documentation** as the seventh and the fallback (`getLanguage` returns Documentation for
+unknown ids; `proposeLanguageCandidates` always includes it). See the 1H section above for the
+full slot sets + supported archetypes per language.
 
 **Documentation slots:** `masthead`, `nav-local`, `toc`, `main`, `aside`, `footer`, `overflow`.
 
@@ -318,12 +410,14 @@ layer STAYS; it defines the invariants the solver must respect.
 
 | File | Owns |
 |---|---|
-| `ir.ts` | the Layout IR type, `extractLayoutIR` (pure), `currentConstraints`, `deepFreeze` |
+| `ir.ts` | the Layout IR type, `extractLayoutIR` (pure), `currentConstraints`, `deepFreeze`, `ARCHETYPES` (8), `buildFallbackTargetIR` (language-aware) |
 | `exclusions.ts` | the exclusion registry + detection heuristics |
-| `languages/documentation.ts` | the Documentation layout language as PURE DATA (slots + constraints) |
-| `assign.ts` | deterministic slot assignment + invariant assertions |
+| `languages/types.ts` | the `LayoutLanguage` contract + `slotForRole`/`overflowSlot` (1H) |
+| `languages/index.ts` | `LANGUAGES` registry, `getLanguage`, `proposeLanguageCandidates`, `formatCandidates` (1H) |
+| `languages/{dashboard,bento,editorial,feed,split-view,gallery,documentation}.ts` | the seven languages as PURE DATA (slots + constraints + archetypes + suits) (1H) |
+| `assign.ts` | language-aware deterministic slot assignment + invariant assertions |
 | `candidates.ts` | deterministic composition detection -> 3–5 archetype candidates |
-| `solve.ts` | the solver (validate, propagate, flex/grid, normalize, emit CSS) |
+| `solve.ts` | the solver (validate, propagate, flex/grid, normalize, emit CSS) + `resolveNodeConstraints` (constraint-priority relaxation, 1H) |
 | `verify.ts` | hard gates + advisory scores on the applied DOM |
 
 ## IR stability probe methodology + measured numbers
