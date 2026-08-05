@@ -34,6 +34,14 @@ export interface ConformanceResult {
   /** Handles the model gave raw rules for (the escape hatch) — the vocabulary-gap metric. */
   escapeHatchUses: string[];
   escapeHatchFraction: number;
+  /** Conformance is THREE counts, not one ok flag. A run that declared almost
+   *  nothing (restyle-only, no relations) is NOT a pass — it is "nothing was
+   *  declared". applicable = categories with declared values to check;
+   *  notApplicable = categories with nothing declared; pass = applicable
+   *  categories with no violations. ok requires applicable > 0. */
+  applicable: number;
+  notApplicable: number;
+  pass: number;
 }
 
 export interface VerifyResult {
@@ -289,11 +297,11 @@ export function verifyStyle(before: LayoutFingerprint, paletteMode?: 'restrained
   // signals. The structural conformance checks in verify/conformance.ts compare
   // the rendered result against the TargetLayoutIR — those are the real gates.
   // Physics gates (notBlank, noOverflow, noOverlap, contrastOk, contentIntact,
-  // contentVisible, movedAlive) and the reflow check (!reflowSkipped) stay as
-  // hard gates — they cannot false-pass on a broken or unchanged page.
+  // contentVisible, movedAlive) stay as hard gates — they cannot false-pass on a
+  // broken or unchanged page. The reflow check is RETIRED (see below).
   // No aesthetic score — not as a gate, not as a number.
   void enforcedReshape; // computed for reporting only, no longer in `passed`
-  const passed = notBlank && noOverflow && noOverlap && contrastOk && contentIntact && contentVisible && movedAlive && !reflowSkipped;
+  const passed = notBlank && noOverflow && noOverlap && contrastOk && contentIntact && contentVisible && movedAlive;
   return { passed, checks: { notBlank, noOverflow, noOverlap, contrastOk, changed, coherent, covered, contentIntact, contentVisible, layoutReshaped, usesRoom, movedAlive, reflowAddressed }, changeScore, layoutReshapedScore, accentFraction, framedFraction, coverageFraction, modelCoverageFraction, overflowTargets, bleedTargets, squeezeTargets, collapseTargets: [...collapsedRegions], contrastTargets: [...contrastFlags], contrastTargetBgs: Object.fromEntries(contrastTargetBgs), contentWidthBefore: beforeW, contentWidthAfter: afterW, repeatedAccent, contrastNoHandle: noHandle.count, movedDead, reflowSkippedHandles, details };
 }
 
@@ -723,10 +731,11 @@ export function checkConformance(css: string, spec: DesignSpec, escapeHatchUses:
   const violations: string[] = [];
 
   // Only check when the spec declared a system (relations or a pack choice). A
-  // raw-only or restyle-only run with no relations has no declared system —
-  // conformance is null at the call site; this returns ok with no violations.
+  // raw-only or restyle-only run with no relations has no declared system. That
+  // is NOT a pass — it is "nothing was declared": applicable=0, ok=false. The
+  // call site logs the counts so a near-empty run can never read as a clean pass.
   if (!spec.relations?.length && !spec.pack) {
-    return { ok: true, violations, packId: pack.id, escapeHatchUses, escapeHatchFraction: 0 };
+    return { ok: false, violations, packId: pack.id, escapeHatchUses, escapeHatchFraction: 0, applicable: 0, notApplicable: 4, pass: 0 };
   }
 
   // 1) Spacing ∈ declared scale. Every padding/gap/margin px value should be a
@@ -800,7 +809,23 @@ export function checkConformance(css: string, spec: DesignSpec, escapeHatchUses:
     if (sigs.size > 1) { familyInconsistency++; violations.push(`family inconsistency: subject ${key} has ${sigs.size} distinct relations — ${[...sigs].join(' / ')}`); }
   }
 
-  const ok = spacingOff === 0 && typeOff === 0 && colorOff === 0 && familyInconsistency === 0;
+  // Three counts over the four categories (spacing, type, color, family). A
+  // category is applicable when the CSS/spec gave it something to check; a
+  // category with no violations AND applicable is a pass. Zero applicable =
+  // "nothing was declared" (ok already false from the early return; this path
+  // always has ≥1 applicable since relations/pack exist).
+  const applicableSpacing = spacingValues.length > 0 ? 1 : 0;
+  const applicableType = typeValues.length > 0 ? 1 : 0;
+  const applicableColor = colorValues.length > 0 ? 1 : 0;
+  const applicableFamily = (spec.relations?.length ?? 0) > 0 ? 1 : 0;
+  const applicable = applicableSpacing + applicableType + applicableColor + applicableFamily;
+  const notApplicable = 4 - applicable;
+  const pass = (applicableSpacing && spacingOff === 0 ? 1 : 0)
+    + (applicableType && typeOff === 0 ? 1 : 0)
+    + (applicableColor && colorOff === 0 ? 1 : 0)
+    + (applicableFamily && familyInconsistency === 0 ? 1 : 0);
+
+  const ok = applicable > 0 && spacingOff === 0 && typeOff === 0 && colorOff === 0 && familyInconsistency === 0;
   const escapeHatchFraction = totalTargets > 0 ? escapeHatchUses.filter(() => true).length / Math.max(1, totalTargets) : 0;
-  return { ok, violations, packId: pack.id, escapeHatchUses, escapeHatchFraction };
+  return { ok, violations, packId: pack.id, escapeHatchUses, escapeHatchFraction, applicable, notApplicable, pass };
 }

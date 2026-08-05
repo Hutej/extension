@@ -23,6 +23,10 @@ import { parseColor, colorfulness } from '../../shared/color.ts';
 export interface ConformanceCheck {
   name: string;
   passed: boolean;
+  /** False when the check skipped because nothing was declared (e.g. no
+   *  reading-order constraints). Omitted = applicable. Zero applicable =
+   *  "nothing was declared", NOT a pass. */
+  applicable?: boolean;
   detail: string;
 }
 
@@ -121,7 +125,7 @@ function checkArchetypeConformance(target: TargetLayoutIR, proxies: ProxyInfo[])
 
 function checkTrackConformance(target: TargetLayoutIR, proxies: ProxyInfo[]): ConformanceCheck {
   if (target.tracks.length <= 1) {
-    return { name: 'track-conformance', passed: true, detail: 'single track — no ratio to check' };
+    return { name: 'track-conformance', passed: true, applicable: false, detail: 'single track — no ratio to check' };
   }
   // Measure the width of each rendered track (from proxies in each track).
   const trackWidths = new Map<number, number>();
@@ -132,7 +136,7 @@ function checkTrackConformance(target: TargetLayoutIR, proxies: ProxyInfo[]): Co
     }
   }
   if (trackWidths.size < 2) {
-    return { name: 'track-conformance', passed: true, detail: 'fewer than 2 tracks rendered — skip' };
+    return { name: 'track-conformance', passed: true, applicable: false, detail: 'fewer than 2 tracks rendered — skip' };
   }
   // Extract declared fr ratios from target.tracks (parse "Xfr" from max).
   const declaredRatios: number[] = target.tracks.map(t => {
@@ -186,7 +190,7 @@ function checkSlotConformance(target: TargetLayoutIR, proxies: ProxyInfo[]): Con
 
 function checkReadingOrderConformance(target: TargetLayoutIR, proxies: ProxyInfo[]): ConformanceCheck {
   if (target.readingOrder.length < 2) {
-    return { name: 'reading-order-conformance', passed: true, detail: 'no reading-order constraints' };
+    return { name: 'reading-order-conformance', passed: true, applicable: false, detail: 'no reading-order constraints' };
   }
   const failures: string[] = [];
   // Check rendered visual order matches declared order.
@@ -436,6 +440,11 @@ export function checkStructuralConformance(
   // A run with unsatisfiables is NOT a clean run.
   const unsatisfiable = target.unsatisfiable;
 
+  // A run with unsatisfiables is NOT a clean run. (Three-count applicable/
+  // not-applicable/pass conformance lives on the live path — checkConformance in
+  // verify/index.ts — which content.ts actually calls. This structural check is
+  // browser-bound and wired in the site-tested sweep; its ConformanceCheck
+  // carries `applicable?` so the counts are computable when it is called.)
   const allPass = checks.every(c => c.passed) && unsatisfiable.length === 0;
 
   return {

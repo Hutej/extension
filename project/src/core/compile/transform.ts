@@ -29,6 +29,8 @@ import type { DesignSpec, DesignRule, DesignOp, StyleDecls, LayoutDecls } from '
 import type { Perception, Cluster } from '../perceive/index.ts';
 import type { DesignRole } from '../perceive/semantic.ts';
 import { resolvePack, type DesignPack, type TypeRole, type SurfaceTier } from '../design/packs.ts';
+import { parseColor, contrastRatio } from '../../shared/color.ts';
+import { MIN_CONTRAST_RATIO } from '../laws/index.ts';
 import type { Subject, RelationStatement } from '../design/vocabulary.ts';
 import { COMPOSITION_RELATIONS, resolveComposition } from './relations/composition.ts';
 export { resolveComposition };
@@ -385,12 +387,28 @@ export function transformIntent(spec: DesignSpec, perception: Perception): Trans
     }
   }
 
-  // Colour coverage: every addressed cluster gets a text colour from the pack.
+  // Colour coverage: a cluster with no explicit text colour inherits its
+  // author text colour. Assigning the pack text colour unconditionally is the
+  // invisible-text defect: a cluster inheriting a LIGHT background gets the pack
+  // text colour (e.g. #d8dde3 on white). The structural rule: never emit a text
+  // colour unless we can PROVE contrast against a background we actually know —
+  // one we set on the cluster (handled: those rules set their own bg+text), or
+  // the cluster's effective background from the surface model. If the cluster's
+  // effective background does not contrast with the pack text, leave the author
+  // text colour alone (it already contrasts with the author background).
+  const packText = parseColor(pack.colors.text);
   for (const handle of allTargets) {
     const r = rulesByHandle.get(handle);
     if (!r || !r.styles) continue;
     if ('color' in r.styles) continue;
     if ('background' in r.styles || 'backgroundColor' in r.styles || 'backgroundImage' in r.styles) continue;
+    // No known background to prove contrast against -> leave the author colour.
+    const cluster = byHandle.get(handle);
+    const effBg = cluster?.background?.effectiveColor;
+    if (!effBg || !packText) continue;
+    const bg = parseColor(effBg);
+    if (!bg) continue;
+    if (contrastRatio(packText, bg) < MIN_CONTRAST_RATIO) continue; // would be invisible
     r.styles.color = pack.colors.text;
   }
 

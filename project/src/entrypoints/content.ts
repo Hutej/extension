@@ -79,6 +79,14 @@ export interface Ledger {
    *  violations are listed verbatim on TransformOutcome.conformance. */
   conformanceOk?: boolean;
   conformanceViolations?: number;
+  /** Three-count conformance: applicable / not-applicable / pass. A run with
+   *  zero applicable is "nothing was declared", NOT a pass. */
+  conformanceApplicable?: number;
+  conformanceNotApplicable?: number;
+  conformancePass?: number;
+  /** The solver relaxed these optional/preferred constraints on conflict. Each
+   *  carries the reason. Empty when nothing conflicted. */
+  droppedOptionals?: { handle: string; kind: string; reason: string }[];
 }
 
 export interface TransformOutcome {
@@ -118,6 +126,11 @@ export interface TransformOutcome {
   perceptionTruncated?: { walk: boolean; serialize: boolean };
   paintCount?: number;   // visible repaints
   ledger?: Ledger;       // stage-by-stage time breakdown (structured run report)
+  /** True when the Architect timed out or errored and the shipped design is the
+   *  Painter-only surface (a recolor, not a redesign). A fallback design is
+   *  NOT a quality result — this flag makes that loud so it can never look like
+   *  a quality problem. */
+  architectFallback?: boolean;
 }
 
 const APPLIED = 'revueonApplied';
@@ -355,6 +368,8 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
   let structuralCss = '';
   let solvePlacement: ReturnType<typeof computeGridPlacementCss> | null = null;
   let planHonoured = true;
+  // Constraints the solver relaxed on conflict (populated on the reshape path).
+  let solverDroppedOptionals: { handle: string; kind: string; reason: string }[] = [];
   if (!restyleOnly) {
     document.querySelectorAll('[data-rv-grid]').forEach((el) => el.removeAttribute('data-rv-grid'));
     document.querySelectorAll('[data-rv-plan-slot]').forEach((el) => el.removeAttribute('data-rv-plan-slot'));
@@ -379,7 +394,8 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     const focalHandle = perception.spatial?.focalPoint?.handle ?? null;
     const sTarget = resolveComposition(spec.relations, fallbackTarget, domOrder, focalHandle, lang);
     try {
-      const sSolveResult = solve({ ir: sIR, target: sTarget, excluded: sExcludedSet });
+      const sSolveResult = solve({ ir: sIR, target: sTarget, excluded: sExcludedSet, lang, handleToSlot: sAssignment.handleToSlot });
+      solverDroppedOptionals = sSolveResult.droppedOptionals;
       solvePlacement = computeGridPlacementCss(sSolveResult);
       structuralCss = solvePlacement.css;
       planHonoured = assertPlanHonoured(solvePlacement.plan);
@@ -603,7 +619,7 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     try {
       conformance = checkConformance(lastCompiled.css || '', spec, escapeHatchUses, totalTargets);
       lastVerify.conformance = conformance;
-      logDebug(`CONFORMANCE pack=${conformance.packId} ok=${conformance.ok} violations=${conformance.violations.length} escapeHatch=${escapeHatchUses.length}/${totalTargets} (${(conformance.escapeHatchFraction * 100).toFixed(0)}%)${conformance.violations.length ? `\n  violations:\n` + conformance.violations.slice(0, 20).map((v) => `    - ${v}`).join('\n') : ''}${lastCompiled.expandNotes?.length ? `\n  expand notes: ${lastCompiled.expandNotes.slice(0, 8).join('; ')}` : ''}`);
+      logDebug(`CONFORMANCE pack=${conformance.packId} ok=${conformance.ok} applicable=${conformance.applicable} notApplicable=${conformance.notApplicable} pass=${conformance.pass} violations=${conformance.violations.length} escapeHatch=${escapeHatchUses.length}/${totalTargets} (${(conformance.escapeHatchFraction * 100).toFixed(0)}%)${conformance.applicable === 0 ? ' — nothing was declared' : ''}${conformance.violations.length ? `\n  violations:\n` + conformance.violations.slice(0, 20).map((v) => `    - ${v}`).join('\n') : ''}${lastCompiled.expandNotes?.length ? `\n  expand notes: ${lastCompiled.expandNotes.slice(0, 8).join('; ')}` : ''}`);
       if (conformance.escapeHatchFraction > 0.20) logDebug(`ESCAPE-HATCH FRACTION >20%: ${(conformance.escapeHatchFraction * 100).toFixed(0)}% of targets used raw rules — the model is dodging the relation language (a pivot-failure flag even if the design applies)`);
     } catch (err) {
       logDebug(`CONFORMANCE skipped (threw — a malformed packOverrides?): ${(err as Error)?.message}`);
@@ -650,10 +666,14 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
       escapeHatchFraction: conformance.escapeHatchFraction,
       conformanceOk: conformance.ok,
       conformanceViolations: conformance.violations.length,
+      conformanceApplicable: conformance.applicable,
+      conformanceNotApplicable: conformance.notApplicable,
+      conformancePass: conformance.pass,
     } : {}),
+    ...(solverDroppedOptionals.length ? { droppedOptionals: solverDroppedOptionals } : {}),
   };
   const rolesStr = roleCalls.map((c) => `${c.role}:${c.ms}ms/${c.promptTokens ?? '?'}tok`).join(', ');
-  logDebug(`LEDGER perceive=${ledger.perceiveMs}ms serialize=${serializeChars}chars${lastSerializeBudget.before > lastSerializeBudget.after ? `(budget ${lastSerializeBudget.before}->${lastSerializeBudget.after})` : ''} roles=[${rolesStr}] compile=${ledger.compileMs}ms apply=${ledger.applyMs}ms verify=${ledger.verifyMs}ms pixelVerify=${ledger.pixelVerifyMs}ms persist=${persistMs}ms unaccounted=${ledger.unaccountedMs}ms total=${totalMs}ms paidCalls=${ledger.paidCalls} repairRounds=${repairRounds} paints=${finalPaintCount} ops=${opsResult.executed}/${opsResult.refused}`);
+  logDebug(`LEDGER perceive=${ledger.perceiveMs}ms serialize=${serializeChars}chars${lastSerializeBudget.before > lastSerializeBudget.after ? `(budget ${lastSerializeBudget.before}->${lastSerializeBudget.after})` : ''} roles=[${rolesStr}] compile=${ledger.compileMs}ms apply=${ledger.applyMs}ms verify=${ledger.verifyMs}ms pixelVerify=${ledger.pixelVerifyMs}ms persist=${persistMs}ms unaccounted=${ledger.unaccountedMs}ms total=${totalMs}ms paidCalls=${ledger.paidCalls} repairRounds=${repairRounds} paints=${finalPaintCount} ops=${opsResult.executed}/${opsResult.refused}${(!restyleOnly && !archRes.ok) ? ' ARCHITECT_FALLBACK=true' : ''}${solverDroppedOptionals.length ? ` relaxed=${solverDroppedOptionals.length}` : ''}`);
   if ((ledger.unaccountedMs ?? 0) > 0.15 * totalMs) logDebug(`LEDGER GAP >15%: ${ledger.unaccountedMs}ms unaccounted — investigate`);
 
   return {
@@ -669,6 +689,9 @@ async function runStyleImpl(intent: string, restyleOnly = false): Promise<Transf
     usage: roleCalls.length ? { total: roleCalls.reduce((s, c) => s + (c.promptTokens ?? 0) + (c.completionTokens ?? 0), 0) } : undefined,
     paidCalls: paidCalls(), paintCount: finalPaintCount, ledger,
     perceptionTruncated: perception.truncated,
+    // The Architect timed out or errored → the shipped spec is Painter-only
+    // (a recolor). Make the fallback loud so it never reads as a quality result.
+    architectFallback: !restyleOnly && !archRes.ok,
     ...(solvePlacement ? {
       placement: { placed: solvePlacement.nodesPlaced, proxies: solvePlacement.proxyCount, subgridProxies: solvePlacement.subgridProxies, singleTrackProxies: solvePlacement.singleTrackProxies, subgridChildAssignments: solvePlacement.subgridChildAssignments, notPlaceable: solvePlacement.nodesNotPlaceable.length, gridTemplate: solvePlacement.gridTemplateColumns, mixedProxies: solvePlacement.mixedProxies, plan: solvePlacement.plan, planHonoured },
     } : {}),

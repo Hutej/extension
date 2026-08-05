@@ -36,7 +36,10 @@
  * rebuild the tree. matched-targets = 0 is a HARD ERROR.
  */
 
-import type { LayoutIR, TargetLayoutIR, TargetTrack } from './ir.ts';
+import type { LayoutIR, LayoutIRNode, TargetLayoutIR, TargetTrack } from './ir.ts';
+import type { ConstraintPriority } from './ir.ts';
+import { currentConstraints } from './ir.ts';
+import type { LayoutLanguage, SlotDef } from './languages/types.ts';
 import { assertNoRawPxSizing } from '../laws/index.ts';
 
 // ── Fluid token set (from ARCHITECTURE.md, applied at semantic text levels only) ──
@@ -71,6 +74,12 @@ export interface SolveInput {
   ir: LayoutIR;
   target: TargetLayoutIR;
   excluded: Set<string>;
+  /** The chosen layout language — its slot constraints carry priorities the
+   *  solver reads and relaxes on conflict. Optional; omitted on the pure path. */
+  lang?: LayoutLanguage;
+  /** handle -> slot id (from assignSlots). Lets the solver read each node's
+   *  language slot constraints (with their priorities). Optional. */
+  handleToSlot?: Map<string, string>;
 }
 
 /** Placement info for one node: which track, which grid column. */
@@ -94,6 +103,93 @@ export interface SolveResult {
   rulesEmitted: number;
   matchedTargets: number;
   droppedOptionals: { handle: string; kind: string; reason: string }[];
+}
+
+// ── Constraint priority + relaxation ─────────────────────────────────
+//
+// ConstraintPriority is assigned in the Current-IR derivation (currentConstraints)
+// and in every layout language's slot definitions (SlotDef.constraints), and was
+// read in NONE — droppedOptionals was always []. The resolver below is the call
+// site that reads .priority: it attempts every constraint on a node, and on a
+// conflict on the same axis relaxes the LOWEST-priority one first, recording the
+// reason. A conflict between two REQUIRED constraints is reported unsatisfiable
+// and never silently dropped.
+
+/** A constraint the solver relaxed, with the reason. */
+export interface RelaxedConstraint {
+  handle: string;
+  constraint: string;
+  priority: ConstraintPriority;
+  reason: string;
+}
+
+/** Structural shape the resolver accepts — covers both LayoutConstraint (Current
+ *  IR, strict ConstraintKind) and SlotConstraint (language slots, loose string),
+ *  so a slot constraint's kind flows in without a cast. */
+interface ConstraintLike {
+  kind: string;
+  priority: ConstraintPriority;
+  source?: string;
+  value?: string;
+}
+
+const PRIORITY_RANK: Record<ConstraintPriority, number> = { required: 0, preferred: 1, optional: 2 };
+
+/** Two constraints conflict when they both govern the same axis with opposing
+ *  intent. Today the only real axis conflict is width: FillParent (full width)
+ *  vs MaxWidth (a cap). Other pairs coexist (StackVertically + Alignment live on
+ *  different axes; WrapOnOverflow + Gap are independent). */
+function conflictsWith(a: ConstraintLike, b: ConstraintLike): boolean {
+  // Width axis: FillParent vs MaxWidth oppose.
+  if ((a.kind === 'FillParent' && b.kind === 'MaxWidth') || (a.kind === 'MaxWidth' && b.kind === 'FillParent')) return true;
+  return false;
+}
+
+/** Resolve a node's constraints: keep what coexists, relax the lowest-priority
+ *  member of each conflicting pair, report a required-vs-required conflict as
+ *  unsatisfiable. Pure — the single function that reads .priority. */
+export function resolveNodeConstraints(
+  handle: string,
+  constraints: ConstraintLike[],
+): { kept: ConstraintLike[]; relaxed: RelaxedConstraint[]; unsatisfiable: { handle: string; constraint: string; reason: string }[] } {
+  const kept: ConstraintLike[] = [];
+  const relaxed: RelaxedConstraint[] = [];
+  const unsatisfiable: { handle: string; constraint: string; reason: string }[] = [];
+  // Sort by priority (required first) so a later conflicting lower-priority one is relaxed.
+  const order = [...constraints].sort((a, b) => PRIORITY_RANK[a.priority] - PRIORITY_RANK[b.priority]);
+  for (const c of order) {
+    // Find an already-kept constraint this conflicts with.
+    const foe = kept.find((k) => conflictsWith(k, c));
+    if (!foe) { kept.push(c); continue; }
+    // Conflict. Relax the lower-priority of the two.
+    if (PRIORITY_RANK[c.priority] > PRIORITY_RANK[foe.priority]) {
+      relaxed.push({ handle, constraint: c.kind, priority: c.priority, reason: `relaxed: ${c.kind} conflicts with kept ${foe.kind} (${foe.priority})` });
+    } else if (PRIORITY_RANK[c.priority] < PRIORITY_RANK[foe.priority]) {
+      // The kept one is lower priority — relax it, keep the new one.
+      const idx = kept.indexOf(foe);
+      kept.splice(idx, 1);
+      relaxed.push({ handle, constraint: foe.kind, priority: foe.priority, reason: `relaxed: ${foe.kind} conflicts with ${c.kind} (${c.priority})` });
+      kept.push(c);
+    } else {
+      // Same priority. If both required, that's unsatisfiable. Else relax the new one (stable).
+      if (c.priority === 'required' && foe.priority === 'required') {
+        unsatisfiable.push({ handle, constraint: c.kind, reason: `required ${c.kind} conflicts with required ${foe.kind} — cannot both hold` });
+      } else {
+        relaxed.push({ handle, constraint: c.kind, priority: c.priority, reason: `relaxed: ${c.kind} conflicts with ${foe.kind} (equal priority, kept first)` });
+      }
+    }
+  }
+  return { kept, relaxed, unsatisfiable };
+}
+
+/** Collect a node's constraints: the language slot it lands in (slot.constraints)
+ *  + the page's current arrangement (currentConstraints). The slot constraints
+ *  carry the language's declared priorities; the current ones are law. */
+function nodeConstraints(node: LayoutIRNode, slot: SlotDef | undefined): ConstraintLike[] {
+  const out: ConstraintLike[] = [];
+  if (slot) for (const sc of slot.constraints) out.push({ kind: sc.kind, priority: sc.priority, source: 'language', value: sc.value });
+  for (const c of currentConstraints(node)) out.push(c);
+  return out;
 }
 
 /** the solver's emit-time plan — what the CSS intends, asserted at verify time. */
@@ -155,7 +251,27 @@ export interface PlacementResult {
  *  Pure: no DOM, no model calls. The Target IR provides the tracks and slot
  *  assignments; the solver does not reach back into perception. */
 export function solve(input: SolveInput): SolveResult {
-  const { ir, target, excluded } = input;
+  const { ir, target, excluded, lang, handleToSlot } = input;
+
+  // ── 0. Constraint priority + relaxation ────────────────────────────
+  // The call site that reads .priority: for each node, collect its constraints
+  // (the language slot it landed in + the page's current arrangement), attempt
+  // them, and relax the lowest-priority on a conflict. droppedOptionals records
+  // every relaxation with its reason; required-vs-required is unsatisfiable and
+  // goes to target.unsatisfiable via the caller. This was always [] before —
+  // priority was assigned in seven places and read in none.
+  const droppedOptionals: { handle: string; kind: string; reason: string }[] = [];
+  if (lang && handleToSlot) {
+    const slotById = new Map<string, SlotDef>(lang.slots.map((s) => [s.id, s]));
+    for (const node of ir.nodes) {
+      if (excluded.has(node.handle)) continue;
+      const slotId = handleToSlot.get(node.handle);
+      const slot = slotId ? slotById.get(slotId) : undefined;
+      const { relaxed, unsatisfiable } = resolveNodeConstraints(node.handle, nodeConstraints(node, slot));
+      for (const r of relaxed) droppedOptionals.push({ handle: r.handle, kind: r.constraint, reason: r.reason });
+      for (const u of unsatisfiable) target.unsatisfiable.push({ handle: u.handle, constraint: u.constraint, reason: u.reason });
+    }
+  }
 
   // ── 1. Build placement map from the Target IR ────────────────────────
   const spansSet = new Set(target.spans);
@@ -228,7 +344,7 @@ export function solve(input: SolveInput): SolveResult {
     placement, gridTemplate, trackCount, tracks: target.tracks,
     perNodeDecls,
     rulesEmitted: 1 + placement.size + perNodeDecls.size,
-    matchedTargets, droppedOptionals: [],
+    matchedTargets, droppedOptionals,
   };
 }
 

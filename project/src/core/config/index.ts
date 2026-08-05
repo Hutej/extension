@@ -27,20 +27,20 @@ export const AI_CONFIG = {
   // JSON truncation when the model thinks at higher effort.
   styleMaxTokens: 24000,
 
-  // Per-role reasoning effort. The Architect makes STRUCTURE decisions — it
-  // needs to think. We built a designer and told it not to think; that was
-  // the defect. The Painter runs in PARALLEL with the Architect (same wall-
-  // clock round trip), so its effort adds to COST but not to LATENCY. We keep
-  // the Painter at 'low' for cost; the Architect goes to 'medium' for quality.
-  // The Critic is a fast repair pass — stays at 'low' (it corrects, it doesn't
-  // design). Env override: RV_EFFORT sets a global floor (all roles use at
-  // least that effort).
-  // ponytail: 'medium' for the Architect on GLM 5.2 / Cloudflare Workers AI
-  // timed out at 130s in a prior test — but that was the SINGLE shared
-  // styleReasoningEffort. The Architect now has its own 70s timeout
-  // (architectTimeoutMs); if 'medium' exceeds it, the call fails fast and the
-  // Painter + Critic carry the design (a partial design beats a timeout).
-  architectReasoningEffort: (process.env.RV_EFFORT_ARCHITECT ?? 'medium') as 'low' | 'medium',
+  // Per-role reasoning effort. The Architect makes STRUCTURE decisions, but on
+  // GLM 5.2 / Cloudflare Workers AI 'medium' measured ~130s — well past the
+  // 70s Architect timeout and far past the 5-10s latency target. Raising the
+  // ceilings to fit medium is movement in the wrong direction (a 130s design
+  // is not a 5-10s design). So the Architect reverts to 'low' until the prompt
+  // is smaller; a medium-effort Architect aborts and falls back on nearly every
+  // run, and a fallback design is indistinguishable from a bad design. The
+  // Painter runs in PARALLEL (same wall-clock round trip) so its effort adds
+  // COST but not LATENCY — kept at 'low'. The Critic is a fast repair pass at
+  // 'low'. Env override: RV_EFFORT sets a global floor.
+  // ponytail: 'medium' for the Architect times out at ~130s vs a 70s ceiling and
+  // a 5-10s target — revert to 'low' rather than raise ceilings. The fallback
+  // is now loudly flagged (architectFallback) so it can't look like quality.
+  architectReasoningEffort: (process.env.RV_EFFORT_ARCHITECT ?? 'low') as 'low' | 'medium',
   painterReasoningEffort: (process.env.RV_EFFORT_PAINTER ?? 'low') as 'low' | 'medium',
   // Legacy: the shared effort, used by the Critic and the restyle-only path.
   styleReasoningEffort: (process.env.RV_EFFORT ?? 'low') as 'low' | 'medium',
