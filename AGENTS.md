@@ -1,96 +1,144 @@
 # Revueon — AGENTS.md
 
-*(Keep this file SMALL — it is auto-loaded into every prompt. Details live in the files below; read them on demand.)*
+*(Keep this file SMALL — it is auto-loaded into every prompt. Details live in the numbered files;
+read them on demand.)*
 
-This is not just an extension — this is an AI agent that lives in your browser. Revueon reshapes ANY website in plain English — locally, never the site's backend. Endgame: replace EVERY browser extension. The moat is generality: principles, not recipes.
+Revueon is **an AI agent that lives in the browser**. A user states a goal in plain English and
+Revueon investigates the page, gathers only the evidence it needs, chooses the cheapest correct way
+to act, does it, looks at the result, and stops. Locally — never the site's backend.
 
-## Pointers (read `.kiro/steering/product.md` before any work)
+Endgame: replace every browser extension. The moat is generality — **principles, not recipes**.
 
-- **One architectural rule:** the AI owns design decisions, the Layout IR owns structure, the solver
-  owns constraints, the compiler owns CSS. No layer takes over another's responsibility.
-- **One pipeline (BUILD SWEEP 1F):** the v1/v2 fork is DELETED; the `layoutCompiler` flag is gone
-  (no `RV_LAYOUT_COMPILER` env, no popup dev toggle). One pipeline: perceive → Architect+Painter
-  parallel → mergeSpecs → ops → solver (`computeGridPlacementCss`) → `compileSpec` → combine → apply
-  → verify → repair → persist.
-- **Ponytail ladder:** walk it before every change (below). Stop at the first rung that holds.
+---
 
-## Repo map (root = Revueon/)
+## The two rules everything else follows from
 
-- `project/` — the real codebase: extension + test harness (WXT, TypeScript strict, MV3, Playwright). All code work happens in `project/src/` and `project/tests/`.
-- `.kiro/steering/product.md` — roadmap with ALL phases + sub-phases and the CURRENT POSITION. **Read before starting any task.**
-- `docs/ARCHITECTURE.md` — engine pipeline, laws/constants, model config, harness gotchas. **Read before touching `project/src/`.**
-- `docs/LAW_0_BROWSER_OWNERSHIP.md` — the governing law for all layout changes: browser owns layout, we hand it constraints. **Read before any layout emission change.**
-- `all-about_revueon.txt` — background reference; read only when relevant.
-- `roadmap.txt` - if you dont know in which phase you are, you can refer this and you have authority to make changes in it if the step is completed and moving on. User will not specify this in prompt you have to handle it own
-  
+> **1. Every user request is an investigation, not a pipeline.**
+>
+> Solve it with the minimum observation level, the minimum reasoning depth, and the minimum
+> execution scope capable of producing a correct result with sufficient confidence.
+> Escalate only when the evidence is insufficient — never because "that's the pipeline."
+
+> **2. No new capability ships while a foundation is broken.**
+>
+> Seven foundations underpin every request Revueon will ever serve — identity, application,
+> reversal, continuity, integrity, the loop, sight. They are listed in `06_FOUNDATION.md` with
+> their honest current state. Three months of features were built on unproven primitives and all
+> of it had to be deleted.
+
+The old rule — *"AI owns design decisions, the Layout IR owns structure, the solver owns
+constraints, the compiler owns CSS"* — is **retired**. It described layers of a pipeline that no
+longer exists.
+
+---
+
+## Read these before working
+
+| File | Read it when |
+|---|---|
+| `all_about_revueon.txt` | Revueon details, what is our product what it should be all the details contains in this file. 
+| `01_DIRECTION.md` | **Always, first.** The thesis the whole product rests on. |
+| `02_PRINCIPLES.md` | **Always.** Twelve binding principles, each with a test. |
+| `03_ROADMAP.md` | Before starting any task — which stage we are in and what "done" means. |
+| `04_CAPABILITIES.md` | **Before adding or changing any tool.** The permanent tool contract. |
+| `05_BROWSER_CRAFT.md` | **Before emitting any CSS or touching the DOM.** Browser physics — formatting contexts, intrinsic sizing, cascade layers, container queries, healing, selector stability. This is the knowledge recovered from 12,000 deleted lines. |
+| `06_FOUNDATION.md` | Before planning work. The seven foundations, their state, and the MVP. |
+| `07_ANTIPATTERNS.md` | Before claiming anything works. Thirteen ways this project has already failed. |
+| `roadmap.txt` | Optinal to read 
+
+`docs/ARCHITECTURE.md` — the loop, the tools, the budgets. Read before changing the agent.
+
+---
+
+## Repo map (root = `Revueon/`)
+
+- `project/` — the codebase: extension + harness (WXT, TypeScript strict, MV3, Playwright).
+- `project/src/agent/` — the loop, the prompt, the journal, the budget.
+- `project/src/tools/` — observe, act, verify. **Every capability lives here and nowhere else.**
+- `project/src/core/perceive/` — kept intact. The strongest thing we built. It is **one tool**, level 4.
+- `project/src/core/` — shared machinery: inventory, heal, reason (transport), persist, sanitize, config.
+- `.kiro/steering/product.md` — product definition + current position.
+
+---
+
 ## Absolute rules
 
-1. **Phase discipline:** only solve the CURRENT phase's problems (see product.md). Defer + flag everything else.
-2. **Zero site-specific hardcoding.** Principles, not recipes. No aesthetic lookup tables. Test grids rotate NOVEL prompts (never reuse one).
-3. **Real proof only:** real extension, real sites, real model calls, real popup→Transform flow. NEVER pass a test by loosening it. NEVER fake or overstate a result.
-4. **All or nothing:** any original-looking region after a redesign = FAILURE, even if every automated check is green. The human eye is the final gate.
-6. **Do not rebuild `perceive/`** unless the audit proves it wrong. No vision/screenshot input to the design model. (Enrichment of `perceive/` is allowed — additive fields like `designRole`; a rebuild is not.)
-7. **Security/git:** `.env` stays gitignored (public repo); push only after proven slices. Quality over speed.
-8. **One pipeline (BUILD SWEEP 1F):** the `layoutCompiler` flag is deleted — there is ONE pipeline,
-   not a v1/v2 fork.
+1. **Every request goes to the model.** No keyword table, no saved action, no hardcoded route, no
+   "fast path" for simple things. Claude Code has no saved action for renaming a variable.
+2. **No module, file or directory is named after an operation.** Nobody writes a `subtract/` module.
+   Build representations and capabilities, not features.
+3. **Observation collects evidence; it never decides.** No observation function returns anything
+   that can be applied to a page.
+4. **Low confidence means do less, never guess more.** Zero output and partial output are successful
+   outcomes. The word `fallback` does not belong in this codebase.
+5. **Execution scope equals decision scope.** Reasoned about three elements → exactly three elements
+   may differ.
+6. **Express intent, never implementation.** No length measured off the live page is ever written
+   back into it. A transformation must survive a window resize — the one surviving hard law.
+7. **Every operation is reversible, and `textContent` is never a valid inverse.** It discards every
+   child element. Anything touching structure records a cloned node. `on → off → on → off` restores
+   the DOM byte for byte.
+8. **Let the browser do browser work.** Prefer a stylesheet the cascade applies forever — including
+   to elements that do not exist yet — over a DOM edit we then have to defend. Mutation is a rare
+   exception and must declare its reason.
+9. **Capabilities compose.** No second code path that does 80% of an existing one. A new kind of
+   request should need a new *combination*, not new code.
+10. **Revueon never refuses a page.** No "page too large", no unsupported-site message. Do part of
+    the job and say what you skipped.
+11. **Refuse on measurement, never on spelling.** A scope guard checks what a selector actually
+    resolved to — element count, share of page text, share of area. Blocklists of `body`, `html`,
+    `*` leak: `:root` and `.main-wrapper` walk straight through.
+12. **Anything a budget clips sets `truncated: true` and tells the model.** Silent truncation makes
+    a model confidently wrong, which is worse than a model that knows it is missing something.
+13. **Every error message names an alternative.** A model told "invalid selector" retries until the
+    budget dies. A model told *"call describePage first, then read the specific region"* recovers in
+    one step. Errors are instructions, not log lines.
+14. **Never send a screenshot or page content to a model for identification.** Origin and path only,
+    query and fragment stripped. Privacy commitment, not a preference. *(Screenshots of our own test
+    runs going to a vision model in the harness are a separate thing and are fine.)*
+15. **A test may never be edited to make it pass.** Every check ships with a deliberate failing case,
+    demonstrated actually failing. If the check goes red, the extension is wrong.
+16. **Code is wired in the same commit that creates it.** An orphan is a build failure, not a
+    warning. Nine separate representations were written and never read — that stops here.
+17. **Zero site-specific hardcoding.** No YouTube, Reddit or Wikipedia in any file, tool, prompt or
+    constant. Principles, not recipes. Novel test prompts every time — never reuse one.
+18. **Never run Playwright against YouTube, Reddit, X, LinkedIn, Amazon or Gmail.** They serve
+    captchas to automation and the harness hangs. Use MDN, Wikipedia, news.ycombinator.com,
+    docs.python.org. Protected sites stay in the corpus as **manual by-eye tests only**.
+19. **Green is not done. An unverified run is a failed run.** A human eye — or at minimum a vision
+    model describing the screenshot in words — is the only pass. Any region that looks wrong is a
+    failure even if every check is green.
 
-## Run the harness
+---
 
-```
-cd project && node --experimental-strip-types --env-file=.env tests/popup.test.ts
-```
-`RVGRID=smoke` for 1-site quick test, `RVGRID=full` (default) for 5-site grid.
+## Two banned words
 
-## Status updates (required duty)
+**"Intermittent"** — nothing in a deterministic system is intermittent. It is a race, a timeout, or
+unmodelled state. Say "I do not know why this happens." That sentence is respected.
 
-When a sub-phase is REALLY done — proven by eye on real sites, screenshots captured, honest report given — update `.kiro/steering/product.md`: flip that sub-phase's checkbox to done and rewrite the "Current position" section. NEVER flip a checkbox on green automated checks alone; "done" requires genuine, honest, by-eye completion. If in doubt, leave it open and say why.
+**"Harness artifact"** — used twice, wrong twice. If the harness sees it, the user will see it.
+
+---
+
+## Working style
+
+- **Think before coding.** State assumptions. If two interpretations exist, say so — don't pick
+  silently. If something is unclear, stop and ask. Stopping to ask is always the right call.
+- **Simplicity first.** Minimum code that solves the problem. If you wrote 200 lines and it could be
+  50, rewrite it. Nothing speculative, no abstraction for single-use code.
+- **Surgical changes.** Every changed line traces to the request. Don't improve adjacent code.
+  Remove orphans *your* change created.
+- **Use as many subagents as you want** — for parallel work, for review, for cleanup. Give each one
+  a scope it can hold entirely; vague scope produces vague work. Never let a subagent decide scope,
+  delete something outside its brief, or edit a test to make it pass. **Always run a review subagent**
+  against `02_PRINCIPLES.md` and the ten-point check in `04_CAPABILITIES.md` §9 before you report,
+  and report what it found even when it is unflattering.
 
 ## Reporting
 
-End every task with an honest report: what shipped · what's proven (real numbers: wall-clock, paid calls, verdicts) · what failed · out-of-scope findings (flag and STOP — never expand scope on your own).
+End every task with: what shipped · what is proven, with real numbers (wall clock, paid calls, what
+the vision model saw in words) · **what failed** · what you did not build, named explicitly ·
+anything that looks bad to you even if it passed.
 
-# AGENTS.md
-
-Behavioral guidelines to reduce common LLM coding mistakes. Merge with project-specific instructions as needed.
-
-**Tradeoff:** These guidelines bias toward caution over speed. For trivial tasks, use judgment.
-
-## 1. Think Before Coding
-
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
-
-Before implementing:
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
-
-## 2. Simplicity First
-
-**Minimum code that solves the problem. Nothing speculative.**
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
-
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
-
-## 3. Surgical Changes
-
-**Touch only what you must. Clean up only your own mess.**
-
-When editing existing code:
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
-
-When your changes create orphans:
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-
-The test: Every changed line should trace directly to the user's request.
-
-**These guidelines are working if:** fewer unnecessary changes in diffs, fewer rewrites due to overcomplication, and clarifying questions come before implementation rather than after mistakes.
+Never report a commit hash. Never overstate. "Not built" is a perfectly good line and omitting it
+is not.
