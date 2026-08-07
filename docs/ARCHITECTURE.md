@@ -1,566 +1,297 @@
-# Revueon — Engine Architecture
+# Revueon — Architecture
 
-*(Read this before touching `project/src/`. Loaded ON DEMAND, not in every prompt — it can afford
-detail. If any fact here disagrees with the code, THE CODE WINS: verify against the code and update
-this file.)*
+*(Read before touching `project/src/`. Loaded on demand, so it can afford detail.
+If any fact here disagrees with the code, **the code wins** — verify, then update this file.)*
+
+**Companion files.** This describes the *shape* of the system. For the permanent tool contract read
+`04_CAPABILITIES.md`. For browser physics — formatting contexts, intrinsic sizing, cascade layers,
+container queries, healing, selector stability — read `05_BROWSER_CRAFT.md` before emitting any CSS
+or touching the DOM.
+
+---
 
 ## The one architectural rule
 
-> The AI is responsible for design decisions, the Layout IR is responsible for expressing structure,
-> the solver is responsible for satisfying constraints, and the compiler is responsible for generating
-> CSS. No layer is allowed to take over another layer's responsibility.
+> **Every user request is an investigation, not a pipeline.**
+>
+> Solve it with the minimum observation level, the minimum reasoning depth, and the minimum
+> execution scope capable of producing a correct result with sufficient confidence.
+> Escalate only when the evidence is insufficient — never because "that's the pipeline."
 
-**Law 0 — Browser Ownership of Layout** (`docs/LAW_0_BROWSER_OWNERSHIP.md`): the browser
-owns layout; we hand it constraints and let it solve. Every emitted length carries provenance
-(`token | authorConstraint | intrinsic | measurement`); measurement-provenance lengths are
-hard-rejected at emission. Emission is constraint-driven, not measurement-driven. Viewport units
-and measurement-derived values are purged. Container queries replace viewport breakpoints. The
-existing formatting context is preserved, not flattened. Read the law before any layout emission
-change.
+The retired rule — *"AI owns design decisions, the Layout IR owns structure, the solver owns
+constraints, the compiler owns CSS"* — described layers of a fixed sequence. That sequence was the
+product's central defect. It is gone.
 
-## One pipeline (BUILD SWEEP 1F — convergence)
+---
 
-The v1/v2 fork is DELETED. There is now ONE pipeline; the `layoutCompiler` flag is gone
-(no `RV_LAYOUT_COMPILER` env, no popup dev toggle).
+## The shape of the system
 
 ```
-perceive -> Architect+Painter (parallel) -> mergeSpecs -> ops -> solver (structural CSS via
-computeGridPlacementCss) -> compileSpec (aesthetic CSS) -> combine -> apply -> verify -> repair -> persist
+User goal
+   ↓
+Agent loop  (background service worker — the brain)
+   ↓  tool call                    ↑  result + confidence
+Tool layer  (content script — the hands)
+   ↓
+The page
 ```
 
-Happy path: **2 paid calls** — Architect (structure/relations/pack) and Painter (surface) run in
-parallel on the same perception. The relation language SURVIVES: the model still emits relations;
-the engine maps relations → Target IR constraints. The solver sits BELOW the engine and emits
-structural CSS via `computeGridPlacementCss`; `compileSpec` emits aesthetic CSS. The two are combined
-and applied, then verified, repaired (re-solve, never patch CSS), and persisted.
+One loop. A growing set of tools. Nothing else.
 
-## Target Layout IR
+There is no orchestrator, no fixed stage order, no route table, and no code path chosen from the
+text of the request. Every request goes to the model.
 
-The declared destination page expressed as constraints the browser re-solves. `TargetLayoutIR` in
-`layout/ir.ts` carries: `archetype` (from a shortlist), `tracks` (fr proportions + `minmax()` floors —
-never measured widths), `slotAssignment` (handle → track index), `spans`, `adjacency`, `readingOrder`,
-`slotBehaviour` (per-track direction/wrap/alignment), `unsatisfiable` (reported, never silent).
+---
 
-Eight archetypes: `single-column`, `two-column-rail-left`, `two-column-rail-right`, `three-column`,
-`grid-2`, `grid-3`, `grid-4`, `split-list-detail`.
+## The loop
 
-`buildFallbackTargetIR()` converts a deterministic `assignSlots` result → Target IR when the model
-emits no composition relations. `resolveComposition()` in `compile/transform.ts` builds the Target IR
-from the model's composition relations when they are present.
-
-## Composition vocabulary (BUILD SWEEP 1F)
-
-Nine new relations let the model declare page structure (added to the existing relation language):
-
-`archetype`, `assignSlot`, `trackAllocation` (fr ratios with `minmax()` floors), `adjacentTo`,
-`spansTracks`, `readBefore`, `stackDirection`, `wrapBehavior`, `prominentFirst`.
-
-Each is a typed relation, validated at the boundary, resolved into the Target IR, satisfiable by the
-solver, and present in the Architect prompt. **No magnitude is a pixel.** The solver emits
-`fr` / `minmax()` / `fit-content` — never fixed tracks derived from measured widths.
-
-## Wiring audit (permanent gate)
-
-`npm run audit:wiring` is a permanent gate. It fails when:
-- a vocabulary relation is missing `RELATION_SPECS` / prompt / validator / emission, or
-- a `PackPrinciples` field is never read, or
-- an exported symbol has no non-test caller (warn).
-
-Run it with `npm run audit:wiring`.
-
-## Pixel leaks fixed (BUILD SWEEP 1F)
-
-Three pixel-provenance leaks are now pack-derived instead of hardcoded:
-- `hoverElevate` `translateY` — from `spacingScale`/`borderScale`.
-- `focusRing` outline width/offset — from `borderScale`.
-- `movable` keyboard step — from `spacingScale`.
-
-`groupWith` returned to advisory (display:flex only, no forced direction).
-
-## columnCount split (BUILD SWEEP 1F)
-
-`columnCount` is renamed to `proseColumns` (multi-column text flow). Page layout tracks no longer route
-through `columnCount`; they route through the `trackAllocation` composition relation.
-
-## BUILD SWEEP 1G — Conformance
-
-### Three relationship relations made real (H1)
-
-`adjacentTo`, `readBefore`, `prominentFirst` were silently dropped in 1F (populated IR fields the
-solver never reads). They now satisfy through **placement** — they adjust `slotAssignment`, which
-the solver emits as `grid-column`. That IS the emission path. The `adjacency`/`readingOrder` arrays
-remain as records for conformance verification, not emission.
-
-The honest accessibility constraint replaces the Law 0 misattribution: Law 0 governs measurement-
-derived lengths, not ordering. Ordering is a valid IR constraint kind, and grid placement IS
-browser-solved ordering. The real constraint: visual order diverging from DOM order breaks screen
-readers and tab sequence. Handling: prefer placement (grid-column, preserves DOM order via auto-row-
-placement) over CSS `order` (breaks it). Where DOM order must change, use the DOM op path
-(`reorderBefore` with a real `MutationReason`).
-
-`prominentFirst` now consumes the focal point perception (`perception.spatial.focalPoint`), which
-was computed but never had a consumer.
-
-### Wiring audit hole closed (H2)
-
-A validation path is not an emission path. The audit now checks that a composition relation's case
-block modifies a solver-read IR field (`slotAssignment`, `spans`, `tracks`, `slotBehaviour`), not just
-pushes to `adjacency`/`readingOrder`/`unsatisfiable` (which the solver never reads). A relation whose
-sole possible outcome is unsatisfiable fails the audit. After the fix: 46/46 pass.
-
-### File split (H4)
-
-`content.ts` (1585→1218 lines) extracts 6 implementation blocks into modules. `transform.ts`
-(743→412 lines) splits the relation switch into 9 domain modules (spacing, typography, hierarchy,
-surface, color, layout, motion, ops, interaction). Pure moves, no behaviour change. The dispatcher
-iterates relations in original order (accent budget + style merge are order-sensitive).
-
-### Constraints removed (H5)
-
-- `reasoning_effort`: per-role. Architect 'medium' (structure needs thinking), Painter 'low' (parallel
-  — adds cost, not latency), Critic 'low'. `RV_EFFORT` env is a global floor.
-- Intent cap: not found in the relational path (deleted with the old enum system). Bounded by model
-  token budget + time budget.
-- Law 0 rule 5 amended: viewport units (vw, vh) are a defect when the viewport is not the reference.
-  Where it genuinely is, use dvh/svh — never vh or vw for content sizing.
-- `--rv-side-max`: 280px → `min(280px, 30cqi)` (proportional bound: 30% of container inline-size,
-  capped at 280px).
-- `65ch`: renamed `--rv-content-max` → `--rv-prose-max`. Applied ONLY to prose roles
-  (article-body, metadata, toc) via `max-width` in per-node declarations. Never to listings, navs,
-  or chrome.
-- Call budget restated: one round trip of latency (parallel design stage), cost reported separately
-  (call count). 2 calls + 1 round trip = happy path.
-
-### Conformance verification (H6)
-
-10 structural checks in `verify/conformance.ts`, all comparing rendered DOM against the
-`TargetLayoutIR` (not taste):
-1. Archetype conformance — declared vs measured column count. Distinguishes "chose single-column"
-   (PASS) from "declared multi but collapsed" (FAIL).
-2. Track conformance — declared fr ratios vs measured track proportions (25% tolerance).
-3. Slot conformance — every declared slot renders in its assigned track.
-4. Reading order conformance — rendered + DOM order match declared order (accessibility).
-5. Spacing conformance — every emitted spacing traces to a pack scale step.
-6. Type ramp conformance — sizes on ramp, monotonic across hierarchy.
-7. Accent budget — accent count within `maxAccentCount`.
-8. Elevation — shadow/border from pack scale.
-9. Measure — prose line length + line-height in readable band.
-10. Unsatisfiable reporting — every solver-unsatisfiable constraint in report. A run with
-    unsatisfiables is not a clean run.
-
-Proxy gates retired: `changed`, `coherent`, `covered`, `layoutReshaped`, `usesRoom` demoted to
-advisory (can pass on an unchanged page). Physics gates (notBlank, noOverflow, noOverlap,
-contrastOk, contentIntact, contentVisible, movedAlive) stay as hard gates. The reflow check is
-RETIRED as a hard gate (1H): sidebar→topbar reflow is now expressible as language + archetype +
-assignSlot, and archetype conformance carries it. `reflowAddressed` stays advisory. **No aesthetic
-score** — not as a gate, not as a number.
-
-## BUILD SWEEP 1H — Languages
-
-### Seven layout languages (I0–I3)
-
-The single largest cause of over-perceiving/under-transforming was exactly ONE layout language
-(documentation): every page, on every prompt, landed in documentation slots. "Make this a
-dashboard / bento / magazine" was inexpressible. 1H makes languages DATA and lets the model CHOOSE.
-
-`LayoutLanguage` contract (`layout/languages/types.ts`): `id`, `name`, `description` (written for
-the model to read), an ordered `slots: SlotDef[]`, the `archetypes` it supports, and `suits`
-(role inventory, component types, card count, media count, prose volume). Each slot declares the
-roles it accepts, its constraints, and each constraint's `priority`. Every language has an
-overflow slot (the last slot) so no region is ever left unplaceable. `slotForRole(lang, role)` is
-first-match-wins; `overflowSlot(lang)` is the last slot.
-
-Seven languages in `LANGUAGES` (documentation last = fallback):
-
-| id | slots | archetypes |
-|---|---|---|
-| dashboard | toolbar, filter-rail, metric-strip, panel-grid, detail-drawer, overflow | two-column-rail-left, grid-3 |
-| bento | hero-tile, feature-tiles, filler-tiles, overflow | grid-3, grid-4, grid-2 |
-| editorial | masthead, lede, prose-column, pull-aside, figure-band, overflow | single-column, two-column-rail-right, three-column |
-| feed | header, filter-bar, item-stream, side-meta, overflow | single-column, two-column-rail-right, three-column |
-| split-view | nav-list, list-pane, detail-pane, overflow | split-list-detail, three-column, two-column-rail-left |
-| gallery | header, media-grid, caption-strip, overflow | grid-3, grid-4, grid-2 |
-| documentation | (the fallback — supports all four base archetypes) | single-column, two-column-rail-left, two-column-rail-right, three-column |
-
-`language` is a TOP-LEVEL spec field (like `pack`), NOT a relation. The Architect emits `"language"`
-at the JSON root; `validateSpec` stores it; `content.ts` reads `spec.language` → `getLanguage` →
-`assignSlots`/`buildFallbackTargetIR`/`resolveComposition`. It is NOT in `RELATION_SPECS`/
-`COMPOSITION_RELATIONS` so `audit:wiring` does not check it as a relation (correct — it selects
-which slot set `assignSlots` uses; it has no CSS emission of its own).
-
-### Candidate shortlist — the model chooses, measurement only proposes (I3)
-
-A language is never selected by measurement alone. `proposeLanguageCandidates(perception)` in
-`layout/languages/index.ts` scores each language by overlap with the perception's role inventory,
-component types, card count, media count, and prose volume (`clusters[].textProfile.readingLength`),
-returns the top 3–5, and ALWAYS includes documentation. `formatCandidates` renders the shortlist as
-prose the Architect reads. The Architect prompt lists only those candidates' descriptions + the
-archetypes they support; the model CHOOSES the language (and the archetype within it). If the
-model's chosen archetype is not in the language's `archetypes`, `resolveComposition` records
-unsatisfiable and keeps the language's default archetype.
-
-### Constraint priority + relaxation (I4)
-
-`ConstraintPriority` (`required`/`preferred`/`optional`) was assigned in seven places (the
-Current-IR derivation `currentConstraints` + every language's slot constraints) and read in NONE
-— `droppedOptionals` was always `[]`. `resolveNodeConstraints` in `solve.ts` is the call site that
-reads `.priority`: it attempts every constraint on a node (the language slot it landed in + the
-page's current arrangement), and on a width-axis conflict (`FillParent` vs `MaxWidth`) relaxes the
-lowest-priority one first, recording every relaxation with its reason. A required-vs-required
-conflict is reported `unsatisfiable`, never silently dropped. `solve()` populates
-`SolveResult.droppedOptionals` and pushes required conflicts to `target.unsatisfiable`. A
-browser-free unit test (`tests/relaxation.test.ts`) proves an optional/preferred constraint is
-relaxed + reported and a required-vs-required pair is unsatisfiable.
-
-### Colour-coverage invisible-text fix (I5)
-
-The coverage loop in `compile/transform.ts` previously assigned `pack.colors.text` to every
-addressed cluster with no explicit colour, skipping only clusters that set a background. A cluster
-inheriting a LIGHT background still received the pack text colour (e.g. `#d8dde3` on white) — the
-invisible-text vector. The structural rule now: never emit a text colour unless contrast is
-provable against a known background — the cluster's effective background from the surface model
-(`cluster.background.effectiveColor`, always populated). If `contrastRatio(packText, effBg) <
-MIN_CONTRAST_RATIO` (the single law constant — no duplicate threshold), the author text colour
-stands.
-
-### Three-count conformance (I6)
-
-Conformance is THREE counts on the live path (`checkConformance`): `applicable` /
-`notApplicable` / `pass` over its four categories (spacing, type, color, family). A run with zero
-applicable is "nothing was declared", NOT a pass — the early return for a restyle-only run now
-reports `applicable: 0, ok: false`. `ok` requires `applicable > 0`. The counts are surfaced in the
-ledger + the `CONFORMANCE` log. (The browser-bound structural 10-check in `verify/conformance.ts`
-retains `applicable?` on each `ConformanceCheck` so the same counts are computable when it is wired
-in the site-tested sweep.)
-
-### Timing + architect fallback (I1)
-
-1G raised Architect `reasoning_effort` to `medium` (measured ~130s) but left `architectTimeoutMs`
-at 70s and `designMaxMs` at 120s — the Architect aborted and fell back on nearly every run, and a
-fallback was indistinguishable from a bad design. 1H REVERTS the Architect to `low` (raising
-ceilings to fit medium is movement in the wrong direction vs the standing 5–10s target). A
-fallback now carries explicit `architectFallback: true` on `TransformOutcome` + the ledger, so a
-Painter-only recolor never reads as a quality result.
-
-## The Layout IR type schema (`src/core/layout/ir.ts`)
-
-Four sections per node, no more. **Immutability is a contract, not a convention:** the Current IR is
-deep-frozen (`Object.freeze` recursively); any mutation throws in dev. The Target IR is a NEW object
-built from the frozen Current IR, never a mutation of it.
-
-- **`semantic`** — `role: DesignRole`, `confidence`, `dominanceRank`, `group`.
-- **`authoredLayout`** — `display`, `flow` (row/column/none), `isContainer`, `isFlex`, `isGrid`,
-  `flexWrap`, `intrinsicSizing` (auto/fixed/fluid), `position` (static/relative/absolute/fixed/sticky),
-  `centered`, `widthRatio` (bucketed to 0.05).
-- **`computedRelationships`** — `parent` (handle|null), `children[]` (DOM order), `siblings[]`,
-  `alignment` (start/center/end/stretch/mixed), `ordering` (sourceOrder index), `grouping`.
-- **`targetConstraints`** — `LayoutConstraint[]`. EMPTY in the Current IR (extraction populates none).
-  Populated ONLY in the Target IR by the transformation + the solver. **The model NEVER assigns
-  priority.**
-
-`LayoutIR` = `{ viewport, nodes[], byHandle }`. `extractLayoutIR(perception): LayoutIR` is PURE (no
-DOM — perception already captured the computed styles). `currentConstraints(node): LayoutConstraint[]`
-derives the page's CURRENT arrangement as constraints (the seed the Target IR extends; the probe's
-stability signature).
-
-## Constraint vocabulary, priority levels, priority sources
-
-Vocabulary (semantic, not measurements): `FillParent`, `Centered`, `StackVertically`,
-`WrapOnOverflow`, `MaxWidth`, `AspectRatio`, `Gap`, `Alignment`, `Ordering`.
-
-Every constraint carries:
-- `priority: 'required' | 'preferred' | 'optional'`
-- `source: 'law' | 'language' | 'intent'`
-
-Priority is assigned by, in descending authority: **Browser Laws -> Layout Language -> Transformation
-Intent. THE MODEL NEVER ASSIGNS PRIORITY.** Required = accessibility, reading order. Preferred =
-fill parent. Optional = center horizontally.
-
-Current-IR derivation (`currentConstraints`, source always `law`): `Ordering` (required) on every
-node; `Ordering` value `out-of-flow` when `position` is absolute/fixed; `StackVertically` (preferred)
-for flex-column/block containers; `Alignment` (preferred) for flex-row containers; `WrapOnOverflow`
-(preferred) when `flexWrap`; `FillParent` (preferred, value `partial` when `widthRatio < 0.97`);
-`Centered` (optional) when `centered`; `AspectRatio` (preferred) when `naturalAspect` present;
-`MaxWidth` (value `partial`) when an authored fixed/fluid width < parent.
-
-## Layout language schema + the language registry
-
-A layout language is NOT CSS and NOT HTML. It defines slots, relationships, constraints, grid
-preference and priority rules. Each slot declares: `id`, `allowedRoles[]`, `preferredWidth`,
-`flow`, `ordering`, `minWidth`, `constraints[]` (each with priority). The pipeline ships SEVEN
-languages (BUILD SWEEP 1H): dashboard, bento, editorial, feed, split-view, gallery, and
-**Documentation** as the seventh and the fallback (`getLanguage` returns Documentation for
-unknown ids; `proposeLanguageCandidates` always includes it). See the 1H section above for the
-full slot sets + supported archetypes per language.
-
-**Documentation slots:** `masthead`, `nav-local`, `toc`, `main`, `aside`, `footer`, `overflow`.
-
-**The Overflow Slot is mandatory and must not become a junk drawer:** it sits at the end of document
-flow, full-measure, preserves the original relative order and stacking of its members, inherits
-main's typography, and is never hidden and never visually degraded. Nothing disappears. Nothing
-duplicates. Unmatched/unknown content goes here.
-
-## Slot-assignment algorithm + invariant assertions
-
-Slot assignment is DETERMINISTIC. The model's ONLY layout decision is choosing one archetype by id.
-Sequence: `Semantic Model -> Role Graph -> Slot Assignment -> Target Layout IR`.
-
-Invariant, enforced with assertions that THROW (a violation is a compiler error, same class as
-matched-targets = 0):
-- every semantic node is assigned to EXACTLY ONE slot;
-- unmatched or unknown content goes to the Overflow Slot;
-- sum of slot memberships == node count;
-- no node appears twice.
-
-## Solver stages (`src/core/layout/solve.ts`)
-
-IN SCOPE, all five:
-1. validate constraints
-2. propagate parent constraints to children
-3. choose the Flex or Grid algorithm per container
-4. normalize sizing (auto, %, `clamp()`, `minmax()`)
-5. emit responsive CSS
-
-OUT OF SCOPE — do NOT build: complex constraint relaxation, multi-pass optimization, global
-layout optimization.
-
-Conflict handling is a deterministic priority sort, NEVER "first wins": required beats
-preferred beats optional. Every dropped optional constraint is logged with its node and reason. If
-two REQUIRED constraints conflict, mark that node IMPOSSIBLE and hand it to the ops fallback. Never
-silently pick one.
-
-**Worked propagation example:** parent has `MaxWidth 1200` and child has `FillParent` -> emit
-`width: min(100%, 1200px)`. Do not refuse. Do not pick one.
-
-## Sizing-normalization patterns + the exact fluid token set
-
-Emit exactly these, applied ONLY at semantic text levels (body, headings, captions). Do NOT make
-every nested element fluid; inheritance compounds and the page collapses.
 ```
---step-0: clamp(1rem, 0.95rem + 0.3vw, 1.125rem);
---step-1: clamp(1.25rem, 1.1rem + 0.8vw, 1.6rem);
---step-2: clamp(1.6rem, 1.3rem + 1.2vw, 2.3rem);
---space-s: clamp(8px, 1vw, 12px);
---space-m: clamp(16px, 2vw, 24px);
---space-l: clamp(24px, 3vw, 40px);
+1. Receive the goal and the origin+path.
+2. Ask the model: what do you need to know?
+3. Run the tool it asked for. Append the result to the journal.
+4. Ask again with the journal. Enough evidence?
+      no  → back to 3, one level deeper
+      yes → act
+5. Act. Apply immediately — do not accumulate a batch.
+6. Read the page back. Compare against reality, not against the plan.
+      worse → undo and try something else
+      good  → continue or stop
+7. done(summary) | giveUp(reason) | budget exhausted → stop and say what happened.
 ```
-This fixes a verified defect: the compiler currently freezes fontSize, padding, maxWidth,
-radius and border as raw px. Spacing and type are non-fluid
-today; route them through the token set.
 
-## Exclusion registry (`src/core/layout/exclusions.ts`)
+**Two behavioural rules earned the hard way.** At least one observation before any act — without it
+the model answers from training data and never looks at the page. And when one third of the budget
+remains, the next turn must be act, done or giveUp — without it the model observes forever on a
+vague goal and the budget dies with nothing applied. Both were observed on real runs. Do not solve
+either by growing the prompt; see `07_ANTIPATTERNS.md` §A10.
 
-Principled detection (NO hostnames, NO site names) marking subtrees `relayout: false` while leaving
-`restyle` allowed:
-- shadow root present on the element
-- tag is canvas / svg / video / iframe / object
-- `contenteditable`, or `role=textbox/application`
-- carousel signature: `aria-roledescription="carousel"`, or a track element with `transform:
-  translate` + `overflow: hidden` + siblings of equal width
-- virtualization signature: absolutely-positioned children with translate offsets inside an
-  overflow-hidden container whose child count changes on scroll
-- JS-controlled layout: inline style writes to width/height/transform observed changing between
-  two samples
-- map signature: canvas or tiled absolutely-positioned children under a container with a
-  wheel/pointer handler
+**The journal** is the single record of the run: every tool call, every result, every change made.
+It is what the model sees on each turn, what `undo(n)` walks backwards, and what persistence
+replays on the next visit to the same origin.
 
-**WRAP-DON'T-REPLACE rule:** if a target node's computed display is flex or grid and it has children
-we did not author, you may NOT replace its layout. Wrap it, or move up to a higher semantic boundary.
+---
 
-This is the prime suspect for the BBC and YouTube contentCollapse rollbacks deferred for ten rounds.
-The proof report explicitly states whether it resolves them.
+## Progressive observation — six levels
 
-## Wrapper lifecycle policy
+Depth is chosen at run time from confidence. Never from a keyword or a category.
 
-Mark injected wrappers with a `data-*` attribute; they are disposable runtime layout scaffolding
-and never part of the application's semantic DOM. Adding a wrapper is NOT rebuilding — the child is
-untouched, no event listeners move, no React state changes, no IDs change. On SPA re-render: if the
-framework destroyed it, reapply; if not, reuse.
+| Level | Scope | Typical tool | Cost |
+|---|---|---|---|
+| 0 | Goal + origin only, no DOM | — | ~0 |
+| 1 | One named thing | `findElements`, `readText` | ms |
+| 2 | One component | `inspect`, `measure` | ms |
+| 3 | One region / page map | `describePage` | ~10ms |
+| 4 | Whole page | `perceivePage` | seconds, expensive |
+| 5 | Whole site | not built | — |
 
-## Verification: how each hard gate is measured
+Every observation returns **confidence, latency, cost**. High confidence stops the escalation. Low
+confidence escalates one level — and if evidence is still insufficient at the top, the agent **does
+less**, it does not guess more.
 
-HARD GATES (any one failing fails the run), measured on the applied DOM:
-- **overflow** — `scrollWidth` delta vs before exceeds `MAX_OVERFLOW_RATIO`.
-- **clipping** — a region whose visible box shrank below `MIN_COMPONENT_WIDTH_FRACTION` of its
-  natural content.
-- **hidden content** — opacity < 0.1 or `contentVisible` flag.
-- **horizontal scrolling** — `documentElement.scrollWidth > viewport.w + tolerance`.
-- **element overlap** — new region collisions vs the original page (delta, so pre-existing floats
-  never false-fail).
-- **reading-order violations** — DOM order vs visual order divergence (no `order`/arbitrary
-  `grid-area` that splits keyboard/SR from sight).
+**Most requests must never reach level 4.** In the old architecture every request did, which is the
+whole problem: "hide Shorts" and "redesign this site as Apple documentation" invoked identical
+machinery, at 145 seconds each.
 
-ADVISORY SCORES (computed, logged, never blocking):
-- **alignment consistency** — fraction of shared edges/centers that agree across siblings.
-- **spacing consistency** — `1 − (variance of repeated gaps ÷ mean gap²)`.
-- **hierarchy preservation** — heading-scale rank order preserved + role prominence order preserved.
-- **whitespace balance** — distribution of free space (Gini of inter-region gaps; lower = more even).
-- **vertical rhythm** — consistency of vertical spacing (`1 − (stdev of vertical gaps ÷ mean)`).
+**The working pattern is map-then-read.** Level 3 to find the region, level 1 to read only that
+region. The model never sees the whole page, the whole DOM, or any HTML — it sees a map of ~15
+regions, then the text of the one it chose.
 
-## Repair-as-re-solve + ops fallback
+**Scope refusal is measured, never named.** A guard checks what a selector actually resolved to —
+element count, share of page text, share of area — not whether it was spelled `body`. Blocklists
+leak; `:root` and `.main-wrapper` walk straight through one.
 
-Repair is: **Target IR -> relax constraints -> re-resolve ->
-re-emit CSS.** Repair must not edit CSS directly; it modifies the constraint graph and regenerates.
+---
 
-**OPS FALLBACK:** keep move/remove/reorder. They are no longer primary — they are the fallback for
-what CSS cannot express: `Solver -> impossible? -> minimal DOM operations -> solve again`. The laws
-layer STAYS; it defines the invariants the solver must respect.
+## The tool layer
 
-## Module map (`src/core/layout/`)
+Every capability lives in `src/tools/` and appears in the registry exactly once. **No tool calls
+another tool** — composition happens in the loop where the model can see it and the journal can
+record it. A tool that calls another tool is a hidden pipeline. The full contract is in
+`04_CAPABILITIES.md`.
 
-| File | Owns |
+### Observation — collects evidence, decides nothing
+
+| Tool | Returns |
 |---|---|
-| `ir.ts` | the Layout IR type, `extractLayoutIR` (pure), `currentConstraints`, `deepFreeze`, `ARCHETYPES` (8), `buildFallbackTargetIR` (language-aware) |
-| `exclusions.ts` | the exclusion registry + detection heuristics |
-| `languages/types.ts` | the `LayoutLanguage` contract + `slotForRole`/`overflowSlot` (1H) |
-| `languages/index.ts` | `LANGUAGES` registry, `getLanguage`, `proposeLanguageCandidates`, `formatCandidates` (1H) |
-| `languages/{dashboard,bento,editorial,feed,split-view,gallery,documentation}.ts` | the seven languages as PURE DATA (slots + constraints + archetypes + suits) (1H) |
-| `assign.ts` | language-aware deterministic slot assignment + invariant assertions |
-| `candidates.ts` | deterministic composition detection -> 3–5 archetype candidates |
-| `solve.ts` | the solver (validate, propagate, flex/grid, normalize, emit CSS) + `resolveNodeConstraints` (constraint-priority relaxation, 1H) |
-| `verify.ts` | hard gates + advisory scores on the applied DOM |
+| `describePage` | Region map: roles, component types, text samples, positions, `targetable` |
+| `findElements` | Candidates matching a concept, each with confidence and a selector |
+| `inspect` | Computed style, box, formatting context, children of one element |
+| `measure` | Geometry, overflow, intrinsic sizes |
+| `readText` | Text of one chosen element — redacted, and `truncated` when clipped |
+| `perceivePage` | Full perception. Level 4. Expensive. Called deliberately, rarely. |
 
-## IR stability probe methodology + measured numbers
+No observation tool may return a plan, a spec, a style, or anything applicable to a page. The moment
+observation starts returning "and here's what you should do," perception has taken over design and
+every design decision becomes invisible to the model and untraceable in the journal. That single
+failure cost this project three months.
 
-The probe (`tests/probe/layout-ir.test.ts`), 0 paid calls, 5 grid sites. Perturbations: resize
-(1920/1440/1280), zoom (viewport ÷ factor: 125%→1536px, 150%→1280px — coincides with the 1280 resize,
-reported once), SPA route change (GitHub), lazy-load (scroll-to-bottom), minor DOM mutations
-(insert/remove/reorder). Metrics per site per perturbation: node identity (Jaccard), parent/child,
-role, constraint stability (reported WITH and WITHOUT `Ordering`; gate reads WITHOUT-Ordering), plus
-per-constraint-kind flip rates and per-field stability for the 5 new perception fields.
+### Action — scoped and reversible
 
-Gates: parent/child ≥ 0.90, role ≥ 0.90, node identity ≥ 0.85, constraint (no-Ordering) ≥ 0.85, on
-all 5 sites. Pre-authorized blocked outcome: if the gate fails ONLY on resize node-identity, that is
-expected (geometry-derived handles re-cluster) — STOP and recommend pulling role-anchored stable handles ahead of the
-solver; never tune clustering to green the number.
+| Tool | Notes |
+|---|---|
+| `applyCss` | The primary action. A stylesheet the browser owns. |
+| `hide` | Scoped `display:none`, always followed by `heal`. |
+| `heal` | Close the hole a removal leaves. Six ordered CSS steps — `05_BROWSER_CRAFT` §7. |
+| `insert` | **The safe content path.** Adds nodes; cannot collapse a track. Prefer it. |
+| `setText` | Text-level targets only. **Refuses** an element with element children. |
+| `move` | `order` / `grid-area` first. Reparenting is a last resort and usually wrong. |
+| `bindKey` | Behaviour. Declarative, reversible. |
+| `recomposePage` | Whole-page layout, as **one tool**. Never the default. Shape in `05_BROWSER_CRAFT` §13. |
 
-**Measured numbers (full 5-site grid, 0 paid calls, 1 full-grid run):**
+### Verification — reads reality, after render
 
-| Site | worst id | worst pc | worst role | worst con(no-Order) | fields | GATE |
-|---|---|---|---|---|---|---|
-| Wikipedia | 0.964 | 0.938 | 0.875 | 0.988 | 1.00 | FAIL (role) |
-| MDN | 0.989 | 1.000 | 0.924 | 1.000 | 1.00 | PASS |
-| BBC | 0.922 | 1.000 | 0.959 | 0.980 | 1.00 | PASS |
-| GitHub | 0.988 | 0.965 | 0.812 | 0.965 | 1.00 | FAIL (role) |
-| YouTube | 0.808 | 0.979 | 0.773 | 1.000 | 1.00 | FAIL (identity+role) |
+`snapshot` · `diff` · `checkLayout` · `checkContrast` · `assertDomClean` · `look`
 
-**Verdict: BLOCKED (2/5 pass).** The IR *construction* (`extractLayoutIR` + `currentConstraints`) is
-stable — constraint(no-Ordering) 0.965–1.000 and the 5 new perception fields at 1.00 everywhere. The
-two failure classes live in the **perception layer** the IR projects verbatim:
+All of these read the live DOM after `requestAnimationFrame`, or they are measuring the previous
+frame. They compare against **the page, never the plan** — checking output against intent is a
+compiler validating its own AST, and it reported 9/9 gates green on a destroyed page. `look` sends
+a screenshot to a vision model and gets back a description in words; it is the only check that sees
+what the user sees.
 
-- **`role` instability (Wikipedia, GitHub):** `classifyRole` uses viewport-coupled geometry thresholds
-  (`isLeft`/`isRight`/`widthRatio`/`rectY`). Under resize/zoom/reorder the geometry shifts and clusters
-  near a threshold reclassify. This is a perception-CLASSIFIER property, not an IR-derivation defect.
-- **`handle identity` instability (YouTube):** handles are signature-hashed from visual signature;
-  YouTube's dense feed re-clusters ~18–19% of handles under *any* perturbation (not resize-only), so it
-  does NOT qualify for the pre-authorized resize-only-identity blocked outcome.
+### Control
 
-Per the rules, the classifier and clustering were NOT tuned to pass. The amendment-#2 split was
-decisive: with-`Ordering` constraint stability collapses to 0.247–0.859 (Ordering flips 4–75%); the
-no-`Ordering` gate number is the stable one (0.965–1.000). Resolution is a user decision: accept
-role-label instability (treat role as advisory; the IR structure is stable), revisit the classifier's
-viewport-coupled thresholds, or pull role-anchored stable handles ahead of the solver —
-which would stabilize BOTH role and YouTube identity by decoupling from geometry/signature.
+`undo(steps)` · `done(summary)` · `giveUp(reason)`
 
-## Model transport
+`giveUp` is a **success state**. An agent that gives up honestly is worth more than one that invents
+work. Never make it feel like failure in the prompt or the model will hallucinate instead.
 
-Architect (structure/relations/pack) + Painter (surface) run in parallel on `@cf/zai-org/glm-5.2`;
-Critic repairs on `@cf/zai-org/glm-4.7-flash`. Archetype choice folds into the existing Architect call
-(zero new paid calls). One attempt, ≤120s hard abort; retries only 429/5xx; tokens logged per run. No
-fallback chain. Key in `project/.env` (`OPENAI_API_KEY`, gitignored) — Cloudflare Workers AI
-OpenAI-compatible endpoint is the live path.
+---
 
-## Hard-won lessons (do not relearn these)
+## Errors are instructions
 
-- A node cap amputates the page — below-fold content is never perceived. No node cap; see the whole page.
-- `keep: true` was a loophole — removed; base-coat covers unaccounted clusters.
-- `overflow-wrap: anywhere` collapses min-content and breaks every word. Targeted `break-word` repair
-  only, never preventive `anywhere`.
-- A px ceiling is zoom-hostile; convert to a viewport-relative percentage.
+A tool error is read by a model deciding what to do next. It is not a log line.
 
-## Temporary gate rebase (a decision, not a change record)
+| Bad | Good |
+|---|---|
+| `"invalid selector"` | `"'body' resolves to 4,102 elements (98% of page text). Call describePage first, then read the specific region."` |
+| `"not found"` | `"No match for 'video player'. describePage found: nav, search, breadcrumb, sidebar, article…"` |
+| `"failed"` | `"setText refused: <main> has 47 element children; replacing them would destroy the layout. Use insert."` |
 
-The standing rule is "applied ≥4/5" on the full grid. The current step narrows this deliberately:
+Every refusal names the reason **and the alternative**. A model told what to do instead recovers in
+one step; a model told "failed" retries until the budget dies.
 
-- By-eye gate = **MDN, Wikipedia, GitHub docs (3 sites)** — architecture validation, not stress.
-- **BBC + YouTube must only APPLY WITHOUT ROLLBACK** under the exclusion registry. Their
-  appearance is NOT judged yet — that is the next gate.
-- The full **5/5-sites-applied beauty gate returns at the next gate.**
-- Rationale, verbatim: *"Don't touch BBC or YouTube first. Those are stress tests, not architecture validation."*
+---
 
-## Standing rule: pixel gates assert physics only (moved from product.md)
+## How output reaches the page
 
-Pixel gates assert physics only — readable, no overflow, no overlap, not blank, capture
-succeeded. Design quality is the planner's job and the user's eye. Whether the relayout
-happened is asserted at emit time from the solver's own plan, never inferred from pixels.
-- Cheating a gate is the only way to fail a step. An honest blocked report is a success.
+**Default: a stylesheet.** One scoped `<style>` node in `@layer revueon`, written by the model,
+validated by us. The cascade applies it forever to every matching element — **including elements
+that do not exist yet**. A framework re-render is not an attack we survive; it is an event we never
+hear about.
 
-## Selector strategy
+This is why the old ten-attempt defence loop had to go. It existed only because we mutated the DOM
+and React undid us. **If a defence loop is ever needed again, something that should be CSS is being
+done with JavaScript.**
 
-The pipeline uses **structural selectors as primary**, with `[data-rv-c]` as a genuine
-fallback. At perception time, each cluster gets a `structuralSelector` computed from the
-DOM: nearest stable attribute (id/data-testid/role/aria-label/name) + nth-of-type chain,
-uniqueness-checked. The compile path uses `cluster.structuralSelector` when available,
-falling back to `cluster.selector` (`[data-rv-c="handle"]`) when no stable anchor exists.
-The fallback count is reported as `selectorFallbackCount` in the compile result — a metric
-for how often the structural path fails.
+Cascade layers mean our styles win predictably without a single `!important`. `:where()` contributes
+zero specificity for rules that should lose gracefully. `!important` is genuinely correct for hiding,
+where intent is absolute; it is wrong for typography and spacing, where the page may have a better
+reason than we do.
 
-## Motion layer (BUILD SWEEP 1E — F4)
+**Exception: DOM mutation.** Required for inserting content, rewriting text, binding keys, and our
+own affordances. Allowed, rare, and it must record a reason from a small named set. A mutation with
+no declared reason is refused.
 
-Motion is expressed as RELATIONS, never as raw keyframes. The model emits:
-- `transitionTier` — duration at tier N on the pack's motionDurationScale
-- `transitionEasing` — easing character (smooth/sharp/spring/linear)
-- `entranceDelay` — entrance animation at delay tier N (stagger by reading order)
-- `hoverElevate` — hover elevation via transform (never layout)
-- `focusRing` — focus-visible ring using the named accent
+**Before any structural mutation**, ask what the element's children contribute to its own size and
+to its parent's. Replacing an element's children deletes the intrinsic sizes holding its grid track
+open — this collapsed an MDN article into a 30-pixel column with text breaking mid-word, with no CSS
+emitted at all. `05_BROWSER_CRAFT` §2 has the full anatomy.
 
-Motion is **transform and opacity only** — nothing that triggers reflow. The
-compile path emits `@keyframes rv-enter` and wraps motion CSS in a hard
-`@media (prefers-reduced-motion: reduce)` branch that zeros `animation` and
-`transition` on all `[data-rv-c]` elements. This is not a setting — it is a
-hard branch that disables the entire motion layer.
+**Off** removes the style node and replays the journal in reverse. Every act records its exact
+inverse **before** it runs, and **`textContent` is never a valid inverse for anything** — it
+discards every child element. Anything touching structure records a cloned node. `on → off → on →
+off` must produce a byte-identical DOM, proven by `assertDomClean`.
 
-Each pack declares: `motionAnimated` (boolean — dense-terminal and
-minimal-editorial declare themselves still), `motionDurationScale` (ms steps),
-`motionEasing` (character → cubic-bezier mapping).
+---
 
-## Interaction layer (BUILD SWEEP 1E — F5)
+## The model's role
 
-A `movable` relation opts a cluster into the movable-element capability. The
-compile path emits `cursor: grab`, `touch-action: none`, and a `--rv-movable`
-custom property. The runtime drag handler (content.ts) applies
-`transform: translate()` only — never mutates `style.position`, never moves DOM
-nodes. This is trivially reversible (clear the transform) and invisible to any
-framework watching the tree. Keyboard movement is a first-class path
-(Arrow keys + Shift for larger steps). Bounded to a sensible region so nothing
-can be dragged off-screen. Full removal on undo.
+The model **writes the answer**. It does not fill in a vocabulary we invented.
 
-## DOM ops with real reasons (BUILD SWEEP 1E — F6)
+There is no `DesignSpec`, no relation tokens, no expander, no pack lookup table. Those were a
+ceiling on the model's intelligence disguised as a safety rail — the reason *"summarise this"* was
+literally unspeakable in the old architecture, where 37 relation types could express none of it.
 
-DOM mutation was inert since 1A because no call site supplied a `MutationReason`.
-Sweep 1D added `reorderBefore` and `moveTo` relations — dead on arrival. F6
-wires real reasons from the transformation engine's `deriveMutationReason`:
-- `escape-overflow-hidden` — content clipped by a contained ancestor
-- `escape-stacking-context` — trapped behind a positioned ancestor
-- `cross-layout-regions` — subject and reference in different layout regions
-- `impossible-ancestry` — parent is a flex/grid container, CSS can't reorder
+Our job is **validation and repair**: contrast provable before colour is emitted, no measured length
+written back into the page, `minmax(0, 1fr)` and `min-width: 0` present in generated grid and flex,
+container queries rather than media queries, scope respected, reversibility recorded. Review is a
+thing we are good at. Authoring by lookup table is not.
 
-If none apply, the op is correctly refused and the relation reports it could
-not be satisfied. Every op goes through the transaction log with a
-handle-resolved inverse for exact undo.
+**Model tiering:** a fast model for observation and routing turns; a strong model for design
+judgement and content; a vision model for reading screenshots. Tool calls use native tool calling
+where supported, otherwise a strict single-object JSON envelope with exactly one retry that shows
+the parse error back, then `giveUp`.
 
-## Quantization fix (BUILD SWEEP 1E — F2)
+---
 
-`sizeRatio` previously snapped continuous ratios to a fixed 4-value type ramp —
-ratios 2.6, 2.8, 3.0, 3.4 all resolved to the same 48px. F2 generates a
-fine-grained ramp from the pack's base size + scale character
-(`minTypeScaleRatio`), giving many more distinct steps within the pack's
-[min small, max display] range. The same fix applies to `spacingRatio`,
-`gapRatio`, `marginEquals` (continuous spacing, clamped to the scale range +
-grid), and `lineHeightRatio` (continuous line-height, clamped to the
-lineHeightScale range).
+## Budgets and stopping
 
-Legitimately discrete scales (kept as-is): `radiusCorner`, `borderWeight`,
-`elevationStep`, `surfaceTier`, `fontWeightRank`, `typeRank`, `emphasisRank`,
-`outranks`, and all `*Step` relations — these are ordinal ranks or finite
-design-token sets by design.
+| Budget | Value | On exhaustion |
+|---|---|---|
+| Steps | 12 tool calls | Stop, report what was achieved |
+| Wall clock | 60 s total | Stop, keep what already landed |
+| First visible change | 1 s | Not a limit — a requirement |
+| Cost | per-run ceiling | Stop, report spend |
+
+**Check the budget before starting a call, not after it returns.** A model call takes 10–15 seconds;
+checking afterwards overshoots by a whole call, which is exactly how a 60-second ceiling produced an
+80-second run.
+
+A stopped run is not a failed run. Partial success is success. The agent says what it did, what it
+skipped, and why.
+
+---
+
+## What lives where
+
+```
+project/src/
+  agent/
+    loop.ts        the loop above
+    prompt.ts      the agent prompt — under 2,000 characters, and that is a ceiling not a target
+    journal.ts     record, replay, undo, persist per origin+path
+    budget.ts      steps, time, cost
+  tools/
+    index.ts       the registry — the only list of capabilities
+    observe.ts     describePage, findElements, inspect, measure, readText, perceivePage
+    act.ts         applyCss, hide, heal, insert, setText, move, bindKey, recomposePage
+    verify.ts      snapshot, diff, checkLayout, checkContrast, assertDomClean, look
+  core/
+    perceive/      kept intact — exposed as the single tool perceivePage
+    inventory.ts   the lightweight DOM walk behind describePage and findElements
+    heal.ts        the six healing steps
+    reason/        model transport only — no prompts that decide anything
+    persist/       per origin+path journal storage
+    sanitize/      CSS validation, sensitive-data redaction
+    config/        loop config: models, budgets
+  entrypoints/
+    background.ts  hosts the loop — the brain
+    content.ts     dispatches tools — the hands. It wires; it never implements.
+    popup/         goal entry and result display
+```
+
+`content.ts` wires and dispatches. It never implements. It previously reached 1,698 lines doing
+exactly the opposite, and that is how the fixed pipeline survived so long unexamined. It is now
+~85 lines. Keep it that way.
+
+---
+
+## Invariants a reviewer can check in five minutes
+
+1. No file or directory is named after an operation.
+2. No table maps request text to a code path.
+3. The word `fallback` appears nowhere as a mechanism that invents work.
+4. Every observation return type is inapplicable to a page.
+5. Every observation tool returns a confidence number.
+6. Every act tool has an exact inverse, and **no inverse uses `textContent`**.
+7. Every mutation call site supplies a reason.
+8. Every capability is in the registry exactly once, and no tool imports another tool.
+9. No length measured off the live page is written back into it.
+10. Every tool that can clip a result sets `truncated`.
+11. Every error string names an alternative.
+12. No file, tool, prompt or constant names a specific website.
+13. Every tool created in a commit is called in that same commit; nothing in `src/` is unreachable
+    from an entrypoint.
+
+A failure in any of these is a build failure, not a warning. "Informational warnings" reached 131 on
+this project before anyone acted on them.
