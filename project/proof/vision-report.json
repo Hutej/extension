@@ -1,0 +1,91 @@
+{
+  "model": "@cf/moonshotai/kimi-k2.7-code",
+  "generated": "2026-08-12",
+  "rule14_note": "Vision model describes OUR OWN test screenshots. Origin/path only; never target page content for identification.",
+  "calls": [
+    {
+      "kind": "diff",
+      "name": "run1-summarise",
+      "before": "run1-summarise-before.png",
+      "after": "run1-summarise.png",
+      "image": "run1-summarise.png",
+      "description": "nothing changed"
+    },
+    {
+      "kind": "diff",
+      "name": "run2-failing-case",
+      "before": "run2-failing-case-before.png",
+      "after": "run2-failing-case.png",
+      "image": "run2-failing-case.png",
+      "description": "In the “CSS Demo: justify-content” widget near the bottom, the editable code field showing `justify-content: start;` has changed:\n\n- It now has a blue focus outline around the input.\n- A small blue right-pointing arrow/chevron button has appeared on the right edge of that input field.\n\nEverything else on the page — the top banner, navigation, left sidebar, right “In this article” menu, headings, text, and baseline browser icons — looks identical between the two screenshots."
+    },
+    {
+      "kind": "diff",
+      "name": "run4-reduce-clutter",
+      "before": "run4-reduce-clutter-before.png",
+      "after": "run4-reduce-clutter.png",
+      "image": "run4-reduce-clutter.png",
+      "description": "A small right-pointing chevron icon (`>`) has appeared at the right edge of the `justify-content: start;` code box in the “Try it” section; this arrow was not visible in the first screenshot. Everything else on the page appears unchanged."
+    },
+    {
+      "kind": "diff",
+      "name": "run5-hn-spacing",
+      "before": "run5-hn-spacing-before.png",
+      "after": "run5-hn-spacing.png",
+      "image": "run5-hn-spacing.png",
+      "description": "**Increased vertical spacing and header size.** The orange Hacker News header bar is much taller in the second screenshot, taking up roughly twice the vertical space, and the \"Hacker News\" logo text appears larger/bolder. \n\n**Story list is more spread out.** The vertical gap between each numbered story entry is significantly larger, so only stories 1–7 are visible in the second screenshot instead of 1–20 in the first.\n\n**Story metadata appears lighter.** The secondary text showing points, submitter, time, `hide`, and comment counts is rendered in a lighter gray and sits farther below each title.\n\n**Overall density reduced.** The same content exists but the page now shows less of it at once, with substantially more whitespace between elements."
+    },
+    {
+      "kind": "diff",
+      "name": "run6-toggle-cycle",
+      "before": "run6-toggle-cycle-before.png",
+      "after": "run6-toggle-cycle.png",
+      "image": "run6-toggle-cycle.png",
+      "description": "nothing changed."
+    },
+    {
+      "kind": "diff",
+      "name": "control-pair",
+      "before": "control-pair-1.png",
+      "after": "control-pair-2.png",
+      "image": "control-pair-2.png",
+      "description": "nothing changed."
+    },
+    {
+      "kind": "single",
+      "name": "red-v1-unlayered-normal.png",
+      "image": "red-v1-unlayered-normal.png",
+      "description": "The page has a light-cream background (#f6f6ef). A white content box contains:\n\n- Heading: **“Cascade Origin Test Page”**\n- Paragraph explaining the page has an unlayered `body { background: #f6f6ef }` rule.\n- A bright green rectangular box labeled: **“Variant 5 target — JS sets background: green !important inline.”**\n- Two explanatory lines: “If the background is red, the CSS beat the unlayered rule.” and “If the #v5-box is green, inline important won. If red, user important won.”"
+    },
+    {
+      "kind": "single",
+      "name": "red-v2-emitter-bypassed.png",
+      "image": "red-v2-emitter-bypassed.png",
+      "description": "A web test page titled **“Cascade Origin Test Page”** with a **light beige background** (#f6f6ef). The main content sits in a white rectangular area.\n\nInside the white area:\n- Heading: **“Cascade Origin Test Page”**\n- Paragraph explaining the page has an unlayered `body { background: #f6f6ef }` rule.\n- A **green rectangular box** labeled: **“Variant 5 target — JS sets background: green !important inline.”**\n- Below the box, two explanatory sentences about whether the CSS or inline important won."
+    },
+    {
+      "kind": "single",
+      "name": "red-v3-author-important.png",
+      "image": "red-v3-author-important.png",
+      "description": "The page has a bright red background. Centered on it is a white rectangular content box titled **“Cascade Origin Test Page.”**\n\nInside the white box, from top to bottom:\n- A paragraph explaining the page has an unlayered `body { background: #f6f6ef }` rule.\n- A green rectangular test box labeled **“Variant 5 target — JS sets `background: green !important` inline.”**\n- Text stating: **“If the background is red, the CSS beat the unlayered rule.”**\n- Text stating: **“If the #v5-box is green, inline important won. If red, user important won.”**\n\nIn the rendered result, the test box is green, while the surrounding page remains red."
+    },
+    {
+      "kind": "single",
+      "name": "red-v5a-author-loses.png",
+      "image": "red-v5a-author-loses.png",
+      "description": "The screenshot shows a web page titled **\"Cascade Origin Test Page\"** on a light beige background (`#f6f6ef`). A white content box contains black text explaining CSS cascade-origin behavior.\n\nInside the white box, below the explanatory paragraph, there is a **green rectangular box** labeled:  \n**\"Variant 5 target — JS sets background: green !important inline.\"**\n\nTwo notes below the green box read:\n- \"If the background is red, the CSS beat the unlayered rule.\"\n- \"If the #v5-box is green, inline important won. If red, user important won.\""
+    },
+    {
+      "kind": "single",
+      "name": "red-v4-user-important.png",
+      "image": "red-v4-user-important.png",
+      "description": "The page has a bright red background overall. Centre-top is a white rectangular content box containing:\n\n- Heading: “Cascade Origin Test Page”\n- Text explaining: “This page has an unlayered body { background: #f6f6ef } rule. User-origin CSS should beat it; author-origin normal should not.”\n- A small green boxed element labelled: “Variant 5 target — JS sets `background: green !important` inline.”\n- Two result notes: “If the background is red, the CSS beat the unlayered rule.” and “If the #v5-box is green, inline important won. If red, user important won.”\n\nSo: page background is red, the outer content box is white, and the inner test box is green."
+    },
+    {
+      "kind": "single",
+      "name": "red-v5b-user-wins.png",
+      "image": "red-v5b-user-wins.png",
+      "description": "Page background is light cream/off-white (#f6f6ef). A centered white content card contains:\n\n- Title: **“Cascade Origin Test Page”**\n- Paragraphs of explanatory text, including: “This page has an unlayered body { background: #f6f6ef } rule...”, followed by: “If the background is red, the CSS beat the unlayered rule.” and “If the #v5-box is green, inline important won. If red, user important won.”\n- A bright red rectangular box labeled: **“Variant 5 target — JS sets background: green !important inline.”**\n\nThe boxed element is red, matching the “user important won” outcome described in the text."
+    }
+  ]
+}

@@ -132,6 +132,32 @@ else can be judged until we can see.
 
 ---
 
+## Engineering mode — Ponytail
+
+All implementation work follows Ponytail's lazy senior-developer mode. Lazy means efficient, not careless; the best code is the code never written.
+
+Before writing code, use the first applicable rung:
+1. Don't build it if it isn't needed (YAGNI).
+2. Reuse existing code in the repository.
+3. Prefer the standard library.
+4. Prefer native platform features.
+5. Prefer already-installed dependencies.
+6. If it can genuinely be one line, make it one line.
+7. Otherwise write the minimum code that works.
+
+Understand the problem and trace the real flow before applying the ladder. Bug fixes target the root cause: inspect callers and fix shared behavior rather than patching one symptom.
+
+Rules:
+- No unrequested abstractions.
+- Avoid new dependencies.
+- No unnecessary boilerplate.
+- Deletion over addition; boring over clever; fewest files possible.
+- Question complex requests and unnecessary capability.
+- Prefer the edge-case-correct option when equally simple.
+- Mark deliberate simplifications with a `ponytail:` comment naming the known ceiling and upgrade path.
+
+Ponytail is not permission to be careless. Be rigorous about problem understanding, trust-boundary validation, data-loss prevention, security, accessibility, hardware calibration, and explicit requirements. Non-trivial logic must leave one minimal runnable check; trivial one-liners need no test.
+
 ## Status discipline
 
 When a stage is genuinely finished — proven by eye on real sites — update this section and the

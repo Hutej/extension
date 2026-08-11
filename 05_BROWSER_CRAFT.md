@@ -110,18 +110,27 @@ something that should be CSS is being done with JavaScript.
 
 ### Making our stylesheet win predictably
 
-- **Cascade layers.** `@layer revueon { ... }` declared after the page's styles
-  wins over unlayered author styles regardless of specificity — without a single
-  `!important`. This is the cleanest tool we have and it is underused.
+- **Cascade layers — the caveat that cost us three runs.** `@layer revueon
+  { ... }` does NOT win over unlayered author styles for normal declarations.
+  Layer order is consulted *before* specificity: for normal declarations,
+  unlayered author styles beat layered author styles **unconditionally** —
+  specificity never gets a vote. For important declarations the order
+  inverts: layered important beats unlayered important. So:
+  - `@layer revueon { body { background: red } }` — **weaker** than every
+    unlayered `body { background }` on the page. Proven by the red test.
+  - `@layer revueon { body { background: red !important } }` — the
+    **strongest position available**. Layered important beats unlayered
+    important, and important beats normal regardless of layers.
+  - **Default: emit `@layer revueon { ... !important }` for all generated
+    CSS.** The `emitStyle()` helper in `core/emit.ts` does this — wraps in
+    the layer and adds `!important` to every declaration. This is the only
+    path to the style node.
 - **`:is()` and `:where()`.** `:where()` contributes **zero** specificity — use
   it to write broad selectors that lose gracefully. `:is()` keeps the highest
   specificity of its arguments.
-- **`!important`** genuinely is correct for hiding, where intent is absolute and
-  the page must not win. It is wrong for typography and spacing, where the page
-  may have a better reason than we do.
 - **Cross-origin stylesheets** cannot be read. We cannot always know what we are
-  competing with. Design for that: prefer layers and high-specificity scoping
-  over guessing at the page's rules.
+  competing with. Design for that: prefer layers + `!important` and
+  high-specificity scoping over guessing at the page's rules.
 
 ---
 

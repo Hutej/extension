@@ -1,0 +1,16 @@
+{
+  "ok": true,
+  "result": {
+    "chars": 382,
+    "css": "#v5-box {\n  background-image: initial !important;\n  background-position-x: initial !important;\n  background-position-y: initial !important;\n  background-size: initial !important;\n  background-repeat: initial !important;\n  background-attachment: initial !important;\n  background-origin: initial !important;\n  background-clip: initial !important;\n  background-color: red !important;\n}",
+    "applied": false,
+    "before": "none",
+    "after": "none",
+    "matched": 1
+  },
+  "inverse": {
+    "kind": "removeCss",
+    "css": "#v5-box {\n  background-image: initial !important;\n  background-position-x: initial !important;\n  background-position-y: initial !important;\n  background-size: initial !important;\n  background-repeat: initial !important;\n  background-attachment: initial !important;\n  background-origin: initial !important;\n  background-clip: initial !important;\n  background-color: red !important;\n}"
+  },
+  "costMs": 0
+}

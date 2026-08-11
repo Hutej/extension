@@ -5,15 +5,18 @@
   "type": "module",
   "scripts": {
     "dev": "wxt",
-    "build": "wxt build",
+    "build": "node --experimental-strip-types scripts/audit-env.ts && node --experimental-strip-types scripts/audit-wiring.ts && wxt build",
     "compile": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
-    "test": "node --experimental-strip-types tests/compile.test.ts",
-    "test:e2e": "node --experimental-strip-types --env-file=.env tests/popup.test.ts",
+    "test": "echo 'No tests — use the harness: node --experimental-strip-types tests/harness.ts'",
+    "test:e2e": "node --experimental-strip-types tests/harness.ts",
+    "prove": "node --experimental-strip-types scripts/prove.ts",
     "lint": "eslint src/ --ext .ts",
-    "audit:wiring": "node --experimental-strip-types scripts/audit-wiring.ts"
+    "audit:wiring": "node --experimental-strip-types scripts/audit-wiring.ts",
+    "audit:env": "node --experimental-strip-types scripts/audit-env.ts"
   },
   "devDependencies": {
+    "@playwright/test": "^1.62.1",
     "@types/chrome": "^0.2.2",
     "@typescript-eslint/eslint-plugin": "^8.65.0",
     "@typescript-eslint/parser": "^8.65.0",

@@ -34,4 +34,16 @@ export default [
       '@typescript-eslint/no-explicit-any': 'off',
     },
   },
+  {
+    // Tool + agent layer — the boundary between model JSON and our code.
+    // The model returns arbitrary JSON; these modules must accept it as-is.
+    files: ['src/tools/**/*.ts', 'src/agent/**/*.ts', 'src/entrypoints/**/*.ts'],
+    languageOptions: {
+      parser: tsparser,
+      parserOptions: { ecmaVersion: 2022, sourceType: 'module', project: './tsconfig.json' },
+    },
+    rules: {
+      '@typescript-eslint/no-explicit-any': 'off',
+    },
+  },
 ];

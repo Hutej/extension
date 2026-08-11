@@ -1,0 +1,109 @@
+
+═══ RUN 1: run1-summarise — "Summarise this article" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] WARNING: before+after screenshots are byte-identical — run is void
+  [vision] diff: [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+  GOAL:    Summarise this article
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  budgetExhausted
+  SUMMARY: budget too low for retry after parse error
+  STEPS:   2
+  CALLS:   3 model call(s)
+  TIME:    60.0s
+  TOOLS:   describePage
+  CHANGED: No changes detected
+  REFUSED: budget too low for retry after parse error
+  VISION:  [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+
+═══ RUN 2: run2-failing-case — "Hide the video player" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] diff: nothing changed
+──────────────────────────────────────────────────────────────
+  GOAL:    Hide the video player
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  budgetExhausted
+  SUMMARY: budget too low for retry after parse error
+  STEPS:   2
+  CALLS:   3 model call(s)
+  TIME:    60.0s
+  TOOLS:   describePage
+  CHANGED: No changes detected
+  REFUSED: budget too low for retry after parse error
+  VISION:  nothing changed
+──────────────────────────────────────────────────────────────
+
+═══ RUN 3: run3-wikipedia-sidebar — "Hide the sidebar" on https://en.wikipedia.org/wiki/CSS ═══
+FAILED: run3-wikipedia-sidebar — page.waitForTimeout: Target page, context or browser has been closed
+
+═══ RUN 4: run4-reduce-clutter — "Reduce clutter" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] diff: In the second screenshot, the interactive code input box that displays `justify-content: start;` now has a **blue focus outline/border** around it, and a small **right-pointing chevron/arrow (`>`)** h
+──────────────────────────────────────────────────────────────
+  GOAL:    Reduce clutter
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  budgetExhausted
+  SUMMARY: budget too low for retry after parse error
+  STEPS:   2
+  CALLS:   3 model call(s)
+  TIME:    60.0s
+  TOOLS:   describePage
+  CHANGED: No changes detected
+  REFUSED: budget too low for retry after parse error
+  VISION:  In the second screenshot, the interactive code input box that displays `justify-content: start;` now has a **blue focus outline/border** around it, and a small **right-pointing chevron/arrow (`>`)** has appeared immediately to its right.
+
+Everything else appears unchanged: the sidebars, TOC, ad banner, header, Baseline badge, and main article content are all identical between the two screenshots.
+──────────────────────────────────────────────────────────────
+
+═══ RUN 5: run5-hn-spacing — "Increase spacing" on https://news.ycombinator.com/ ═══
+  [vision] diff: The second screenshot has significant spacing and layout changes compared to the first:
+
+1. **Increased vertical spacing between list items**: The gap between each Hacker News story title and its meta
+──────────────────────────────────────────────────────────────
+  GOAL:    Increase spacing
+  URL:     https://news.ycombinator.com/
+  STATUS:  budgetExhausted
+  SUMMARY: —
+  STEPS:   9
+  CALLS:   9 model call(s)
+  TIME:    56.9s
+  TOOLS:   describePage → checkLayout → checkLayout → applyCss → applyCss → applyCss → applyCss
+  CHANGED: assertApplied: 2 act(s) moved computed style
+  REFUSED: Nothing refused
+  VISION:  The second screenshot has significant spacing and layout changes compared to the first:
+
+1. **Increased vertical spacing between list items**: The gap between each Hacker News story title and its metadata line is much larger. Entries that sat tightly together now have abundant whitespace separating them.
+
+2. **Header is taller with more padding**: The orange top bar is noticeably taller vertically. The Y Combinator logo and "Hacker News new | past | comments | ask | show | jobs | submit" text ar
+──────────────────────────────────────────────────────────────
+  [run5] resize check: 1440 → 380 → 1440
+  [run5] overflow at 380px: NO ✓
+  [run5] overflow at 1440px: NO ✓
+
+═══ RUN 6: run6-toggle-cycle — "Summarise this article" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] diff: nothing changed
+──────────────────────────────────────────────────────────────
+  GOAL:    Summarise this article
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  error
+  SUMMARY: model returned invalid JSON twice
+  STEPS:   2
+  CALLS:   3 model call(s)
+  TIME:    60.0s
+  TOOLS:   describePage
+  CHANGED: No changes detected
+  REFUSED: model returned invalid JSON twice
+  VISION:  nothing changed
+──────────────────────────────────────────────────────────────
+  [run6] no changes applied — toggle cycle cannot proceed, marking failed
+
+═══ CONTROL PAIR — identical screenshots ═══
+  control pair: PASS ✓ (vision correctly reported no change)
+  vision: nothing changed.
+
+
+═══ SUMMARY ═══
+  Summarise this article: budgetExhausted (2 steps, 3 calls, 60.0s)
+  Hide the video player: budgetExhausted (2 steps, 3 calls, 60.0s)
+  Hide the sidebar: error (0 steps, 0 calls, 0.0s)
+  Reduce clutter: budgetExhausted (2 steps, 3 calls, 60.0s)
+  Increase spacing: budgetExhausted (9 steps, 9 calls, 56.9s)
+  Summarise this article: error (2 steps, 3 calls, 60.0s)

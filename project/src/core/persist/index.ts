@@ -1,53 +1,55 @@
 /**
- * core/persist — save a site's transform, re-identify, re-apply on reload.
+ * core/persist — per-origin persistence. Saves the journal so a user's
+ * modifications hold across page reloads and SPA navigations.
  *
- * Persist the ACTUALLY APPLIED CSS (not a re-compiled version) +
- * compileOptions (so SPA re-compile has repair options). Per-URL scoping
- * (origin + normalized pathname) with origin-level fallback.
+ * Keyed by origin only (no path, no query, no fragment — never a full URL).
+ * This means "hide the sidebar" on Wikipedia applies to every Wikipedia
+ * article, which is the product requirement. The privacy commitment
+ * (05_BROWSER_CRAFT §9) is: never store or transmit a full URL. The key
+ * is just the origin — no session tokens, no personal data.
  */
 
-import type { DesignSpec } from '../spec';
-import type { CompileOptions } from '../compile';
-
-export interface StyleRecord {
-  id: string;
-  intent: string;
-  spec: DesignSpec;
-  css: string;
-  /** the solver's grid + display:contents structural CSS. Stored separately so
-   *  reapplyStored + restyleDynamic can re-apply it alongside re-compiled Painter
-   *  CSS. Without this, a re-apply loses the grid layout (only Painter CSS survives). */
-  structuralCss?: string;
-  reasoning: string;
-  compileOptions?: CompileOptions;
+export interface JournalState {
+  enabled: boolean;
+  origin: string;
+  goal: string;
+  /** The compact journal entries — replayable to re-apply the modifications. */
+  entries: JournalEntry[];
   createdAt: number;
 }
 
-export interface SiteState {
-  enabled: boolean;
-  style?: StyleRecord | null;
+export interface JournalEntry {
+  tool: string;
+  kind: 'observe' | 'act' | 'verify' | 'control';
+  args: Record<string, unknown>;
+  result: Record<string, unknown>;
+  confidence?: number;
+  inverse?: Record<string, unknown>;
+  reasoning?: string;
+  costMs: number;
+  timestamp: number;
 }
 
-const DEFAULT_STATE: SiteState = { enabled: true, style: null };
+const PREFIX = 'rv_';
+const DEFAULT_STATE: JournalState = { enabled: true, origin: '', goal: '', entries: [], createdAt: 0 };
 
-/** Per-URL storage key: origin + normalized pathname (strip query/hash/trailing-slash). */
-export function storageKey(url?: string): string {
+/** Per-origin storage key. Origin only — no path, no query, no fragment. */
+export function originKey(url?: string): string {
   const u = new URL(url ?? window.location.href);
-  const path = u.pathname.replace(/\/+$/, '') || '/';
-  return u.origin + path;
+  return u.origin;
 }
 
-export async function loadSiteState(key: string): Promise<SiteState> {
-  const result = await browser.storage.local.get([key]);
-  const stored = result[key] as SiteState | undefined;
+export async function loadJournalState(key: string): Promise<JournalState> {
+  const result = await browser.storage.local.get([PREFIX + key]);
+  const stored = result[PREFIX + key] as JournalState | undefined;
   if (stored) return { ...DEFAULT_STATE, ...stored };
   return { ...DEFAULT_STATE };
 }
 
-export async function saveSiteState(key: string, state: SiteState): Promise<void> {
-  await browser.storage.local.set({ [key]: state });
+export async function saveJournalState(key: string, state: JournalState): Promise<void> {
+  await browser.storage.local.set({ [PREFIX + key]: state });
 }
 
-export async function clearSiteState(key: string): Promise<void> {
-  await browser.storage.local.remove([key]);
+export async function clearJournalState(key: string): Promise<void> {
+  await browser.storage.local.remove([PREFIX + key]);
 }

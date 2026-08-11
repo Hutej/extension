@@ -11,8 +11,6 @@
  * CSS variables for pure compile/verify.
  */
 
-import { STYLE_ELEMENT_ID, SIDE_RAIL_MIN_FRAC, SIDE_RAIL_MAX_FRAC } from '../laws/index.ts';
-import { formatPacks } from '../design/packs.ts';
 import { isTransparent, parseColor, colorfulness } from '../../shared/color.ts';
 import {
   classifyRole, rankDominance, detectGrouping, summarizeComposition,
@@ -28,6 +26,9 @@ import { deepQuerySelector, deepQuerySelectorAll } from './dom-utils.ts';
 
 const IGNORED_TAGS = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'BR', 'HR', 'WBR', 'LINK', 'META', 'TEMPLATE', 'SLOT', 'PATH', 'DEFS']);
 const ESCAPE_UI_ID = 'revueon-escape-ui';
+const STYLE_ELEMENT_ID = 'revueon-style';
+const SIDE_RAIL_MIN_FRAC = 0.15;
+const SIDE_RAIL_MAX_FRAC = 0.45;
 
 const MAX_TIME_MS = 6000;           // budget — no node cap, time is the only limit
 const MAX_DEPTH = 30;               // safety net (not a truncation — 30 is very deep)
@@ -1488,9 +1489,8 @@ export function serializePerception(p: Perception): string {
     header.push('REFLOW ' + p.reflowOpportunity.map((r) => `${r.kind}:${r.handle}`).join(' '));
   }
 
-  // Design tokens + packs (unchanged).
+  // Design tokens.
   header.push(formatDesignTokens(extractDesignTokens(p)));
-  header.push(formatPacks());
 
   // page-level models, emitted once. Regions reference these by
   // index/rank rather than restating values ("type rank 3, surface tier 2,
@@ -1771,7 +1771,6 @@ export function serializePainterPerception(p: Perception): string {
     header.push('REGIONS ' + p.skeleton.regions.map((r) => `${r.handle}=${r.role}`).join(' '));
   }
   header.push(formatDesignTokens(extractDesignTokens(p)));
-  header.push(formatPacks());
 
   // Compact role-grouped inventory — every cluster, identity only (no geometry/
   // colors). Sorted by prominence so the Painter reads the major regions first;

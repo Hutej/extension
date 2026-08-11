@@ -134,7 +134,6 @@ failure cost this project three months.
 | `heal` | Close the hole a removal leaves. Six ordered CSS steps — `05_BROWSER_CRAFT` §7. |
 | `insert` | **The safe content path.** Adds nodes; cannot collapse a track. Prefer it. |
 | `setText` | Text-level targets only. **Refuses** an element with element children. |
-| `move` | `order` / `grid-area` first. Reparenting is a last resort and usually wrong. |
 | `bindKey` | Behaviour. Declarative, reversible. |
 | `recomposePage` | Whole-page layout, as **one tool**. Never the default. Shape in `05_BROWSER_CRAFT` §13. |
 
@@ -174,33 +173,75 @@ one step; a model told "failed" retries until the budget dies.
 
 ## How output reaches the page
 
-**Default: a stylesheet.** One scoped `<style>` node in `@layer revueon`, written by the model,
-validated by us. The cascade applies it forever to every matching element — **including elements
-that do not exist yet**. A framework re-render is not an attack we survive; it is an event we never
-hear about.
+**The user origin.** All generated CSS is inserted at the user origin via
+`chrome.scripting.insertCSS({ target: { tabId }, css, origin: 'USER' })` from
+the background service worker. The content script never inserts CSS — it
+sends a message; the background inserts. `chrome.scripting` cannot be called
+from a content script; this is a platform constraint.
 
-This is why the old ten-attempt defence loop had to go. It existed only because we mutated the DOM
-and React undid us. **If a defence loop is ever needed again, something that should be CSS is being
-done with JavaScript.**
+User origin beats author origin unconditionally (for the same importance level).
+User-important beats author-important, including inline `style="...!important"`.
+This is why there is no `@layer` wrapper, no style node, and no defence loop.
+The page cannot remove user-origin CSS — it is above the author origin the
+page controls.
 
-Cascade layers mean our styles win predictably without a single `!important`. `:where()` contributes
-zero specificity for rules that should lose gracefully. `!important` is genuinely correct for hiding,
-where intent is absolute; it is wrong for typography and spacing, where the page may have a better
-reason than we do.
+**Removal** is `chrome.scripting.removeCSS` with `css` and `origin: 'USER'`
+matching the insertion exactly. The journal stores the exact inserted CSS
+string per entry (`inverse: { kind: 'removeCss', css }`) so undo is exact.
 
-**Exception: DOM mutation.** Required for inserting content, rewriting text, binding keys, and our
-own affordances. Allowed, rare, and it must record a reason from a small named set. A mutation with
-no declared reason is refused.
+**The emitter** (`core/emit.ts`) takes structured rules, never a CSS string
+that gets post-processed:
+```typescript
+type EmitItem =
+  | { kind: 'style'; selector: string; declarations: Array<{ property: string; value: string }>; important?: boolean }
+  | { kind: 'at'; prelude: string; items: EmitItem[] }
+```
+`!important` is appended at serialisation, per declaration, from the flag — never
+by scanning a value. At-rules (`@media`, `@supports`, `@keyframes`) are a
+separate type and never receive `!important` on their inner declarations. A
+raw CSS string from the model is parsed with the browser's CSSOM (`new
+CSSStyleSheet().replaceSync()`) before it reaches the emitter. Regex does
+not touch CSS values anywhere in this codebase.
 
-**Before any structural mutation**, ask what the element's children contribute to its own size and
-to its parent's. Replacing an element's children deletes the intrinsic sizes holding its grid track
-open — this collapsed an MDN article into a 30-pixel column with text breaking mid-word, with no CSS
-emitted at all. `05_BROWSER_CRAFT` §2 has the full anatomy.
+`!important` is not blanket. Hide defaults to important. For everything else,
+the emitter emits normal first, `assertApplied` measures whether the computed
+value moved, and re-emits important only if it did not.
 
-**Off** removes the style node and replays the journal in reverse. Every act records its exact
-inverse **before** it runs, and **`textContent` is never a valid inverse for anything** — it
-discards every child element. Anything touching structure records a cloned node. `on → off → on →
-off` must produce a byte-identical DOM, proven by `assertDomClean`.
+**`assertApplied`** — applied means the computed style moved. Every act tool
+returns `{ applied, before, after, matched }`. A run where every act returned
+`applied: false` is a FAILED run. Bytes reaching a stylesheet is not evidence.
+
+**Persistence scope — decision.** The journal is keyed by **origin only** (no path,
+no query, no fragment), so a look saved on one page applies to the whole site.
+Reasoning: a request like *"hide the sidebar"* describes a site-level preference, not
+a per-URL one — the user does not want to re-hide the sidebar on every Wikipedia
+article they open. Keying by origin+path would fragment that intent across every
+article URL and defeat continuity. The privacy commitment (never store a full URL)
+is preserved because the key is the origin alone. This is a product decision, not a
+bug-fix accident; revisit it only if a goal is genuinely per-URL (none today).
+
+**Cold-navigation flash.** `insertCSS` has no `runAt` in MV3, so a saved look
+can paint one unstyled frame. The background subscribes to
+`chrome.webNavigation.onCommitted` and re-inserts the saved CSS before the
+page renders. The static CSS gap cover is **not measured** — the report says
+so rather than asserting it is fine.
+
+**Exception: DOM mutation.** Required for inserting content, rewriting text,
+binding keys, and our own affordances. Allowed, rare, and it must record a
+reason from a small named set. A mutation with no declared reason is refused.
+
+**Before any structural mutation**, ask what the element's children contribute
+to its own size and to its parent's. Replacing an element's children deletes
+the intrinsic sizes holding its grid track open — this collapsed an MDN article
+into a 30-pixel column with text breaking mid-word, with no CSS emitted at
+all. `05_BROWSER_CRAFT` §2 has the full anatomy.
+
+**Off** calls `chrome.scripting.removeCSS` for each CSS entry and replays
+text/HTML inverses in reverse. Every act records its exact inverse **before**
+it runs, and **`textContent` is never a valid inverse for anything** — it
+discards every child element. Anything touching structure records a cloned
+node. `on → off → on → off` must produce a byte-identical DOM for text/HTML
+mutations. CSS is removed exactly by construction.
 
 ---
 
@@ -259,9 +300,10 @@ project/src/
   core/
     perceive/      kept intact — exposed as the single tool perceivePage
     inventory.ts   the lightweight DOM walk behind describePage and findElements
+    emit.ts        structured CSS emitter — EmitItem[], CSSOM parser, no regex
     heal.ts        the six healing steps
     reason/        model transport only — no prompts that decide anything
-    persist/       per origin+path journal storage
+    persist/       per-origin journal storage
     sanitize/      CSS validation, sensitive-data redaction
     config/        loop config: models, budgets
   entrypoints/

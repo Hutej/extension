@@ -4,5 +4,5 @@
     "strict": true,
     "allowImportingTsExtensions": true
   },
-  "exclude": ["experiments", ".output"]
+  "exclude": ["experiments", ".output", "tests"]
 }
