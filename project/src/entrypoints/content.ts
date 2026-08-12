@@ -10,6 +10,7 @@
 
 import { getTool } from '@/tools/index';
 import { loadJournalState, originKey, saveJournalState } from '@/core/persist';
+import { undoAllStructural, resetTxnLog, txnSize } from '@/core/ops/recorder';
 
 export default defineContentScript({
   matches: ['<all_urls>'],
@@ -64,6 +65,25 @@ export default defineContentScript({
         return;
       }
 
+      // F3: undoAll — the failure-path / toggle-off structural rollback. Replays
+      // the content-script TransactionLog backwards (cloned-node exact undo for
+      // setText/insert). CSS rollback is the background's job (removeCss). This
+      // is the in-session exact path; the serializable journal inverses are the
+      // post-reload fallback only. Idempotent: a repeat call is a safe no-op.
+      if (message.action === 'undoAll') {
+        const { undone, failed } = undoAllStructural();
+        sendResponse({ ok: true, undone, failed, size: txnSize() });
+        return;
+      }
+
+      // F3: reset the structural log (called on each "on" / re-apply so a fresh
+      // cycle re-records clones, and after removeAllModifications).
+      if (message.action === 'resetTxn') {
+        resetTxnLog();
+        sendResponse({ ok: true });
+        return;
+      }
+
       return false;
     });
   },
@@ -77,18 +97,34 @@ async function toggleModifications(): Promise<boolean> {
   toggleState = !toggleState;
   if (toggleState) {
     // Turn on — background re-inserts CSS, content script re-applies DOM.
+    // reset the structural log first so a fresh cycle re-records clones
+    // (the re-applied act tools record into the TransactionLog on execute).
+    resetTxnLog();
     await sendToggleCss(true);
     await reapplyPersistedDom();
   } else {
     // Turn off — background removes CSS, content script undoes DOM.
+    // F3: use the in-session TransactionLog (cloned-node exact undo), not the
+    // storage-based undoPersistedDom. If the log is empty (e.g. a page that
+    // never ran an act tool this session), undoAllStructural is a no-op and
+    // we fall back to the serializable path for DOM mutations persisted from
+    // a prior load that were never re-applied.
     await sendToggleCss(false);
-    await undoPersistedDom();
+    const { undone } = undoAllStructural();
+    if (undone === 0) {
+      await undoPersistedDom();
+    }
   }
   return toggleState;
 }
 
 async function removeAllModifications(): Promise<void> {
   await sendToggleCss(false);
+  // F3: undo the in-session structural mutations (cloned-node exact), THEN drop
+  // the log + wipe storage. Previously this only wiped storage + dropped CSS,
+  // leaving inserted elements and setText mutations on the page until reload.
+  undoAllStructural();
+  resetTxnLog();
   try {
     const key = originKey();
     await saveJournalState(key, { enabled: false, origin: '', goal: '', entries: [], createdAt: Date.now() });

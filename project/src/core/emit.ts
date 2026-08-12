@@ -123,11 +123,16 @@ export function emitRules(items: EmitItem[], important: boolean = false): string
   return serializeEmit(items);
 }
 
-/** Pick the primary selector + property from EmitItem[] for assertApplied. */
-export function primaryTarget(items: EmitItem[]): { selector: string; property: string } | null {
+/** Pick the primary selector + ALL declared properties from EmitItem[] for
+ *  assertApplied. Returns every longhand of the first style rule's first
+ *  selector — because CSSOM expands shorthands (e.g. `background: red` → 10
+ *  longhands with `background-image` first, which stays `none` while
+ *  `background-color` turns red). Asserting only declarations[0] reads the
+ *  wrong property and reports applied:false on a successful application. */
+export function primaryTarget(items: EmitItem[]): { selector: string; properties: string[] } | null {
   for (const item of items) {
     if (item.kind === 'style' && item.declarations.length > 0) {
-      return { selector: item.selector.split(',')[0].trim(), property: item.declarations[0].property };
+      return { selector: item.selector.split(',')[0].trim(), properties: item.declarations.map((d) => d.property) };
     }
     if (item.kind === 'at') {
       const inner = primaryTarget(item.items);

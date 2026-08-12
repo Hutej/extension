@@ -126,6 +126,7 @@ export async function runLoop(
     // Retry on parse error — only if enough budget remains.
     if (!modelResult.ok || !modelResult.json) {
       if (budget.remaining().wallMs <= MIN_TURN_MS) {
+        await rollbackDomIfActed(tabId, journal, origin);
         await persistJournal(journal, origin);
         return { status: 'budgetExhausted', reason: 'budget too low for retry after parse error', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
       }
@@ -141,6 +142,7 @@ export async function runLoop(
       });
       paidCalls++;
       if (!modelResult.ok || !modelResult.json) {
+        await rollbackDomIfActed(tabId, journal, origin);
         return { status: 'error', reason: 'model returned invalid JSON twice', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
       }
     }
@@ -154,6 +156,7 @@ export async function runLoop(
     }
 
     if (response.giveUp) {
+      await rollbackDomIfActed(tabId, journal, origin);
       return { status: 'gaveUp', reason: response.reason ?? 'Agent gave up.', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
     }
 
@@ -186,6 +189,7 @@ export async function runLoop(
         return result;
       }
       if (toolName === 'giveUp') {
+        await rollbackDomIfActed(tabId, journal, origin);
         return { status: 'gaveUp', reason: toolArgs.reason ?? 'Agent gave up.', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
       }
     }
@@ -250,11 +254,10 @@ export async function runLoop(
     }
   }
 
-  await persistJournal(journal, origin);
-
   // D: if the loop ended without acting or giving up, that is a loop-level
   // failure. Report it as one — not a model behavior issue.
   if (!hasActed) {
+    await persistJournal(journal, origin);
     return {
       status: 'budgetExhausted',
       reason: 'loop exhausted budget without acting or giving up',
@@ -262,6 +265,10 @@ export async function runLoop(
     };
   }
 
+  // F3 (RC3): the loop exhausted budget WITHOUT calling done — the run did not
+  // cleanly succeed, so roll back every change it made. (A run that fully
+  // succeeded calls `done`, which persists and returns before this point.)
+  await rollbackDomIfActed(tabId, journal, origin);
   return { status: 'budgetExhausted', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
 }
 
@@ -334,6 +341,43 @@ function dispatchRestoreHtml(tabId: number, selector: string, prevHtml: string, 
   return new Promise((resolve) => {
     chrome.tabs.sendMessage(tabId, { action: 'restoreHtml', selector, prevHtml, isInside }, () => resolve());
   });
+}
+
+/** F3 (RC3 fix): on a terminal loop failure, roll back EVERY change the run
+ *  made so a failed/partial transform never leaves the page modified.
+ *  CSS first (background removeCss for each act entry's removeCss inverse),
+ *  then structural DOM (content-script undoAll — cloned-node exact for
+ *  setText/insert). No-op if the run made no act changes. The loop's structure,
+ *  budget tiers, and model-tiering are untouched — this is the ONLY new
+ *  failure-path site, additive to the existing single-step undo(1). */
+async function rollbackDomIfActed(tabId: number, journal: Journal, origin: string): Promise<void> {
+  const actEntries = journal.entries.filter((e) => e.kind === 'act' && e.inverse);
+  if (!actEntries.length) return;
+  // 1. CSS off first — remove every removeCss inverse (avoids a flash of wrong
+  //    layout from a display:none staying on while a structural reattach runs).
+  for (const entry of actEntries) {
+    const inv = entry.inverse as any;
+    if (inv?.kind === 'removeCss' && inv.css) {
+      try {
+        await chrome.scripting.removeCSS({ target: { tabId }, css: inv.css, origin: 'USER' });
+      } catch { /* tab may be gone */ }
+    }
+  }
+  // 2. Structural undo — the content-script TransactionLog replays its cloned-
+  //    node inverses backwards. Returns {undone, failed}; we don't throw on
+  //    failed (one failed undo must not abandon the rest — per-op try/catch).
+  await new Promise<void>((resolve) => {
+    chrome.tabs.sendMessage(tabId, { action: 'undoAll' }, () => resolve());
+  });
+  // 3. Drop the persisted journal state for this run so a reload doesn't
+  //    re-apply a failed/partial transform. (CSS + DOM both undone above;
+  //    clearing storage prevents the webNavigation re-insert path reviving it.)
+  try {
+    if (origin) {
+      const key = originKey(origin);
+      await saveJournalState(key, { enabled: false, origin: '', goal: '', entries: [], createdAt: Date.now() });
+    }
+  } catch { /* ignore */ }
 }
 
 /** D: persist by origin only — not origin + path. */

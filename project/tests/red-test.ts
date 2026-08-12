@@ -225,10 +225,18 @@ async function main() {
         const v4 = await readBg(page, 'body');
         const v4c = classify(v4);
         const v4pass = v4c === 'red';
+        // primaryTarget regression: `background: red` is a shorthand CSSOM
+        // expands to ~10 longhands (background-image first, stays 'none').
+        // Before the fix, assertApplied read declarations[0]=background-image
+        // and returned applied:false while the page turned red. Now it reads
+        // ALL longhands and applied must be true (background-color moved).
+        const v4applyPass = applyRes?.result?.applied === true;
         await page.screenshot({ path: join(PROOF_DIR, 'red-v4-user-important.png') });
         console.log(`V4 user origin via insertCSS + important: ${v4} → ${v4c} — expect RED — ${v4pass ? 'PASS' : 'FAIL'}`);
+        console.log(`   primaryTarget applied=${applyRes?.result?.applied} (expect true) — ${v4applyPass ? 'PASS' : 'FAIL'}`);
         console.log(`   applyCss returned: ${JSON.stringify(applyRes).slice(0, 160)}`);
         results.push({ name: 'v4', label: 'user origin via insertCSS + important', expected: 'RED', seen: `${v4c} (${v4})`, pass: v4pass });
+        results.push({ name: 'v4-primaryTarget', label: 'assertApplied true on background shorthand', expected: 'applied=true', seen: `applied=${applyRes?.result?.applied}`, pass: v4applyPass });
         writeFileSync(join(PROOF_DIR, 'red-v4-apply.json'), JSON.stringify(applyRes, null, 2));
       } finally { try { await ctx.close(); } catch { /* ignore */ } }
     }
@@ -247,10 +255,14 @@ async function main() {
         const v5b = await readBg(page, '#v5-box');
         const v5bc = classify(v5b);
         const v5bpass = v5bc === 'red';
+        // primaryTarget regression (same as V4): applied must be true.
+        const v5bapplyPass = applyRes?.result?.applied === true;
         await page.screenshot({ path: join(PROOF_DIR, 'red-v5b-user-wins.png') });
         console.log(`V5b user important vs inline green: before=${before} after=${v5b} → ${v5bc} — expect RED (user wins) — ${v5bpass ? 'PASS' : 'FAIL'}`);
+        console.log(`   primaryTarget applied=${applyRes?.result?.applied} (expect true) — ${v5bapplyPass ? 'PASS' : 'FAIL'}`);
         console.log(`   applyCss returned: ${JSON.stringify(applyRes).slice(0, 160)}`);
         results.push({ name: 'v5b', label: 'user important vs inline !important', expected: 'RED (user wins)', seen: `${v5bc} (${v5b})`, pass: v5bpass });
+        results.push({ name: 'v5b-primaryTarget', label: 'assertApplied true on background shorthand', expected: 'applied=true', seen: `applied=${applyRes?.result?.applied}`, pass: v5bapplyPass });
         writeFileSync(join(PROOF_DIR, 'red-v5b-apply.json'), JSON.stringify(applyRes, null, 2));
       } finally { try { await ctx.close(); } catch { /* ignore */ } }
     }

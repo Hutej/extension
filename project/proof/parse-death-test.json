@@ -1,0 +1,30 @@
+{
+  "checks": [
+    {
+      "name": "loop retries once on a model parse error (a 2nd callLoopModel in the parse branch)",
+      "pass": true,
+      "detail": "loop.ts retries the call once after a non-JSON / model error, before declaring a parse death"
+    },
+    {
+      "name": "double parse failure returns status:\"error\" with a reason (no throw)",
+      "pass": true,
+      "detail": "second parse failure → { status:\"error\", reason:\"model returned invalid JSON twice\" }"
+    },
+    {
+      "name": "low-budget parse failure returns status:\"budgetExhausted\" (no throw)",
+      "pass": true,
+      "detail": "budget <= MIN_TURN after a parse error → structured budgetExhausted, not a crash"
+    },
+    {
+      "name": "F3: rollbackDomIfActed is called before both parse-death returns",
+      "pass": true,
+      "detail": "a parse death after a partial act rolls back every change — no silent permanent mutation"
+    },
+    {
+      "name": "no `throw` on a parse/model error in the loop body",
+      "pass": true,
+      "detail": "a parse death surfaces as a LoopResult, not an exception"
+    }
+  ],
+  "pass": true
+}

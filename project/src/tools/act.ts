@@ -18,6 +18,7 @@ import type { ToolDef, ToolResult } from './index';
 import { sanitizeCss } from '../core/sanitize';
 import { applyHealing } from '../core/heal';
 import { parseCss, serializeEmit, primaryTarget, type EmitItem } from '../core/emit';
+import { recordStructural } from '../core/ops/recorder';
 
 // ── A: CSS origin helpers (content script → background) ───────────
 
@@ -40,20 +41,28 @@ function sendRemoveCSS(css: string): Promise<{ ok: boolean; error?: string }> {
 }
 
 // ── C: assertApplied — computed style must move ────────────────────
+// Compares ALL declared longhand properties before→after (not just the first).
+// CSSOM expands shorthands: `background: red` → background-image (stays 'none')
+// first, then background-color (turns red). Asserting only declarations[0]
+// reads background-image and reports applied:false on a successful application.
 
-function readComputed(selector: string, property: string): string {
+function readComputed(selector: string, properties: string[]): string {
   const el = document.querySelector<HTMLElement>(selector);
   if (!el) return '';
-  return getComputedStyle(el).getPropertyValue(property);
+  const cs = getComputedStyle(el);
+  return properties.map((p) => cs.getPropertyValue(p)).join('|');
 }
 
-function assertApplied(selector: string, property: string, before: string): {
+function assertApplied(selector: string, properties: string[], before: string): {
   applied: boolean; before: string; after: string; matched: number;
 } {
   const els = document.querySelectorAll(selector);
   const matched = els.length;
   if (matched === 0) return { applied: false, before, after: '', matched: 0 };
-  const after = getComputedStyle(els[0] as HTMLElement).getPropertyValue(property);
+  const cs = getComputedStyle(els[0] as HTMLElement);
+  const after = properties.map((p) => cs.getPropertyValue(p)).join('|');
+  // applied = ANY declared property moved (before !== after) and is non-empty.
+  // 'after' is the joined longhand string; a single property changing flips it.
   return { applied: after !== before && after !== '', before, after, matched };
 }
 
@@ -81,11 +90,11 @@ async function emitAndInsert(
   );
 
   if (target) {
-    const before = readComputed(target.selector, target.property);
+    const before = readComputed(target.selector, target.properties);
     const insRes = await sendInsertCSS(cssPhase);
     if (!insRes.ok) return { css: cssPhase, assert: null, error: insRes.error };
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
-    const result = assertApplied(target.selector, target.property, before);
+    const result = assertApplied(target.selector, target.properties, before);
 
     if (result.applied) return { css: cssPhase, assert: result };
 
@@ -93,11 +102,11 @@ async function emitAndInsert(
     if (!defaultImportant) {
       await sendRemoveCSS(cssPhase);
       const cssImportant = serializeEmit(items.map(i => i.kind === 'style' ? { ...i, important: true } : i));
-      const before2 = readComputed(target.selector, target.property);
+      const before2 = readComputed(target.selector, target.properties);
       const insRes2 = await sendInsertCSS(cssImportant);
       if (!insRes2.ok) return { css: cssImportant, assert: null, error: insRes2.error };
       await new Promise<void>((r) => requestAnimationFrame(() => r()));
-      const result2 = assertApplied(target.selector, target.property, before2);
+      const result2 = assertApplied(target.selector, target.properties, before2);
       return { css: cssImportant, assert: result2 };
     }
     return { css: cssPhase, assert: result };
@@ -197,7 +206,14 @@ async function setText(args: any): Promise<ToolResult> {
   }
 
   const prevHtml = el.innerHTML;
+  // F3: capture a CLONED subtree BEFORE the textContent mutation. The in-session
+  // exact inverse is replaceWith(clone) (handled by the content-script
+  // TransactionLog's undoAll). The serializable restoreText below is the
+  // POST-RELOAD fallback only (where the clone is gone — innerHTML re-parse is
+  // the best available, a documented degradation; never used in-session).
+  const clone = el.cloneNode(true);
   el.textContent = text;
+  recordStructural({ kind: 'setText', target: selector, inverse: { kind: 'setText', clone, selector } });
 
   await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
@@ -309,6 +325,13 @@ async function insert(args: any): Promise<ToolResult> {
   const insertedEl = document.querySelector('[data-revueon-inserted="true"]');
   const after = insertedEl ? getComputedStyle(insertedEl as HTMLElement).display : '';
   const applied = insertedEl !== null && after !== 'none';
+
+  // F3: record an exact in-session inverse — the inserted node itself. undoAll
+  // removes it (no innerHTML re-parse). The serializable restoreHtml below is
+  // the post-reload fallback only (the inserted node is gone after reload).
+  if (insertedEl) {
+    recordStructural({ kind: 'insert', target: selector, inverse: { kind: 'insert', node: insertedEl } });
+  }
 
   return {
     ok: true,

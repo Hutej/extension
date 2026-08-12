@@ -35,10 +35,24 @@
     "pass": true
   },
   {
+    "name": "v4-primaryTarget",
+    "label": "assertApplied true on background shorthand",
+    "expected": "applied=true",
+    "seen": "applied=true",
+    "pass": true
+  },
+  {
     "name": "v5b",
     "label": "user important vs inline !important",
     "expected": "RED (user wins)",
     "seen": "red (rgb(255, 0, 0))",
+    "pass": true
+  },
+  {
+    "name": "v5b-primaryTarget",
+    "label": "assertApplied true on background shorthand",
+    "expected": "applied=true",
+    "seen": "applied=true",
     "pass": true
   }
 ]

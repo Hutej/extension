@@ -15,6 +15,7 @@ import { chromium } from 'playwright';
 import { mkdirSync, readFileSync, rmSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
+import { captureFingerprint, assertDomClean as assertDomCleanCanonical } from './assert-dom-clean.ts';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const EXTENSION_PATH = join(__dirname, '..', '.output', 'chrome-mv3');
@@ -62,20 +63,21 @@ async function getExtensionId(context: any): Promise<string> {
 }
 
 /**
- * S3 — assert the page is unmodified before a run.
- * A: no style node — CSS is at user origin. Check for inserted elements only.
- * Throws loudly (abort = fail) if dirty.
+ * S3 — assert the page is unmodified before a run. Captures the clean baseline
+ * fingerprint (the contract the on→off→on→off cycle must restore to) and
+ * asserts no Revueon-inserted node is present. Delegates the byte-identical
+ * comparison to the canonical comparator in assert-dom-clean.ts.
  */
-async function assertDomClean(page: any, label: string): Promise<void> {
-  const dirty = await page.evaluate(() => {
-    return document.querySelectorAll('[data-revueon-inserted]').length > 0;
-  });
-  if (dirty) {
+async function assertDomClean(page: any, label: string): Promise<string> {
+  const baseline = await captureFingerprint(page);
+  const inserted = await page.evaluate(() => document.querySelectorAll('[data-revueon-inserted]').length) as number;
+  if (inserted !== 0) {
     throw new Error(
-      `[${label}] DOM NOT CLEAN — [data-revueon-inserted] elements present before run. ` +
+      `[${label}] DOM NOT CLEAN — ${inserted} [data-revueon-inserted] element(s) present before run. ` +
       `Run aborted and marked failed.`,
     );
   }
+  return baseline;
 }
 
 /** S1 — send two screenshots (before+after) to the vision model and ask what
@@ -294,10 +296,11 @@ async function main() {
       // S3 — assert the page is unmodified before the run.
       await page.goto(g.url, { waitUntil: 'domcontentloaded' });
       await page.waitForTimeout(1500);
-      await assertDomClean(page, g.name);
+      const baselineFp = await assertDomClean(page, g.name);
 
       if (g.name === 'run6-toggle-cycle') {
-        // Row 6: off/on/off cycle with assertDomClean at each off step.
+        // Row 6: off/on/off cycle with the canonical assertDomClean at each off.
+        // Both off-fingerprints must be byte-identical to the pre-run baseline.
         const r = await runGoal(page, context, g.url, g.goal, g.name);
         results.push(r);
         console.log(formatReport(r));
@@ -311,8 +314,8 @@ async function main() {
           // off
           const on1 = await sendToggle(context, page);
           await page.waitForTimeout(500);
-          await assertDomClean(page, `${g.name} toggle-off-1`);
-          console.log(`  [run6] toggle off → on=${on1}, DOM clean ✓`);
+          await assertDomCleanCanonical(page, baselineFp, `${g.name} toggle-off-1`);
+          console.log(`  [run6] toggle off → on=${on1}, DOM byte-identical to baseline ✓`);
           // on
           const on2 = await sendToggle(context, page);
           await page.waitForTimeout(500);
@@ -325,8 +328,8 @@ async function main() {
           // off
           const on3 = await sendToggle(context, page);
           await page.waitForTimeout(500);
-          await assertDomClean(page, `${g.name} toggle-off-2`);
-          console.log(`  [run6] toggle off → on=${on3}, DOM clean ✓`);
+          await assertDomCleanCanonical(page, baselineFp, `${g.name} toggle-off-2`);
+          console.log(`  [run6] toggle off → on=${on3}, DOM byte-identical to baseline ✓`);
           r.whatChanged += ` · toggle cycle off→on→off verified clean`;
         }
       } else {
