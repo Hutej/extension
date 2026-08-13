@@ -16,7 +16,14 @@ export const AI_CONFIG = {
   // Loop budget
   maxSteps: 12,
   maxWallMs: 60_000,
-  maxCompletionTokens: 16_000,
+  // Phase 2.5 TASK1: 16k let the reasoning model generate long chains and
+  // EXCEED the 30s call timeout on later turns (turn 7 with a grown journal),
+  // which surfaced as "budget too low for retry after parse error" (really a
+  // timeout — proof/parse-failures shows error:'Model call timed out.'). A
+  // single loop turn emits ONE short JSON tool-call/done/giveUp object — even
+  // with reasoning, 4k tokens is ample and completes in seconds, well under the
+  // per-call cap. Smaller = faster = far less timeout risk = ACT is reachable.
+  maxCompletionTokens: 4_000,
 
   // Per-call timeout — the loop makes several small calls, not one big one.
   callTimeoutMs: 30_000,

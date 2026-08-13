@@ -10,8 +10,6 @@ experiments
 /tests
 project/tests/artifacts/
 project/*.log
-CLAUDE.md
 .claude
 all-about_webmorph.txt
-roadmap.txt
 Senior_developer_advices

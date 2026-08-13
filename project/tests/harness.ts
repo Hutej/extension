@@ -12,7 +12,7 @@
  */
 
 import { chromium } from 'playwright';
-import { mkdirSync, readFileSync, rmSync } from 'node:fs';
+import { mkdirSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { captureFingerprint, assertDomClean as assertDomCleanCanonical } from './assert-dom-clean.ts';
@@ -33,6 +33,24 @@ interface RunResult {
   steps: number; paidCalls: number; wallMs: number; toolsCalled: string[];
   whatChanged: string; whatItRefused: string;
   visionDescription?: string;
+}
+
+/** Phase 2.5 TASK1 — drain REAL parse failures from the loop result to
+ *  proof/parse-failures/<run>-<i>.txt. Deterministic: the loop surfaces them
+ *  via LoopResult.parseFailures, the background returns them in the popup
+ *  result, and the harness reads them here. Lets us build the JSON fix from
+ *  actual malformed model outputs, not guesses. */
+function drainParseFailures(res: any, runName: string): void {
+  const failures: any[] = Array.isArray(res?.parseFailures) ? res.parseFailures : [];
+  if (!failures.length) return;
+  const FAIL_DIR = join(__dirname, '..', 'proof', 'parse-failures');
+  mkdirSync(FAIL_DIR, { recursive: true });
+  for (let i = 0; i < failures.length; i++) {
+    const f = failures[i];
+    const body = `=== run: ${runName} | model: ${f.model} | turn: ${f.turn} | raw len: ${f.len} (capped ${f.raw.length}) | error: ${f.error ?? '(none)'} ===\n--- raw ---\n${f.raw}\n--- end raw ---\n`;
+    writeFileSync(join(FAIL_DIR, `${runName}-${i}.txt`), body);
+  }
+  console.log(`  [capture] drained ${failures.length} parse failure(s) for ${runName}`);
 }
 
 /** Get the extension ID by examining service worker contexts. */
@@ -141,8 +159,32 @@ async function createContext(runIndex: number): Promise<any> {
   });
 }
 
+/** Phase 2.5 TASK4 — goto with one retry on a connection close. The baseline
+ *  showed "0 steps, 0 calls, 0.0s" with `net::ERR_CONNECTION_CLOSED` /
+ *  "Target page, context or browser has been closed": the SITE (MDN, under
+ *  repeated automated hits) or the Playwright context dropped the connection
+ *  at page.goto, BEFORE Revueon's loop ran. Revueon never closes pages (the
+ *  content script has no page-closing code; confirmed by grep). So this is a
+ *  HARNESS/Playwright lifecycle problem, not a product bug — fixed here with
+ *  one retry + a longer settle, and the run records a proper FAILED result
+ *  (no silent drop to 0/0/0). */
+async function gotoWithRetry(page: any, url: string): Promise<void> {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      await page.goto(url, { waitUntil: 'domcontentloaded' });
+      return;
+    } catch (err) {
+      const msg = (err as Error).message;
+      const closed = /ERR_CONNECTION_CLOSED|Target page, context or browser has been closed|net::ERR_|Target closed/i.test(msg);
+      if (!closed || attempt === 1) throw err;
+      console.log(`  [harness] goto ${closed ? 'connection closed' : 'failed'} ("${msg.slice(0, 60)}..."), retrying once after 2s`);
+      await page.waitForTimeout(2000);
+    }
+  }
+}
+
 async function runGoal(page: any, context: any, url: string, goal: string, name: string): Promise<RunResult> {
-  await page.goto(url, { waitUntil: 'domcontentloaded' });
+  await gotoWithRetry(page, url);
   await page.waitForTimeout(2000);
 
   // F7: before screenshot for comparison.
@@ -178,6 +220,9 @@ async function runGoal(page: any, context: any, url: string, goal: string, name:
 
   const raw = await popup.locator('#revueon-result').textContent();
   const res = JSON.parse(raw || '{}');
+
+  // Phase 2.5 TASK1 — drain REAL parse failures from the loop result to disk.
+  drainParseFailures(res, name);
 
   // Screenshot.
   const screenshotPath = `${SCREENSHOT_DIR}/${name}.png`;
@@ -380,11 +425,17 @@ async function main() {
         }
       }
     } catch (err) {
-      console.error(`FAILED: ${g.name} — ${(err as Error).message}`);
+      const msg = (err as Error).message;
+      // TASK4: distinguish a HARNESS/Playwright lifecycle failure (page closed,
+      // connection dropped — Revueon never closed it) from a real product error,
+      // so "0 steps, 0 calls" is never read as a Revueon bug.
+      const harnessLifecycle = /ERR_CONNECTION_CLOSED|Target page, context or browser has been closed|net::ERR_|Target closed|Protocol error/i.test(msg);
+      const cause = harnessLifecycle ? 'HARNESS: page/context closed before the loop ran (Revueon did not close it)' : msg;
+      console.error(`FAILED: ${g.name} — ${cause}`);
       results.push({
-        goal: g.goal, url: g.url, status: 'error', reason: (err as Error).message,
+        goal: g.goal, url: g.url, status: 'error', reason: cause,
         steps: 0, paidCalls: 0, wallMs: 0, toolsCalled: [],
-        whatChanged: 'error', whatItRefused: 'error',
+        whatChanged: harnessLifecycle ? 'HARNESS lifecycle error (no loop ran)' : 'error', whatItRefused: cause,
       });
     } finally {
       // S3 — close the context so the next run gets a fresh one.

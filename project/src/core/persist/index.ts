@@ -49,7 +49,6 @@ export async function loadJournalState(key: string): Promise<JournalState> {
 export async function saveJournalState(key: string, state: JournalState): Promise<void> {
   await browser.storage.local.set({ [PREFIX + key]: state });
 }
-
-export async function clearJournalState(key: string): Promise<void> {
-  await browser.storage.local.remove([PREFIX + key]);
-}
+// (Phase 2.5: removed dead `clearJournalState` — exported but never imported.
+// Journal clearing uses saveJournalState with an empty entry, not a remove.
+// Caught by the widened audit-wiring; do not reintroduce without a consumer.)

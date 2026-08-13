@@ -1,0 +1,50 @@
+{
+  "checks": [
+    {
+      "name": "A:setText mdn",
+      "pass": true,
+      "detail": "target=#rva8gvhnr on1.applied=true off1=MATCH on2.applied=true off2=MATCH"
+    },
+    {
+      "name": "A:setText wikipedia",
+      "pass": true,
+      "detail": "target=#rvaar7389 on1.applied=true off1=MATCH on2.applied=true off2=MATCH"
+    },
+    {
+      "name": "A:setText hackernews",
+      "pass": true,
+      "detail": "target=#rvax1io8p on1.applied=true off1=MATCH on2.applied=true off2=MATCH"
+    },
+    {
+      "name": "B:cssCycle mdn",
+      "pass": true,
+      "detail": "baseline=rgb(4, 76, 159) on1=rgb(255, 0, 0)(changed) off1=rgb(4, 76, 159)(==base ✓) on2=rgb(255, 0, 0) off2=rgb(4, 76, 159)(==base ✓) on1.ok=true"
+    },
+    {
+      "name": "B:cssCycle wikipedia",
+      "pass": true,
+      "detail": "baseline=rgb(16, 20, 24) on1=rgb(255, 0, 0)(changed) off1=rgb(16, 20, 24)(==base ✓) on2=rgb(255, 0, 0) off2=rgb(16, 20, 24)(==base ✓) on1.ok=true"
+    },
+    {
+      "name": "B:cssCycle hackernews",
+      "pass": true,
+      "detail": "baseline=rgb(130, 130, 130) on1=rgb(255, 0, 0)(changed) off1=rgb(130, 130, 130)(==base ✓) on2=rgb(255, 0, 0) off2=rgb(130, 130, 130)(==base ✓) on1.ok=true"
+    },
+    {
+      "name": "C:onOnOff mdn",
+      "pass": true,
+      "detail": "afterOn1=2 afterOn2=2 off.inserted=0(==base) offFp=MATCH on1.ok=true on2.ok=true"
+    },
+    {
+      "name": "C:onOnOff wikipedia",
+      "pass": true,
+      "detail": "afterOn1=2 afterOn2=2 off.inserted=0(==base) offFp=MATCH on1.ok=true on2.ok=true"
+    },
+    {
+      "name": "C:onOnOff hackernews",
+      "pass": true,
+      "detail": "afterOn1=2 afterOn2=2 off.inserted=0(==base) offFp=MATCH on1.ok=true on2.ok=true"
+    }
+  ],
+  "pass": true
+}

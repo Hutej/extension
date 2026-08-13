@@ -45,6 +45,16 @@ function sendRemoveCSS(css: string): Promise<{ ok: boolean; error?: string }> {
 // CSSOM expands shorthands: `background: red` → background-image (stays 'none')
 // first, then background-color (turns red). Asserting only declarations[0]
 // reads background-image and reports applied:false on a successful application.
+//
+// Phase 2.5 TASK3: getComputedStyle DURING a CSS transition returns the
+// INTERPOLATED value, not the final. A single requestAnimationFrame after the
+// insert (the old mechanism) would read the mid-transition value and treat it
+// as the result — confirmed by tests/assert-applied-timing-test.ts: with
+// `transition: width 2s`, getComputedStyle at 1 rAF returns ~101px (interpolated),
+// not the settled 300px. Fix: detect an active transition on the asserted
+// element and, if present, wait for transitionend (bounded — the smallest
+// reliable browser sync, not an arbitrary sleep) before reading. If no
+// transition, one rAF is enough (Investigation A: synchronous application).
 
 function readComputed(selector: string, properties: string[]): string {
   const el = document.querySelector<HTMLElement>(selector);
@@ -53,17 +63,54 @@ function readComputed(selector: string, properties: string[]): string {
   return properties.map((p) => cs.getPropertyValue(p)).join('|');
 }
 
-function assertApplied(selector: string, properties: string[], before: string): {
-  applied: boolean; before: string; after: string; matched: number;
-} {
+/** TASK3: does the element have a NON-ZERO transition on any property? If so
+ *  assertApplied must wait for it to settle before reading the final value.
+ *  Returns the max transition-duration in ms (0 if none / all-zero). */
+function activeTransitionMs(el: Element): number {
+  const cs = getComputedStyle(el);
+  // transitionDuration may be "0s, 0.2s, 2s" (per-property). Parse all, take max.
+  const durations = cs.transitionDuration.split(',').map((d) => d.trim());
+  let maxMs = 0;
+  for (const d of durations) {
+    const s = parseFloat(d);
+    if (!isNaN(s) && s > 0) maxMs = Math.max(maxMs, s * 1000);
+  }
+  return maxMs;
+}
+
+/** TASK3: wait for an active transition to settle. Smallest reliable sync:
+ *  a bounded transitionend listener; if it doesn't fire within maxMs+500ms,
+ *  fall through (read whatever the computed value is — honest, not a guess).
+ *  No-op if no active transition. */
+function waitForTransition(el: Element, maxMs: number): Promise<void> {
+  if (maxMs <= 0) return Promise.resolve();
+  return new Promise<void>((resolve) => {
+    let done = false;
+    const finish = () => { if (!done) { done = true; resolve(); } };
+    el.addEventListener('transitionend', finish, { once: true });
+    // ponytail: cap at the transition duration + 500ms grace. If transitionend
+    // never fires (e.g. the transition was overridden or the property is
+    // discrete/non-animatable), don't hang — fall through after the cap.
+    setTimeout(finish, maxMs + 500);
+  });
+}
+
+interface AssertResult {
+  applied: boolean; before: string; after: string; matched: number; transitioned: boolean;
+}
+
+async function assertApplied(selector: string, properties: string[], before: string): Promise<AssertResult> {
   const els = document.querySelectorAll(selector);
   const matched = els.length;
-  if (matched === 0) return { applied: false, before, after: '', matched: 0 };
-  const cs = getComputedStyle(els[0] as HTMLElement);
+  if (matched === 0) return { applied: false, before, after: '', matched: 0, transitioned: false };
+  const el = els[0] as HTMLElement;
+  // TASK3: if an active transition is in flight, wait for it to settle before
+  // reading — otherwise we capture an interpolated mid-transition value.
+  const tMs = activeTransitionMs(el);
+  if (tMs > 0) await waitForTransition(el, tMs);
+  const cs = getComputedStyle(el);
   const after = properties.map((p) => cs.getPropertyValue(p)).join('|');
-  // applied = ANY declared property moved (before !== after) and is non-empty.
-  // 'after' is the joined longhand string; a single property changing flips it.
-  return { applied: after !== before && after !== '', before, after, matched };
+  return { applied: after !== before && after !== '', before, after, matched, transitioned: tMs > 0 };
 }
 
 // ── Core: emit, insert, assert, re-emit important if needed ────────
@@ -74,7 +121,7 @@ function assertApplied(selector: string, properties: string[], before: string): 
 async function emitAndInsert(
   rawCss: string,
   defaultImportant: boolean,
-): Promise<{ css: string; assert: ReturnType<typeof assertApplied> | null; error?: string }> {
+): Promise<{ css: string; assert: AssertResult | null; error?: string }> {
   const { css: sanitized } = sanitizeCss(rawCss);
   if (!sanitized.trim()) return { css: '', assert: null, error: 'CSS was entirely rejected by sanitizer.' };
 
@@ -94,19 +141,28 @@ async function emitAndInsert(
     const insRes = await sendInsertCSS(cssPhase);
     if (!insRes.ok) return { css: cssPhase, assert: null, error: insRes.error };
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
-    const result = assertApplied(target.selector, target.properties, before);
+    const result = await assertApplied(target.selector, target.properties, before);
 
     if (result.applied) return { css: cssPhase, assert: result };
 
     // Phase 2: not applied — try with !important (if we didn't already).
     if (!defaultImportant) {
-      await sendRemoveCSS(cssPhase);
+      // Adversarial review (wf_e3e50d92, skeptic claim_3): the return of
+      // sendRemoveCSS was IGNORERED. If it silently fails, BOTH the normal and
+      // the !important sheets would be applied, but the inverse records only
+      // the !important sheet — so a later removeCSS(inverse) would leave the
+      // normal sheet permanently on the page (a silent reversal leak). Fix:
+      // check the removal; if it failed, do NOT proceed to the !important
+      // insert (return an error so the loop rolls back the normal sheet it
+      // DID insert — a clean, single-sheet failure, not a split-brain one).
+      const rmRes = await sendRemoveCSS(cssPhase);
+      if (!rmRes.ok) return { css: cssPhase, assert: result, error: `failed to remove the normal sheet before re-emitting !important: ${rmRes.error || 'unknown'}` };
       const cssImportant = serializeEmit(items.map(i => i.kind === 'style' ? { ...i, important: true } : i));
       const before2 = readComputed(target.selector, target.properties);
       const insRes2 = await sendInsertCSS(cssImportant);
       if (!insRes2.ok) return { css: cssImportant, assert: null, error: insRes2.error };
       await new Promise<void>((r) => requestAnimationFrame(() => r()));
-      const result2 = assertApplied(target.selector, target.properties, before2);
+      const result2 = await assertApplied(target.selector, target.properties, before2);
       return { css: cssImportant, assert: result2 };
     }
     return { css: cssPhase, assert: result };

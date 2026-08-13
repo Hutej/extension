@@ -81,6 +81,7 @@ export const MUTATION_REASONS: ReadonlySet<string> = new Set<string>([
 ]);
 
 /** Validate the op set against guard laws. Pure (no DOM). */
+// audit:defer wired when the first structural op (remove/move/reorder/wrap) ships — no live act tool emits these yet, so no real consumer exists. Do NOT fake a call to satisfy the audit (manufactured architecture is forbidden). Unit-tested in tests/ops.test.ts; runtime call site lands with the first structural op.
 export function validateOps(ops: DesignOp[] | undefined, perception: Perception): OpValidationResult {
   const out: ValidatedOp[] = [];
   const refused: string[] = [];

@@ -112,7 +112,66 @@ export async function countInserted(page: any): Promise<number> {
 }
 
 /** Assert the DOM is clean against a baseline fingerprint (byte-identical)
- *  AND that no Revueon-inserted node remains. Throws loudly on mismatch. */
+ *  AND that no Revueon-inserted node remains. Throws loudly on mismatch.
+ *
+ * ── BLIND SPOTS — what assertDomClean does NOT guarantee (Phase 2.5 TASK7) ──
+ * assertDomClean() DOES NOT mean "the entire webpage is guaranteed unchanged."
+ * It means: the structural fingerprint (tag + attrs-except-denylist + child-order
+ * + trimmed-text) matches the baseline AND no [data-revueon-inserted] node
+ * remains. The following mutations can therefore ESCAPE detection. Each is
+ * verified against the code in FINGERPRINT_FN above; a known-blind test pins it
+ * in tests/assert-dom-clean-blindspots-test.ts.
+ *
+ * 1. THE `style` ATTRIBUTE (globally excluded — denylist line ~58). Why: Revueon's
+ *    hide uses USER-origin CSS, not inline style, so a display:none we add never
+ *    touches inline style; excluding it avoids false failures from the site's
+ *    own dynamic inline-style churn. Blind spot: a THIRD-PARTY (or a buggy
+ *    Revueon act) that mutates an element's inline `style="..."` attribute is
+ *    invisible to the fingerprint. Partial mitigation: insert leakage is
+ *    caught by the count-==0 check; CSS-origin changes are caught at the
+ *    computed-style level by assertApplied, not here.
+ *
+ * 2. FORM CONTROL VALUES (user input / JS-set .value / .checked). Why: the
+ *    fingerprint captures ATTRIBUTES (so an HTML `value="..."` attribute or a
+ *    `checked` attribute is included), but a user typing into an <input> updates
+ *    the element's .value PROPERTY, not its attribute — and JS setting
+ *    `el.value = 'x'` likewise does not update the attribute. Blind spot: any
+ *    mutation that changes a form control's value/checked/capability via the
+ *    property API (the common path) is invisible. This is the exclusion the
+ *    header comment named "form control value/checked"; the code does not strip
+ *    these attributes, so attribute-level values ARE caught but property-level
+ *    values are not.
+ *
+ * 3. <script> / <style> ELEMENT TEXT (excluded — line ~72). Why: these are
+ *    dynamic (script re-injects itself, CSS-in-JS churns inline stylesheets).
+ *    Their PRESENCE, TAG, and ATTRIBUTES are fingerprinted; only their TEXT is
+ *    not. Blind spot: a mutation that rewrites a <script>'s body or a <style>'s
+ *    rules in place (same element, new text) is invisible.
+ *
+ * 4. Revueon's OWN MARKERS (data-rv-c, data-rv-wrap, #revueon-style,
+ *    #revueon-escape-ui — excluded entirely, lines ~52-55). Why: these are
+ *    Revueon's perception/structural stamps and UI chrome, not mutations under
+ *    test. Blind spot: irrelevant for user-visible mutation, but a test that
+ *    expected these stamps to be stable would not catch their churn.
+ *    [data-revueon-inserted] is NOT excluded — it is INCLUDED so an insert is
+ *    detectable (baseline has none → on has one → off has none == baseline).
+ *
+ * 5. TEXT-NODE WHITESPACE (collapsed — line ~77). The fingerprint collapses
+ *    runs of whitespace to a single space and trims. Why: avoid false failures
+ *    from reflow-induced whitespace changes. Blind spot: a mutation that only
+ *    changes whitespace (indentation, line wrapping) is invisible.
+ *
+ * 6. ATTRIBUTE ORDER (sorted — line ~67). Attributes are sorted before
+ *    fingerprinting. Why: round-tripping through HTML parsers can reorder
+ *    attributes. Blind spot: a mutation that only reorders an element's
+ *    attributes is invisible.
+ *
+ * The fingerprint DOES catch: tag changes, added/removed attributes (except
+ * `style`), added/removed/REORDERED children, setText (direct text-node
+ * content), and the tag-tree shape. The count-==0 check catches inserted-node
+ * leakage that the fingerprint (which includes inserted nodes) would otherwise
+ * show as a structural change.
+ */
 export async function assertDomClean(page: any, baseline: string, label: string): Promise<void> {
   const fp = await captureFingerprint(page);
   const inserted = await countInserted(page);

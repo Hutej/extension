@@ -27,8 +27,26 @@ import { AI_CONFIG } from '../core/config';
 import { saveJournalState, originKey, loadJournalState } from '../core/persist';
 
 // D: Budget gate constants.
-const ACT_RESERVE_MS = 20_000;  // reserve this much wall time for acting
+// Phase 2.5 TASK2: 20s was HALF the 60s budget — it squeezed observation turns
+// so hard (a turn-6 observe call at rem=25s was capped to 5s, under the model's
+// real latency) that the strong model timed out on later turns and never
+// reached act (proof/parse-failures: turn-8 timeouts on reduce-clutter /
+// hide-sidebar). Real act calls (applyCss/insert) complete in 3-9s (gate2
+// runs 1/5/6: total run 9-26s for 3-6 calls). 12s reserves ample time for the
+// final act while letting observation turns run long enough to complete.
+const ACT_RESERVE_MS = 12_000;  // reserve this much wall time for acting
 const MIN_TURN_MS = 5_000;     // below this, no turn can complete — break
+
+export interface ParseFailure {
+  model: string;
+  /** raw model output that failed JSON parsing (capped for transport). */
+  raw: string;
+  /** length of the original (uncapped) output. */
+  len: number;
+  turn: number;
+  /** model error/timeout message when raw is absent (the call didn't complete). */
+  error?: string;
+}
 
 export interface LoopResult {
   status: 'done' | 'gaveUp' | 'budgetExhausted' | 'error';
@@ -38,6 +56,10 @@ export interface LoopResult {
   budget: Budget;
   paidCalls: number;
   wallMs: number;
+  /** Phase 2.5 TASK1 — REAL parse-failure outputs, for root-cause
+   *  classification. Deterministic (no async storage): collected in-loop and
+   *  surfaced through the LoopResult the background returns to the popup. */
+  parseFailures: ParseFailure[];
 }
 
 export interface LoopCredentials {
@@ -70,6 +92,15 @@ export async function runLoop(
   let paidCalls = 0;
   let consecutiveNoInfo = 0;
   let hasActed = false;
+  // Phase 2.5 TASK1 — collect REAL malformed model outputs for root-cause
+  // classification. Deterministic: surfaced via LoopResult.parseFailures.
+  const parseFailures: ParseFailure[] = [];
+  const recordParseFailure = (model: string | undefined, raw: string | undefined, error?: string): void => {
+    // Capture both invalid-JSON outputs (raw present) AND model errors/timeouts
+    // (raw absent, error present) so the root cause is classifiable either way.
+    if (!raw && !error) return;
+    parseFailures.push({ model: model ?? '(unknown)', raw: (raw ?? '').slice(0, 4000), len: raw?.length ?? 0, turn: budget.stepsUsed, error });
+  };
 
   // Replay persisted DOM mutations for this origin (CSS is handled by webNavigation).
   try {
@@ -93,23 +124,60 @@ export async function runLoop(
     // D: If remaining is below MIN_TURN, no turn can complete — break.
     if (rem.wallMs <= MIN_TURN_MS) break;
 
-    // D: If remaining is below ACT_RESERVE, restrict to act/verify only.
-    // Observation turns may never spend the act reserve.
-    const restrictToAct = rem.wallMs <= ACT_RESERVE_MS;
+    // D: If remaining is below ACT_RESERVE + MIN_TURN, restrict to act/verify
+    // only. Observation turns may never spend the act reserve. Phase 2.5
+    // adversarial review (wf_e3e50d92) found a breach in the window
+    // rem ∈ (ACT_RESERVE, ACT_RESERVE + MIN_TURN): turnCap's MIN_TURN_MS floor
+    // could force a 5s observation call that dips below the 12s reserve. Fix:
+    // refuse observation a full MIN_TURN earlier — observation needs room for
+    // a complete turn AND the reserve. (Act/verify turns own the reserve, so
+    // the restrictToAct cap below is the full rem — no floor conflict there.)
+    const restrictToAct = rem.wallMs <= ACT_RESERVE_MS + MIN_TURN_MS;
+
+    // D (Phase 2.5 TASK2 — the budget-reserve invariant): an OBSERVATION turn
+    // may spend at most (remaining - ACT_RESERVE_MS) so it can NEVER dip into
+    // the act reserve. The old code used Math.min(rem, callTimeoutMs): at
+    // rem=25s a single model call could run 25s and eat the whole 20s reserve,
+    // leaving ACT with nothing — the exact failure 5/6 baseline goals hit
+    // ("budget too low for retry after parse error"). The retry and the tool
+    // dispatch timeout are capped the same way. Once restrictToAct is true
+    // the reserve IS the acting budget, so the cap is the full remaining.
+    const turnCap = restrictToAct
+      ? rem.wallMs
+      : Math.max(MIN_TURN_MS, rem.wallMs - ACT_RESERVE_MS);
 
     budget.recordStep(0);
 
-    // E3: model tiering — fast model for observation, strong for act.
+    // E3: model tiering. Phase 2.5 TASK1 — REAL evidence (proof/transport-
+    // capture*.json, 14 calls) showed the "fast" observation model
+    // (@cf/zai-org/glm-4.7-flash) is SLOWER (8-25s, >30s sometimes → timeout)
+    // and the cause of most parse/call failures, while the strong model
+    // (@cf/zai-org/glm-5.2) is faster (1.4-3.7s) and returns valid JSON. Using
+    // the flash model for the first turns burns a turn on a timeout and is the
+    // dominant reason ACT is never reached. So: use the STRONG model for every
+    // loop turn (the cheapest *correct* call is the one that completes). This
+    // is a local change to the tier pick, not a loop redesign — the two-model
+    // config and the `useFast` heuristic stay; only the default flips so the
+    // loop stops spending its first turns on a model that times out.
     const lastEntry = journal.entries[journal.entries.length - 1];
-    const useFast = !hasActed && (!lastEntry || lastEntry.kind === 'observe') && !restrictToAct;
+    const useFast = false; // was: !hasActed && (!lastEntry || lastEntry.kind === 'observe') && !restrictToAct
     const loopModel = useFast ? AI_CONFIG.fastModel : AI_CONFIG.strongModel;
 
     // F + D: restricted tool list if consecutive no-info OR act reserve reached.
-    const restricted = restrictToAct || consecutiveNoInfo >= 2;
+    // Phase 2.5: ALSO restrict at 1/3 budget. The prompt already SAYS "next
+    // turn MUST be act/done/giveUp" at low budget, but the model was ignoring it
+    // — run3 spent 10 turns on describePage/findElements/look/checkLayout under
+    // low-budget pressure and never acted (gate3: budgetExhausted, no act).
+    // Enforcing the restriction (refuse observation at low budget) makes the
+    // model act or give up instead of observing its way to a timeout. Small,
+    // additive — same `restricted` flag the prompt already consumes.
+    const lowBudget = rem.steps <= Math.ceil(budget.maxSteps / 3) || rem.wallMs <= budget.maxWallMs / 3;
+    const restricted = restrictToAct || consecutiveNoInfo >= 2 || lowBudget;
     const prompt = buildPrompt(goal, origin, path, journal, budget, restricted);
 
-    // D: timeouts derive from remaining budget, not a constant.
-    const callTimeout = Math.min(rem.wallMs, AI_CONFIG.callTimeoutMs);
+    // D: timeouts derive from remaining budget, not a constant — and are capped
+    // by turnCap so observation can't breach the act reserve (TASK2).
+    const callTimeout = Math.min(turnCap, AI_CONFIG.callTimeoutMs);
 
     const callStart = Date.now();
     let modelResult = await callLoopModel({
@@ -123,41 +191,64 @@ export async function runLoop(
     });
     paidCalls++;
 
-    // Retry on parse error — only if enough budget remains.
+    // Retry on parse error — only if enough budget remains FOR THE RETRY AND
+    // the act reserve. The old gate checked `remaining <= MIN_TURN_MS` (5s),
+    // so a parse error at rem=25s passed, the retry ran up to 25s, and landed
+    // at 0 — eating the entire 20s act reserve. That is the exact cause of
+    // "budget too low for retry after parse error" in the baseline. Now the
+    // retry only proceeds if remaining leaves room for both the retry and the
+    // reserve, and the retry timeout is capped to (remaining - reserve).
     if (!modelResult.ok || !modelResult.json) {
-      if (budget.remaining().wallMs <= MIN_TURN_MS) {
+      recordParseFailure(modelResult.model, modelResult.raw, modelResult.error);
+      const remAfter = budget.remaining().wallMs;
+      // Phase 2.5 TASK2: an observation turn's retry must preserve the act
+      // reserve; an act turn (restrictToAct) owns the reserve, so only MIN_TURN
+      // guards it. This is the fix that lets the loop REACH act after a retry.
+      const retryFloor = restrictToAct ? MIN_TURN_MS : ACT_RESERVE_MS + MIN_TURN_MS;
+      if (remAfter <= retryFloor) {
         await rollbackDomIfActed(tabId, journal, origin);
         await persistJournal(journal, origin);
-        return { status: 'budgetExhausted', reason: 'budget too low for retry after parse error', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
+        return { status: 'budgetExhausted', reason: 'budget too low for retry after parse error', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
       }
       const errorMsg = modelResult.raw
         ? `Your last response was not valid JSON: ${modelResult.raw.slice(0, 200)}. Respond with a valid JSON object.`
-        : `Model error: ${modelResult.error}. Respond with a valid JSON object.`;
+        : `The previous model call ${modelResult.error ?? 'failed'}. Respond with one valid JSON object only.`;
+      // TASK2: retry timeout capped to leave the act reserve intact when observing.
+      // Phase 2.5 TASK1: cap the retry at min(retryCap, 12s) so a retry can NEVER
+      // take the full 30s — if the first call timed out, the retry must fail fast
+      // (affordable) instead of eating another 30s. Real evidence
+      // (proof/transport-capture*.json): the slow observation model times out
+      // at >30s; a second 30s retry would burn the budget. 12s is enough for a
+      // normal 1-25s response, and short enough to preserve the act reserve.
+      const retryCap = restrictToAct
+        ? remAfter
+        : Math.max(MIN_TURN_MS, remAfter - ACT_RESERVE_MS);
       modelResult = await callLoopModel({
         systemPrompt: 'You are Revueon. Respond with one JSON object only.',
         userContent: prompt + `\n\nERROR: ${errorMsg}`,
         accountId: credentials.accountId,
         apiKey: credentials.apiToken,
-        timeoutMs: Math.min(budget.remaining().wallMs, AI_CONFIG.callTimeoutMs),
+        timeoutMs: Math.min(retryCap, 12_000),
       });
       paidCalls++;
       if (!modelResult.ok || !modelResult.json) {
+        recordParseFailure(modelResult.model, modelResult.raw, modelResult.error);
         await rollbackDomIfActed(tabId, journal, origin);
-        return { status: 'error', reason: 'model returned invalid JSON twice', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
+        return { status: 'error', reason: 'model returned invalid JSON twice', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
       }
     }
 
     const response = modelResult.json as any;
 
     if (response.done) {
-      const result: LoopResult = { status: 'done', summary: response.summary ?? 'Done.', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
+      const result: LoopResult = { status: 'done', summary: response.summary ?? 'Done.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
       await persistJournal(journal, origin);
       return result;
     }
 
     if (response.giveUp) {
       await rollbackDomIfActed(tabId, journal, origin);
-      return { status: 'gaveUp', reason: response.reason ?? 'Agent gave up.', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
+      return { status: 'gaveUp', reason: response.reason ?? 'Agent gave up.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
     }
 
     const toolName = response.tool as string;
@@ -184,13 +275,13 @@ export async function runLoop(
         continue;
       }
       if (toolName === 'done') {
-        const result: LoopResult = { status: 'done', summary: toolArgs.summary ?? 'Done.', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
+        const result: LoopResult = { status: 'done', summary: toolArgs.summary ?? 'Done.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
         await persistJournal(journal, origin);
         return result;
       }
       if (toolName === 'giveUp') {
         await rollbackDomIfActed(tabId, journal, origin);
-        return { status: 'gaveUp', reason: toolArgs.reason ?? 'Agent gave up.', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
+        return { status: 'gaveUp', reason: toolArgs.reason ?? 'Agent gave up.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
       }
     }
 
@@ -200,8 +291,16 @@ export async function runLoop(
       if (tool.background) {
         toolResult = await handleBackgroundTool(tabId, toolName, toolArgs, credentials);
       } else {
-        // D: dispatch timeout derives from remaining budget.
-        const dispatchTimeout = Math.min(budget.remaining().wallMs, 30_000);
+        // D: dispatch timeout derives from remaining budget. Phase 2.5 TASK2:
+        // an OBSERVATION dispatch (describePage/readText/findElements/perceivePage)
+        // is capped to leave the act reserve intact; an ACT dispatch owns the
+        // reserve (it IS the act). look/checkLayout are verify — they run in the
+        // reserve window once restrictToAct, or under turnCap while observing.
+        const remNow = budget.remaining().wallMs;
+        const observeDispatchCap = Math.max(MIN_TURN_MS, remNow - ACT_RESERVE_MS);
+        const dispatchTimeout = tool.kind === 'observe'
+          ? Math.min(observeDispatchCap, 30_000)
+          : Math.min(remNow, 30_000);
         toolResult = await dispatchTool(tabId, toolName, toolArgs, dispatchTimeout);
       }
     } catch (err) {
@@ -262,6 +361,7 @@ export async function runLoop(
       status: 'budgetExhausted',
       reason: 'loop exhausted budget without acting or giving up',
       journal, budget, paidCalls, wallMs: budget.elapsedMs(),
+      parseFailures,
     };
   }
 
@@ -269,7 +369,7 @@ export async function runLoop(
   // cleanly succeed, so roll back every change it made. (A run that fully
   // succeeded calls `done`, which persists and returns before this point.)
   await rollbackDomIfActed(tabId, journal, origin);
-  return { status: 'budgetExhausted', journal, budget, paidCalls, wallMs: budget.elapsedMs() };
+  return { status: 'budgetExhausted', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
 }
 
 // ── helpers ────────────────────────────────────────────────────────

@@ -69,6 +69,7 @@ export default defineBackground(() => {
             steps: result.budget.stepsUsed,
             toolsCalled: result.journal.entries.map((e) => e.tool),
             journal: result.journal.entries,
+            parseFailures: result.parseFailures ?? [],
           });
         } catch (err) {
           sendResponse({ ok: false, error: (err as Error).message });

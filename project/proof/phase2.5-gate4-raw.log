@@ -1,0 +1,159 @@
+
+═══ RUN 1: run1-summarise — "Summarise this article" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] diff: In the second screenshot, a **vertical blue line** has been inserted along the left edge of the main article content, with **small stacked letters/characters** placed alongside it. The visible charact
+──────────────────────────────────────────────────────────────
+  GOAL:    Summarise this article
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  done
+  SUMMARY: I read the MDN article on the CSS justify-content property and inserted a summary box at the top of the main content area. The summary explains that justify-content defines how the browser distributes space between and around content items along the main axis of a flex container and the inline axis of grid and multicol containers, and lists key values (start, end, flex-start, flex-end, center, left, right, space-between, space-around, space-evenly, stretch, etc.).
+  STEPS:   5
+  CALLS:   5 model call(s)
+  TIME:    19.3s
+  TOOLS:   describePage → readText → readText → insert
+  CHANGED: assertApplied: 1 act(s) moved computed style
+  REFUSED: Nothing refused
+  VISION:  In the second screenshot, a **vertical blue line** has been inserted along the left edge of the main article content, with **small stacked letters/characters** placed alongside it. The visible characters appear to run down the line as fragments: `..`, `a`, `y`, `and`, `h`, `l`, `S`, `S`, `j`, `u`, `s`, `t`, `i`, `f`, `y` — spelling out something like “justify” near the bottom.
+
+Everything else — the page layout, sidebars, header, “In this article” menu, ad, text content, spacing, and other visib
+──────────────────────────────────────────────────────────────
+
+═══ RUN 2: run2-failing-case — "Hide the video player" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] diff: The only visible difference is in the **"Try it" interactive demo section** near the bottom of the page.
+
+In the second screenshot, a **blue right-pointing arrow/chevron (`>`)** appears immediately to
+──────────────────────────────────────────────────────────────
+  GOAL:    Hide the video player
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  gaveUp
+  SUMMARY: No video player found on this page. Searches for <video> and <iframe> elements both returned 0 matches. There is no video player to hide on this MDN CSS reference page.
+  STEPS:   4
+  CALLS:   4 model call(s)
+  TIME:    8.2s
+  TOOLS:   describePage → findElements → findElements
+  CHANGED: No changes detected
+  REFUSED: No video player found on this page. Searches for <video> and <iframe> elements both returned 0 matches. There is no video player to hide on this MDN CSS reference page.
+  VISION:  The only visible difference is in the **"Try it" interactive demo section** near the bottom of the page.
+
+In the second screenshot, a **blue right-pointing arrow/chevron (`>`)** appears immediately to the right of the code box containing `justify-content: start;`. This button/control is not present in the first screenshot.
+
+Everything else appears unchanged, including the top banner, navigation bar, page title, sidebar content, "Baseline Widely available" banner, descriptive text, and the Hetzne
+──────────────────────────────────────────────────────────────
+
+═══ RUN 3: run3-wikipedia-sidebar — "Hide the sidebar" on https://en.wikipedia.org/wiki/CSS ═══
+  [vision] diff: The main difference is that the **left sidebar (Contents navigation panel) has been removed**, and with it the **hamburger menu icon** in the top-left corner is also gone.
+
+Specifically:
+- **Removed s
+──────────────────────────────────────────────────────────────
+  GOAL:    Hide the sidebar
+  URL:     https://en.wikipedia.org/wiki/CSS
+  STATUS:  done
+  SUMMARY: Hid the Wikipedia sidebar by hiding the table of contents navigation panel (nav#mw-panel-toc) and applying CSS to hide the main menu dropdown and related sidebar containers (#vector-main-menu-dropdown, .vector-main-menu-container, etc.).
+  STEPS:   10
+  CALLS:   10 model call(s)
+  TIME:    39.0s
+  TOOLS:   describePage → findElements → findElements → look → checkLayout → findElements → hide → applyCss
+  CHANGED: assertApplied: 2 act(s) moved computed style
+  REFUSED: Nothing refused
+  VISION:  The main difference is that the **left sidebar (Contents navigation panel) has been removed**, and with it the **hamburger menu icon** in the top-left corner is also gone.
+
+Specifically:
+- **Removed sidebar:** The entire “Contents” box listing sections like (Top), Syntax, History, Browser support, Limitations, Advantages, Standardization, See also, References, Further reading, and External links is no longer visible.
+- **Removed clutter/icon:** The three-line hamburger menu icon to the left of t
+──────────────────────────────────────────────────────────────
+  [run3] persistence check: reload + navigate to /wiki/HTML
+  [run3] sidebar modification persisted on /wiki/HTML: NO ✗
+
+═══ RUN 4: run4-reduce-clutter — "Reduce clutter" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [capture] drained 1 parse failure(s) for run4-reduce-clutter
+  [vision] diff: The only visible change is the state of the interactive demo control in the **“Try it”** section:
+
+- In the second screenshot, the `justify-content: start;` value field appears **focused/active**: it 
+──────────────────────────────────────────────────────────────
+  GOAL:    Reduce clutter
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  budgetExhausted
+  SUMMARY: budget too low for retry after parse error
+  STEPS:   10
+  CALLS:   10 model call(s)
+  TIME:    48.0s
+  TOOLS:   describePage → findElements → describePage → findElements → findElements → checkLayout → checkLayout
+  CHANGED: No changes detected
+  REFUSED: budget too low for retry after parse error
+  VISION:  The only visible change is the state of the interactive demo control in the **“Try it”** section:
+
+- In the second screenshot, the `justify-content: start;` value field appears **focused/active**: it has a blue outline/border.
+- A small **right-pointing chevron/arrow (`>`)** appears to the right of the value field.
+
+Everything else — the top Scrimba banner, main navigation, left sidebar, right sidebar with the Hetzner ad, “In this article” links, baseline availability banner, and page content — 
+──────────────────────────────────────────────────────────────
+
+═══ RUN 5: run5-hn-spacing — "Increase spacing" on https://news.ycombinator.com/ ═══
+  [vision] diff: The second screenshot has **significantly increased vertical line spacing / row padding** between Hacker News list items.
+
+Specifically:
+- The same header remains unchanged.
+- The same first 10 posts 
+──────────────────────────────────────────────────────────────
+  GOAL:    Increase spacing
+  URL:     https://news.ycombinator.com/
+  STATUS:  done
+  SUMMARY: Applied CSS to increase spacing on the Hacker News page by adding padding to table cells (4px 6px) and line-height to table rows, making the content more readable with increased spacing between elements.
+  STEPS:   3
+  CALLS:   3 model call(s)
+  TIME:    8.3s
+  TOOLS:   describePage → applyCss
+  CHANGED: assertApplied: 1 act(s) moved computed style
+  REFUSED: Nothing refused
+  VISION:  The second screenshot has **significantly increased vertical line spacing / row padding** between Hacker News list items.
+
+Specifically:
+- The same header remains unchanged.
+- The same first 10 posts appear in the same order with identical titles, URLs, upvote arrows, points, submitters, timestamps, and comment counts.
+- However, each row now takes up much more vertical space, so **only items 1–10 are visible** in the viewport instead of items 1–20.
+- Posts 11–20 are pushed below the visible fol
+──────────────────────────────────────────────────────────────
+  [run5] resize check: 1440 → 380 → 1440
+  [run5] overflow at 380px: NO ✓
+  [run5] overflow at 1440px: NO ✓
+
+═══ RUN 6: run6-toggle-cycle — "Summarise this article" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] diff: The second screenshot has several visible changes in the main content area:
+
+* **Removed:** The green “Baseline Widely available *” banner with the browser icons is gone.
+* **Inserted content box:** A
+──────────────────────────────────────────────────────────────
+  GOAL:    Summarise this article
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  done
+  SUMMARY: I inserted a summary box after the h1 heading on the MDN justify-content CSS property page. The summary explains that justify-content defines how flex/grid items are aligned along the main axis (flex) or inline axis (grid) when there is extra space, lists key values (flex-start, flex-end, center, space-between, space-around, space-evenly), and notes it applies to flex and grid containers. The original article content remains unchanged alongside the summary.
+  STEPS:   7
+  CALLS:   7 model call(s)
+  TIME:    32.4s
+  TOOLS:   describePage → readText → findElements → look → insert → readText
+  CHANGED: assertApplied: 1 act(s) moved computed style
+  REFUSED: Nothing refused
+  VISION:  The second screenshot has several visible changes in the main content area:
+
+* **Removed:** The green “Baseline Widely available *” banner with the browser icons is gone.
+* **Inserted content box:** A new green-bordered “Article Summary” box (with a notepad icon and light green background) has been added just below the page title.
+* **Replaced text:** The original intro paragraph (“The CSS justify-content property defines how the browser…” and “The interactive example below demonstrates…”) is no
+──────────────────────────────────────────────────────────────
+  [run6] off/on/off toggle cycle starting
+FAILED: run6-toggle-cycle — [run6-toggle-cycle toggle-off-1] DOM NOT CLEAN — fingerprint differs from baseline.
+  baseline[0..600]: body[class=page-layout](ul[class=a11y-menu](li(a[data-glean-id=a11y_menu: click #content,href=#content]:Skip to main content),li(a[data-glean-id=a11y_menu: click #search,href=#search]:Skip to search)),div[class=page-layout__banner,data-scheme=](mdn-placement-top),header[class=page-layout__header](nav[class=navigation,data-open=false,data-scheme=](div[class=navigation__logo](a[class=logo,href=/en-US/](svg[class=logo__image,height=24,role=img,viewBox=0 0 83 24,width=83](title:MDN,path[class=logo__letter,d=M9.4 0 2.81 21.17H.12L6.69 0H9.4Zm2.38 0v21.17H9.4V0h2.4Zm9.27 0-6.56 21.17H11.8L18.36 0h2.
+  current[0..600]:  body[class=page-layout](ul[class=a11y-menu](li(a[data-glean-id=a11y_menu: click #content,href=#content]:Skip to main content),li(a[data-glean-id=a11y_menu: click #search,href=#search]:Skip to search)),div[class=page-layout__banner,data-scheme=](mdn-placement-top),header[class=page-layout__header](nav[class=navigation,data-open=false,data-scheme=](div[class=navigation__logo](a[class=logo,href=/en-US/](svg[class=logo__image,height=24,role=img,viewBox=0 0 83 24,width=83](title:MDN,path[class=logo__letter,d=M9.4 0 2.81 21.17H.12L6.69 0H9.4Zm2.38 0v21.17H9.4V0h2.4Zm9.27 0-6.56 21.17H11.8L18.36 0h2.
+
+═══ CONTROL PAIR — identical screenshots ═══
+  control pair: PASS ✓ (vision correctly reported no change)
+  vision: nothing changed.
+
+
+═══ SUMMARY ═══
+  Summarise this article: done (5 steps, 5 calls, 19.3s)
+  Hide the video player: gaveUp (4 steps, 4 calls, 8.2s)
+  Hide the sidebar: partial (10 steps, 10 calls, 39.0s)
+  Reduce clutter: budgetExhausted (10 steps, 10 calls, 48.0s)
+  Increase spacing: done (3 steps, 3 calls, 8.3s)
+  Summarise this article: done (7 steps, 7 calls, 32.4s)
+  Summarise this article: error (0 steps, 0 calls, 0.0s)

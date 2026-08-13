@@ -1,0 +1,50 @@
+{
+  "checks": [
+    {
+      "name": "BLIND SPOT: inline style attribute — assertDomClean does NOT detect it",
+      "pass": true,
+      "detail": "(correctly invisible — blind spot confirmed)"
+    },
+    {
+      "name": "BLIND SPOT: form .value property (not attribute) — assertDomClean does NOT detect it",
+      "pass": true,
+      "detail": "(correctly invisible — blind spot confirmed)"
+    },
+    {
+      "name": "BLIND SPOT: script element text rewrite — assertDomClean does NOT detect it",
+      "pass": true,
+      "detail": "(correctly invisible — blind spot confirmed)"
+    },
+    {
+      "name": "BLIND SPOT: style element text rewrite — assertDomClean does NOT detect it",
+      "pass": true,
+      "detail": "(correctly invisible — blind spot confirmed)"
+    },
+    {
+      "name": "BLIND SPOT: data-rv-c stamp churn — assertDomClean does NOT detect it",
+      "pass": true,
+      "detail": "(correctly invisible — blind spot confirmed)"
+    },
+    {
+      "name": "BLIND SPOT: whitespace-only text change — assertDomClean does NOT detect it",
+      "pass": true,
+      "detail": "(correctly invisible — blind spot confirmed)"
+    },
+    {
+      "name": "BLIND SPOT: attribute reorder — assertDomClean does NOT detect it",
+      "pass": true,
+      "detail": "(correctly invisible — blind spot confirmed)"
+    },
+    {
+      "name": "CONTROL: assertDomClean DOES detect a removed child (not a blind spot)",
+      "pass": true,
+      "detail": "child removal detected ✓"
+    },
+    {
+      "name": "CONTROL: assertDomClean DOES detect setText (direct text change)",
+      "pass": true,
+      "detail": "setText detected ✓"
+    }
+  ],
+  "pass": true
+}

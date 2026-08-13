@@ -36,7 +36,7 @@ const loop = readSrc('agent/loop.ts');
 //    parse-error branch) before giving up.
 checks.push({
   name: 'loop retries once on a model parse error (a 2nd callLoopModel in the parse branch)',
-  pass: /if \(!modelResult\.ok \|\| !modelResult\.json\)[\s\S]{0,800}modelResult = await callLoopModel/.test(loop),
+  pass: /if \(!modelResult\.ok \|\| !modelResult\.json\)[\s\S]{0,2000}modelResult = await callLoopModel/.test(loop),
   detail: 'loop.ts retries the call once after a non-JSON / model error, before declaring a parse death',
 });
 

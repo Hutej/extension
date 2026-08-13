@@ -1,0 +1,130 @@
+
+═══ RUN 1: run1-summarise — "Summarise this article" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] diff: The two screenshots differ in two visible ways:
+
+1. **Inserted vertical text overlay** — In the second screenshot, a narrow vertical strip is overlaid on the left edge of the main content area. It sho
+──────────────────────────────────────────────────────────────
+  GOAL:    Summarise this article
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  done
+  SUMMARY: I inserted a summary box at the top of the main content area on the MDN page for the CSS `justify-content` property. The summary explains that `justify-content` defines how the browser distributes space between and around items along the main axis of a flex container (or inline axis of a grid container), listing key values such as `flex-start`, `flex-end`, `center`, `space-between`, `space-around`, `space-evenly`, and `normal`, along with overflow-safe alignment values like `safe` and `unsafe`. The original article content remains unchanged below the summary.
+  STEPS:   4
+  CALLS:   5 model call(s)
+  TIME:    59.6s
+  TOOLS:   describePage → findElements → insert
+  CHANGED: assertApplied: 1 act(s) moved computed style
+  REFUSED: Nothing refused
+  VISION:  The two screenshots differ in two visible ways:
+
+1. **Inserted vertical text overlay** — In the second screenshot, a narrow vertical strip is overlaid on the left edge of the main content area. It shows text rendered character-by-character in a vertical stack (letters/small words such as “s m a r y”, “The”, “j u s t i …”). This overlay does not exist in the first screenshot.
+
+2. **Right sidebar ad content changed** — The ad box at the bottom of the right sidebar is an empty/light placeholder wit
+──────────────────────────────────────────────────────────────
+
+═══ RUN 2: run2-failing-case — "Hide the video player" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] diff: The only visible difference is in the “Try it” interactive demo at the bottom: in the second screenshot, the `justify-content: start;` value box now has a **blue focus outline/border** and a small **b
+──────────────────────────────────────────────────────────────
+  GOAL:    Hide the video player
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  budgetExhausted
+  SUMMARY: loop exhausted budget without acting or giving up
+  STEPS:   2
+  CALLS:   3 model call(s)
+  TIME:    59.9s
+  TOOLS:   describePage → findElements
+  CHANGED: No changes detected
+  REFUSED: loop exhausted budget without acting or giving up
+  VISION:  The only visible difference is in the “Try it” interactive demo at the bottom: in the second screenshot, the `justify-content: start;` value box now has a **blue focus outline/border** and a small **blue right-pointing arrow/chevron** has appeared at the right edge of that box. Everything else—header, navigation, sidebars, ad banner, article text, browser-support badge, and table-of-contents—appears unchanged.
+──────────────────────────────────────────────────────────────
+
+═══ RUN 3: run3-wikipedia-sidebar — "Hide the sidebar" on https://en.wikipedia.org/wiki/CSS ═══
+  [vision] WARNING: before+after screenshots are byte-identical — run is void
+  [vision] diff: [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+  GOAL:    Hide the sidebar
+  URL:     https://en.wikipedia.org/wiki/CSS
+  STATUS:  budgetExhausted
+  SUMMARY: budget too low for retry after parse error
+  STEPS:   2
+  CALLS:   3 model call(s)
+  TIME:    60.0s
+  TOOLS:   describePage
+  CHANGED: No changes detected
+  REFUSED: budget too low for retry after parse error
+  VISION:  [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+
+═══ RUN 4: run4-reduce-clutter — "Reduce clutter" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] WARNING: before+after screenshots are byte-identical — run is void
+  [vision] diff: [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+  GOAL:    Reduce clutter
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  budgetExhausted
+  SUMMARY: —
+  STEPS:   3
+  CALLS:   4 model call(s)
+  TIME:    55.5s
+  TOOLS:   describePage → describePage → applyCss
+  CHANGED: assertApplied: 1 act(s) moved computed style
+  REFUSED: Nothing refused
+  VISION:  [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+
+═══ RUN 5: run5-hn-spacing — "Increase spacing" on https://news.ycombinator.com/ ═══
+  [vision] diff: The most obvious change is a **large increase in vertical spacing** between Hacker News list items.
+
+Specifically:
+
+- **Spacing change:** Each row (title, metadata line, and the gap to the next item) 
+──────────────────────────────────────────────────────────────
+  GOAL:    Increase spacing
+  URL:     https://news.ycombinator.com/
+  STATUS:  done
+  SUMMARY: Increased spacing on the Hacker News page by adding 20px margins around the main table (#hnmain) and increasing cell padding to 8px on all sides, plus additional padding on story rows (.athing). This makes the layout more spacious and easier to read.
+  STEPS:   5
+  CALLS:   5 model call(s)
+  TIME:    54.9s
+  TOOLS:   describePage → applyCss → applyCss → applyCss
+  CHANGED: assertApplied: 2 act(s) moved computed style
+  REFUSED: Nothing refused
+  VISION:  The most obvious change is a **large increase in vertical spacing** between Hacker News list items.
+
+Specifically:
+
+- **Spacing change:** Each row (title, metadata line, and the gap to the next item) is much taller in the second screenshot. The compact list layout of the first image has been expanded into a looser, more spread-out list.
+- **Fewer items visible:** Because of the increased vertical spacing, the first screenshot displays items **1 through 20**, while the second screenshot only disp
+──────────────────────────────────────────────────────────────
+  [run5] resize check: 1440 → 380 → 1440
+  [run5] overflow at 380px: YES ✗
+  [run5] overflow at 1440px: NO ✓
+
+═══ RUN 6: run6-toggle-cycle — "Summarise this article" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] WARNING: before+after screenshots are byte-identical — run is void
+  [vision] diff: [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+  GOAL:    Summarise this article
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  budgetExhausted
+  SUMMARY: budget too low for retry after parse error
+  STEPS:   3
+  CALLS:   4 model call(s)
+  TIME:    60.0s
+  TOOLS:   describePage → readText
+  CHANGED: No changes detected
+  REFUSED: budget too low for retry after parse error
+  VISION:  [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+  [run6] no changes applied — toggle cycle cannot proceed, marking failed
+
+═══ CONTROL PAIR — identical screenshots ═══
+  CONTROL PAIR FAILED: screenshots differ — page is not static
+
+
+═══ SUMMARY ═══
+  Summarise this article: done (4 steps, 5 calls, 59.6s)
+  Hide the video player: budgetExhausted (2 steps, 3 calls, 59.9s)
+  Hide the sidebar: budgetExhausted (2 steps, 3 calls, 60.0s)
+  Reduce clutter: budgetExhausted (3 steps, 4 calls, 55.5s)
+  Increase spacing: partial (5 steps, 5 calls, 54.9s)
+  Summarise this article: error (3 steps, 4 calls, 60.0s)

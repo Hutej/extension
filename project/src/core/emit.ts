@@ -99,29 +99,10 @@ function extractKeyframes(rule: CSSKeyframesRule): EmitItem[] {
 }
 
 // ── Emit helpers ──────────────────────────────────────────────────
-
-/** Emit CSS from a raw CSS string: parse → serialise (no @layer, no blanket important).
- *  Returns the exact CSS string to be inserted at user origin. */
-export function emitCss(css: string, important: boolean = false): string {
-  const items = parseCss(css);
-  if (!items.length) return '';
-  if (important) {
-    for (const item of items) {
-      if (item.kind === 'style') item.important = true;
-    }
-  }
-  return serializeEmit(items);
-}
-
-/** Emit CSS from structured rules directly (no parsing). */
-export function emitRules(items: EmitItem[], important: boolean = false): string {
-  if (important) {
-    for (const item of items) {
-      if (item.kind === 'style') item.important = true;
-    }
-  }
-  return serializeEmit(items);
-}
+// (Phase 2.5: removed dead `emitCss`/`emitRules` wrappers — the live path is
+// `parseCss` + `serializeEmit` + `primaryTarget`, called from tools/act.ts.
+// The wrappers were exported but never imported; the widened audit-wiring
+// caught them. Do not reintroduce convenience wrappers without a consumer.)
 
 /** Pick the primary selector + ALL declared properties from EmitItem[] for
  *  assertApplied. Returns every longhand of the first style rule's first

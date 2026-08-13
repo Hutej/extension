@@ -9,6 +9,7 @@
  */
 
 import { AI_CONFIG, logDebug } from '../config';
+import { extractJson } from './extract';
 
 // ── Cloudflare Workers AI (OpenAI-compatible) ──────────────────────
 
@@ -137,23 +138,18 @@ export async function callLoopModel(req: LoopModelRequest): Promise<LoopModelRes
     const content = data?.choices?.[0]?.message?.content;
     logDebug(`loopModel model=${model} ${s}s tokens=${data?.usage?.total_tokens ?? '?'}`);
     if (typeof content !== 'string') return { ok: false, error: 'Model returned no content.', callMs: Date.now() - t0, httpRequests };
-    try {
-      const json = JSON.parse(content);
-      return { ok: true, json, callMs: Date.now() - t0, httpRequests, usage: data.usage, model };
-    } catch {
-      // E: fast model may wrap JSON in markdown code blocks after
-      // response_format is dropped. Try to extract it before giving up.
-      const mdMatch = content.match(/```(?:json)?\s*([\s\S]*?)```/);
-      if (mdMatch) {
-        try {
-          const json = JSON.parse(mdMatch[1].trim());
-          return { ok: true, json, callMs: Date.now() - t0, httpRequests, usage: data.usage, model };
-        } catch { /* fall through */ }
-      }
-      return { ok: false, raw: content, error: 'Model output was not valid JSON.', callMs: Date.now() - t0, httpRequests };
-    }
+    const parsed = extractJson(content);
+    if (parsed.ok) return { ok: true, json: parsed.json, callMs: Date.now() - t0, httpRequests, usage: data.usage, model };
+    return { ok: false, raw: content, error: parsed.error, callMs: Date.now() - t0, httpRequests };
   }
 }
+
+// Phase 2.5 TASK1: extractJson + balancedObject live in ./extract (a dependency-
+// free module) so tests/parse-extract-test.ts imports the REAL extractor, not
+// an inlined copy (adversarial review wf_e3e50d92 finding). callLoopModel uses
+// it via the import at the top of this file. Re-exported here for back-compat.
+export { extractJson } from './extract';
+
 
 // ── Vision model (kimi) — the `look` tool's transport ──────────────
 //

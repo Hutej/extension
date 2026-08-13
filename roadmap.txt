@@ -1,0 +1,316 @@
+# Revueon — roadmap.txt  (rebuild plan, v2)
+
+*Authored 12 Aug 2026 after a full recon of archive/, Senior_developer_advices/,
+the numbered docs (01–07), and the live project/. This file replaces the old
+speculative-stage roadmap. It exists so the model does not rebuild from a vague
+memory each session: read this, know where we are, do the next phase, report.*
+
+---
+
+## 0. The one-line diagnosis of "transformation is getting failed"
+
+The old engine **preserved the computed result, not the layout model** (Senior
+advice: Problem.txt, Why Responsive Websites Keep Work.txt). It measured the
+rendered page (Card x=342px, width=398px) and emitted those numbers as CSS, so
+the transform broke the instant the viewport changed. On top of that, the old
+pipeline had **six independent structural failures** (archive RC1–RC10) — but
+all of that code was **already deleted**. The current `project/` does not have a
+transformation engine at all; it has a **working agent loop** that asks the model
+to author CSS directly. So "transformation is getting failed" today means one of:
+applied=false (model's CSS didn't move computed style), budget exhausted before
+acting, or — most likely — **it has never been behaviourally proven**, because
+red-test V4/V5b (the USER-origin CSS proof) have no results and the harness has
+no saved output.
+
+**This is good news.** We are not patching a broken engine. We are proving the
+foundations under a simple, honest loop, then earning the right to build
+capabilities on top. The deleted 12,000 lines are not a loss — they are a
+diagnosis we already paid for.
+
+---
+
+## 1. The rules this roadmap obeys (do not relitigate)
+
+From `02_PRINCIPLES.md` / `06_FOUNDATION.md` / CLAUDE.md:
+
+- **Build order is fixed:** F7 SIGHT → F3 REVERSAL → F5 INTEGRITY → F1 IDENTITY
+  → F4 CONTINUITY → F6 LOOP refinements → *then* capabilities. **No capability
+  ships while a foundation is broken.** Everything built on sand here has been
+  deleted four times.
+- **The loop is never rewritten.** One loop + a growing tool set. A stage is
+  done only when a human opens a real site, types the goal, and says it looks
+  good — never when typecheck/lint/a green gate passes.
+- **Every request goes to the model.** No keyword table, no saved action, no
+  route, no fast path. The model writes the answer; we validate and repair.
+- **The surviving hard law:** a transformation must survive a window resize
+  1440px → 380px → back. Any length read off the live page and written back is a
+  bug. Ratios/tokens are fine; measured px is not.
+- **Every operation is reversible.** `on → off → on → off` restores the DOM
+  byte for byte. `textContent` is never a valid inverse. Structural ops record a
+  cloned node.
+- **Let the browser do browser work.** One stylesheet (USER origin via
+  `chrome.scripting.insertCSS`) is the default. Mutation is a rare, declared
+  exception with a named reason.
+- **Wire it or do not write it.** An orphan is a build failure. The wiring audit
+  already fails the build; it must also cover perceive's exports (it does not
+  today).
+- **Green is not done.** A human eye — or a vision model describing the
+  screenshot in words — is the only pass.
+
+**Retired (do not resurrect):** the four-layer rule "AI owns design / Layout IR
+owns structure / solver owns constraints / compiler owns CSS." It described a
+pipeline that no longer exists. The senior-advice files end on that rule; it is
+obsolete. We keep the *separation as a representation pattern inside tools*, not
+as a fixed pipeline.
+
+---
+
+## 2. Honest current state (verified 12 Aug 2026)
+
+| Thing | State | Evidence |
+|---|---|---|
+| Agent loop (runLoop, budget, model tiering, auto-undo) | **works** | `agent/loop.ts`, builds clean, content↔background contract intact |
+| USER-origin CSS via `chrome.scripting.insertCSS` + structured emitter + two-phase assertApplied | **code present, NOT behaviourally proven** | `core/emit.ts`, `tools/act.ts`; `prove-results.json` is 15/15 but **structural grep only** |
+| perceive (the "strongest thing we built") | **huge, mostly orphaned** | 1964 lines, ~24k-char output, but rich fields (moveSafety, designRole, colorModel…) consumed by nothing; `perceivePage` tool caps at 8000 chars |
+| F3 REVERSAL | **broken by construction** | `setText` inverse stores `textContent` (discards children); `assertDomClean` is a stub, never run |
+| F7 SIGHT | **missing** | no before/after screenshots committed; no vision-in-words report |
+| Consent gate | **disabled** | `popup/main.ts:26 CONSENT_REQUIRED = false` — P0 launch blocker |
+| red-test V4/V5b (the origin-move proof) | **no results** | only AUTHOR-origin negative-control PNGs exist; the USER-origin winning variants never produced artifacts |
+| harness.ts (6 real goals) | **no saved results** | `tests/screenshots/` empty, no results JSON |
+| Cloudflare credentials | **present in `.env`** | but the extension reads storage, not `.env` — must load them in dev |
+
+**One of seven foundations (F6 the loop) is proven.** That is the honest number.
+
+### Two contradictions in the docs (resolved here)
+
+1. **Persistence scope.** `06_FOUNDATION.md` and `.kiro/steering/product.md` say
+   key by **origin + path**. `docs/ARCHITECTURE.md` and the live
+   `core/persist/index.ts:38` say **origin only**. **Decision for the roadmap:**
+   origin+path is the correct rule (it is in the two binding docs and it is what
+   makes "hide the sidebar → survive a second article" work without leaking a
+   full URL). The live code is wrong; **F4 CONTINUITY fixes it.** (Path only,
+   never query/fragment — tokens and personal data live there.)
+2. **Emit path.** `05_BROWSER_CRAFT.md` §3 prescribes `@layer revueon { … !important }`
+   into a style node. The live `core/emit.ts` uses **USER-origin
+   `chrome.scripting.insertCSS` with no `@layer`** (it strips `@layer`). USER
+   origin beats author origin unconditionally, so the live approach is correct
+   and the `05` guidance is **stale/superseded**. Flag for a doc fix, not a code
+   change.
+
+---
+
+## 3. What is salvageable from the archive (re-use, do not rewrite)
+
+The standing rule: read `archive/` before implementing. These survived review as
+genuinely worth porting — each is the *principled* version of its concern:
+
+- **`archive/project/src/core/ops/`** (index/execute/transaction) — the
+  reversible-DOM-op layer: `validateOps()` is a pure perception-time guard
+  (refuses remove on primary/landmark/low-confidence; requires a `MutationReason`
+  from a closed 4-item list), `TransactionLog` resolves inverses **by handle**
+  (survives SPA re-render — the fix for old RC6), all-or-nothing undo. **This is
+  the cleanest, most self-contained subsystem in the archive.** It becomes the
+  `act` capability's structural path. *(Critical: wire the failure path to call
+  `undoAll` — the old orchestrator never did, RC3, causing permanent silent data
+  loss.)*
+- **`archive/project/src/core/layout/length.ts`** — the `Length` type with
+  `provenance` (token/authorConstraint/intrinsic/measurement); a
+  measurement-provenance length reaching the emitter is a **hard rejection**.
+  This is the one surviving hard law (P4) enforced at the type level. Port
+  verbatim; wire the rejection at the emitter.
+- **`archive/project/src/core/layout/ir.ts`** — the 4-section IR node
+  (Semantic / Authored Layout / Computed Relationships / Target Constraints)
+  with `ConstraintKind` (FillParent/Centered/StackVertically/MaxWidth/Gap…)
+  each carrying priority+source, and the **never-mutate-original** contract
+  (Current → Target). Fix the Map-freeze bug (recursively freeze Map/Set).
+  Priority descends law>language>intent; **the model never assigns priority.**
+- **`archive/project/src/core/layout/solve.ts`** — the CSS-only grid solver:
+  grid-column assigns the column, rows auto-place in DOM order, **no CSS `order`
+  / no arbitrary `grid-area`** (preserves reading order), `matched-targets=0`
+  is a hard error. The correct escape from the SPA re-render trap. Port the
+  algorithm; re-target it onto the new non-stamped identity.
+- **`archive/project/src/core/laws/index.ts`** constants — calibrated numbers
+  (MIN_CONTRAST=4.5, MAX_OVERFLOW_RATIO=1.02, MIN_CONTENT_WIDTH_FRACTION=0.92…)
+  and `assertNoRawPxSizing`. Cheap to keep, expensive to re-derive.
+- **`archive/project/src/core/perceive/enrichment.ts`** — `buildOutline`
+  (heading outline tree, walks shadow roots) and the accessible-name algorithm;
+  `longestToken` = the min-content floor for a grid track. Port as *additive*
+  fields only if the live perceive lacks them.
+- **`archive/project/src/core/verify/conformance.ts` + `resize.ts`** — the
+  resize-invariance harness (apply → change viewport across a range → assert no
+  new overflow/overlap/squeeze **without re-running the pipeline**) is the one
+  legitimate hard gate for P4. Port the resize harness; defer conformance-vs-IR
+  until a TargetLayoutIR exists again.
+
+**Not salvageable / deliberately left deleted:** the closed ~40-relation design
+vocabulary + 4 design packs + the `transform.ts`/`expand.ts` expansion engines.
+That was the speculative DSL that became antipattern A7 (a closed vocabulary is
+a ceiling — "summarise" was unspeakable in 37 relations). The model authors the
+answer now (P8). Design *primitives* (Layout/Spacing/Typography/Color/…) may
+return later as **dimension names the model configures**, never as a closed menu.
+
+---
+
+## 4. The phases (build → report → wait for approval → next)
+
+Each phase ends with a **by-eye pass on a real site** and a report. Nothing is
+"done" on a green gate. The user approves before the next phase starts.
+
+### Phase 1 — F7 SIGHT  *(the gate everything else is judged through)*
+**Why first:** every hour of work without sight is an hour of unverified work;
+this project shipped eleven sweeps that way.
+- Harness screenshots before/after every run (already partly scaffolded in
+  `tests/harness.ts` + `proof/`).
+- A vision model reads each screenshot and **describes it in words** in the
+  report. "I could not visually verify" is never an acceptable line.
+- Wire `look` as a verify-tier tool. MVP: harness/report-side only (agent-callable
+  mid-run is post-MVP per `06`).
+- **Done =** run the existing harness once on MDN, capture before/after PNGs,
+  have a vision model describe them, commit the report. Even a failing run with
+  real screenshots is a pass for this phase — we can finally *see*.
+
+### Phase 2 — F3 REVERSAL  *(the trust foundation — DONE 12 Aug 2026)*
+**Why second:** every act tool built before this is fixed inherits the bug.
+- [done] Fix `setText` inverse: store a **cloned node** (`cloneNode(true)` +
+  `replaceWith`), not `textContent`. In-session exact; the serializable
+  `restoreText`/`restoreHtml` is the post-reload fallback only.
+- [done] `assertDomClean` implemented for real and run on `on → off → on → off`
+  — a normalized structural fingerprint (tag + attrs-except-style + child-order
+  + trimmed-text), byte-identical before vs after. (`tests/assert-dom-clean.ts`)
+- [done] Port `archive/.../ops/transaction.ts` (handle-resolved inverses) as the
+  structural-op undo path. **Wire the failure path to `undoAll`** (RC3 fix) —
+  `rollbackDomIfActed` fires on every non-`done` terminal. (`src/agent/loop.ts`)
+- [done] No inverse anywhere uses `textContent`. Every act tool records its
+  exact inverse before it runs.
+- [done] **`primaryTarget`/`assertApplied` fix** (Phase-1 finding): assert ALL
+  declared longhands, not `declarations[0]` — `background: red` now reports
+  `applied=true` (red-test 8/8, was failing this exact case).
+- [done] `removeAllModifications` now undoes the DOM (was a gap — it wiped
+  storage + dropped CSS but left inserted/setText mutations until reload).
+- **Done (proven) =** `tests/phase2-reversal.ts` 4/4 PASS: on→off→on→off
+  byte-identical to baseline at BOTH offs on MDN + Wikipedia + Hacker News
+  (driven directly through the live F3 transaction/inverse system, no model
+  loop); and a multi-op partial transform (insert A, insert B) → forced
+  failure → `{action:'undoAll'}` → restored (undone=2, fingerprint==baseline).
+  Unit test `tests/ops.test.ts` 5/5 PASS (on→off→on→off + multi-op failure +
+  idempotent undoAll + validateOps guards). Parse-death regression 5/5 PASS.
+  Report: `project/proof/PHASE2_REPORT.md`.
+- **Deferred (named):** the `describePage` parse/JSON death root cause is a
+  model-reliability issue (Phase 6), NOT fixed here — only pinned by
+  `tests/parse-death-test.ts` so it can't silently become a crash.
+
+### Phase 3 — F5 INTEGRITY  *(safe by default)*
+- Wire `heal` to run after every removal. A hole left behind is an unfinished job.
+- `checkLayout` (overflow / zero-size / invisible-text / unreachable / mid-word)
+  reads the live DOM after render. A failed check triggers **undo, not repair**
+  (repairing in place produces a differently-broken result nobody planned).
+- Port the resize-invariance harness from `archive/.../verify/resize.ts` as the
+  P4 gate: resize 1440→380→back, assert no new breakage, no re-run.
+- Add a circuit-breaker on repeated checkLayout-triggered auto-undo (the loop
+  can silently burn the budget today).
+- **Done =** a hide that would break the page instead triggers undo and says why;
+  the resize gate catches a fixed-px transform (the deliberate failing case).
+
+### Phase 4 — F1 IDENTITY  *(concept → elements, reliably, repeatably)*
+- `describePage` returns a map good enough for the model to choose from, on any
+  page, without refusing. `findElements` resolves with a confidence number;
+  below the floor it does nothing and says why.
+- Every candidate carries `targetable: true | { false, reason }`. The
+  `UNTARGETABLE` reason is always surfaced to the model (today it can be missed
+  → every act returns `applied:false` with no clear cause).
+- **Re-resolution after re-render and after reload — tested, not assumed.** This
+  is the fix for old RC4 (identity was one stamped attribute that died on
+  re-render). Identity must be a **structural descriptor re-resolved at use
+  time**, not a stamped attribute that must survive re-render.
+- **Done =** same page twice → same selectors; after an SPA re-render → same
+  selectors. Tested on Wikipedia (allowed in automation).
+
+### Phase 5 — F4 CONTINUITY  *(demo → product)*
+- Fix the persistence scope contradiction: key by **origin + path** (path only,
+  never query/fragment). Update `core/persist/index.ts` and `docs/ARCHITECTURE.md`.
+- On load, replay the journal before first paint where possible. SPA route
+  change is detected and targets re-verified. A target that no longer exists
+  after replay is **reported, not silently skipped**.
+- **Done =** "hide the sidebar" survives reload and a second Wikipedia article
+  (MVP row 3). A change made today is still there tomorrow.
+
+### Phase 6 — F6 LOOP refinements + launch gates
+- Budget checked **before** a call, not after. Parse-retry budget guard. Error
+  messages that teach (name an alternative). `giveUp` respected.
+- **Re-enable the consent gate** (`CONSENT_REQUIRED = true`) — P0 blocker.
+- Load Cloudflare credentials into storage for dev runs (the extension reads
+  storage, not `.env`).
+- **Done =** the MVP acceptance corpus (7 rows in `06`): summarise / hide-nothing
+  / hide-sidebar-heal / reduce-clutter / increase-spacing / toggle-cycle /
+  resize-survival — all pass **and a human agrees by eye**.
+
+### Phase 7 — RESTYLE  *(post-MVP; the first real "transformation")*
+Only after the MVP corpus is green by eye. This is where the responsive law gets
+its teeth:
+- The model authors CSS; we validate it. Port `length.ts` (provenance) and the
+  `assertNoRawPxSizing` / CSS-count diagnostic from Senior advice: Problem.txt —
+  count `position:absolute` / fixed `px` / `top-left-right-bottom` vs the
+  responsive set (`%`, `fr`, `auto`, `minmax()`, `clamp()`, `fit-content`,
+  `aspect-ratio`, flex/grid). **If fixed-px dominates, fail.** Ship with a
+  deliberate failing case (a fixed-px transform) per P12.
+- Port the resize-invariance harness as the gate (already in Phase 3).
+- One design primitive set as dimension names (Layout/Spacing/Typography/Color/
+  Surface/Hierarchy) — **open, model-extensible**, never a closed menu (A7).
+- Test on MDN/Wikipedia/GitHub docs. **Not** YouTube/Reddit/BBC first — those
+  are stress tests, not architecture validation.
+
+### Phase 8+ — RECOMPOSE / BEHAVE / CONTENT / ACROSS-SITE  *(deferred)*
+RECOMPOSE returns the Layout IR + solver as **one tool `recomposePage` the agent
+reaches for, never the default path** — the senior-advice slot model lives here,
+not in the MVP. BEHAVE bites earlier than its tier ("auto-collapse comments"
+needs toggle/state, not CSS) and may need to move up. CONTENT (summarise) is the
+demand kind the old architecture had nowhere to put — it is unbounded and the
+clearest proof that the closed vocabulary had to die.
+
+---
+
+## 5. Phase 1 in detail (what I will do next, on approval)
+
+**Goal:** we can finally *see* what the extension does.
+
+1. Read `tests/harness.ts` and `scripts/prove.ts` as they stand; confirm the
+   screenshot + report scaffolding that exists.
+2. Run the harness on one MDN article with one simple goal ("hide the sidebar"
+   or "increase spacing") under Playwright. Capture before/after PNGs to
+   `proof/`.
+3. Feed the after-screenshot to a vision model and have it **describe the page
+   in words** (what changed, does it look right, anything broken). Origin/path
+   only, never page content for identification (rule 14) — describing our *own
+   test screenshot* is explicitly allowed (rule 14 caveat).
+4. Commit: the PNGs + the vision-in-words report + a one-paragraph "what I saw."
+5. Report. Even if the transform itself is broken, **sight working is the pass.**
+
+No code changes to the extension are expected in Phase 1 — only harness +
+report. That is the point: see before you touch.
+
+---
+
+## 6. What I did NOT build this session (named, per CLAUDE.md)
+
+- No extension code. No foundation fixes. No capability. This was recon +
+  roadmap only — by instruction ("don't build all at once … build and report,
+  then next phase").
+- No deletion of the current `project/` code despite the user saying "assume
+  it's all wrong." It is not all wrong: the loop is sound; the emit path is
+  sound. The wrongness is concentrated in F3 (reversal), F7 (sight), the consent
+  gate, and the unproven origin move. Those get fixed in order, not bulldozed.
+- No resurrection of the deleted compile/solver/relations/design DSL. That is
+  the speculative layer that became antipattern A7; it stays deleted.
+
+---
+
+## 7. One thing that looks bad even though it passed
+
+`prove-results.json` says 15/15 PASS and `REVIEW.md` tables those claims as if
+they were product proof. They are **structural grep checks** — `prove.ts` itself
+says "prove is STRUCTURAL only — it reads source, it never runs the code." The
+entire USER-origin CSS foundation (the thing the product rests on) has **no
+behavioural artifact**: red-test V4/V5b never produced results, the harness never
+produced results. Reporting "15/15" without that caveat is the exact "green is
+not done" failure (rule 19). Phase 1 exists to stop that from ever happening
+again.
