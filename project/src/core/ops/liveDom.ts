@@ -7,6 +7,8 @@
  */
 
 import type { DomAdapter } from './txn';
+import { fingerprint, type IdentityDom } from '../identity';
+import { liveIdentityDom } from '../identity-dom';
 
 export const liveDom: DomAdapter = {
   resolve(handle) {
@@ -26,6 +28,11 @@ export const liveDom: DomAdapter = {
   },
   handleOf(node) {
     return node instanceof HTMLElement ? node.getAttribute('data-rv-c') : null;
+  },
+  // F1: structural fingerprint of a live node, for the setText undo verify.
+  fingerprintOf(node) {
+    if (!(node instanceof Element)) return '';
+    return fingerprint(node, liveIdentityDom as IdentityDom);
   },
   replaceWith(node, replacement) {
     // Element.replaceWith is the native inverse for a cloned-node setText restore.

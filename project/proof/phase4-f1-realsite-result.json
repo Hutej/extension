@@ -1,0 +1,17 @@
+{
+  "url": "https://en.wikipedia.org/wiki/CSS",
+  "goal": "Hide the sidebar",
+  "status": "budgetExhausted",
+  "reason": "loop exhausted budget without acting or giving up",
+  "acts": 0,
+  "checkLayoutCalls": 0,
+  "autoUndone": 0,
+  "f1Refusals": 0,
+  "f1RefusalDetails": [],
+  "visionModel": "@cf/moonshotai/kimi-k2.7-code",
+  "visionWords": "A left sidebar/table of contents is clearly visible on the left, listing sections such as Syntax, History, Browser support, and others. The main article content is fully readable and properly formatted, with no overlap, garbled text, or clipped columns. Overall, the Wikipedia page for CSS appears complete and intact.",
+  "screenshots": {
+    "before": "/home/hutej/System hang/Revueon/project/tests/screenshots/phase4-wikipedia-before.png",
+    "after": "/home/hutej/System hang/Revueon/project/tests/screenshots/phase4-wikipedia-after.png"
+  }
+}

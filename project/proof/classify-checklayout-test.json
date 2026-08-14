@@ -1,0 +1,45 @@
+{
+  "checks": [
+    {
+      "name": "BUG FIX: issues present (ok:false, result.issues non-empty) → outcome \"issues\", NOT \"error\"",
+      "pass": true,
+      "detail": "outcome=issues (must be issues), issues=2"
+    },
+    {
+      "name": "clean: ok:true, no issues → outcome \"clean\"",
+      "pass": true,
+      "detail": "outcome=clean"
+    },
+    {
+      "name": "error: dispatch failed (no result) → outcome \"error\"",
+      "pass": true,
+      "detail": "ok:false + error + no result must be error (not issues)"
+    },
+    {
+      "name": "error: null response → outcome \"error\"",
+      "pass": true,
+      "detail": "null dispatch must be error"
+    },
+    {
+      "name": "error: checkLayout internal error string → outcome \"error\"",
+      "pass": true,
+      "detail": "error field present → error"
+    },
+    {
+      "name": "exact verify.ts shape: {ok:false, result:{issues:[x]}} (no error) → \"issues\"",
+      "pass": true,
+      "detail": "this is the real checkLayout output shape on a found issue"
+    },
+    {
+      "name": "circuit-breaker: 3 consecutive issues → counter 3 (>= MAX=2 → loop would giveUp)",
+      "pass": true,
+      "detail": "counter=3 (MAX=2)"
+    },
+    {
+      "name": "circuit-breaker: a clean between two breaks RESETS the counter (progress, not a streak)",
+      "pass": true,
+      "detail": "counter after break1→clean→break2 = 1 (must be 1, not 2 — the clean was a successful act)"
+    }
+  ],
+  "pass": true
+}

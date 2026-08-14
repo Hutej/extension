@@ -84,6 +84,16 @@ function fakeDom(root: FakeNode): DomAdapter {
     createElement(tag) { return leaf(tag) as unknown as Node; },
     resolveDestination(to) { return to ? (byHandle.get(to) as unknown as HTMLElement ?? null) : null; },
     handleOf(node) { return (node as unknown as FakeNode).handle ?? null; },
+    // F1: a structural fingerprint for the setText undo-verify branch. Matches
+    // the real identity.ts fingerprint's spirit (tag + attrs + childCount +
+    // text), so a test can mutate structure and assert the undo REFUSES.
+    fingerprintOf(node) {
+      const n = node as unknown as FakeNode;
+      // Structural: tag + childCount + normalized text. Enough to distinguish
+      // the test's nodes; a mutation that changes tag/text/childCount changes it.
+      const text = (n.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 40);
+      return `${n.tag}|c${n.children.length}|${text}`;
+    },
     replaceWith(node, replacement) {
       const n = node as unknown as FakeNode;
       const r = replacement as unknown as FakeNode;
@@ -237,6 +247,78 @@ function testUndoAllIdempotent() {
   console.log('  ✓ undoAll is idempotent — a repeat call is a safe no-op');
 }
 
+// ── (4b) undoLast — the per-step exact undo (F5) ─────────────────────
+// Phase 3 F5.2: the loop's forced-checkLayout auto-undo and the `undo` control
+// tool route DOM inverses through undoLast (the EXACT cloned-node inverse), not
+// undoAll. Proves: (a) undoLast reverses the SINGLE most-recent op exactly
+// (byte-identical to pre-op), (b) a second undoLast undoes the NEXT op, (c)
+// undoLast is idempotent on an empty/consumed log (no-op, no corruption), and
+// (d) on→off→on→off through the per-step undoLast path leaves the DOM
+// byte-identical to baseline at BOTH offs (Law 7, the same invariant undoAll
+// carries but via one-at-a-time undos — the path F5 actually uses).
+
+function testUndoLastPerStep() {
+  const body: FakeNode = { tag: 'body', children: [
+    { tag: 'p', handle: 'p1', text: 'orig1', children: [], parent: null } as FakeNode,
+    { tag: 'p', handle: 'p2', text: 'orig2', children: [], parent: null } as FakeNode,
+  ], parent: null } as FakeNode;
+  body.children[0].parent = body;
+  body.children[1].parent = body;
+  const dom = fakeDom(body);
+  const baseline = struct(body);
+  const log = new TransactionLog();
+
+  // Apply two ops: setText on p1, then setText on p2.
+  applySetText(log, dom, '[data-rv-c="p1"]', 'changed1');
+  applySetText(log, dom, '[data-rv-c="p2"]', 'changed2');
+  assert.equal(struct(body), 'body[p#p1:changed1,p#p2:changed2]', 'both ops applied');
+
+  // undoLast reverses ONLY the most-recent (p2) — p1 stays changed.
+  const r1 = log.undoLast(dom);
+  assert.equal(r1.undone, 1, 'undoLast undid exactly one op');
+  assert.equal(r1.failed, 0);
+  assert.equal(struct(body), 'body[p#p1:changed1,p#p2:orig2]', 'undoLast reversed only the last op');
+
+  // A second undoLast undoes the next one (p1) — back to baseline.
+  const r2 = log.undoLast(dom);
+  assert.equal(r2.undone, 1);
+  assert.equal(struct(body), baseline, 'two undoLasts restored the baseline');
+
+  // Idempotent: undoLast on a fully-consumed log is a safe no-op.
+  const r3 = log.undoLast(dom);
+  assert.equal(r3.undone, 0, 'undoLast on consumed log undoes nothing');
+  assert.equal(struct(body), baseline, 'no corruption from empty-log undoLast');
+
+  console.log('  ✓ undoLast reverses the single most-recent op exactly, then the next; idempotent on empty');
+}
+
+function testUndoLastOnOffOnOff() {
+  // on→off→on→off using undoLast (the F5 per-step path). Both offs must be
+  // byte-identical to baseline (Law 7), same as the undoAll path in test (2).
+  const body: FakeNode = { tag: 'body', children: [
+    { tag: 'p', handle: 'p1', text: 'orig', children: [], parent: null } as FakeNode,
+  ], parent: null } as FakeNode;
+  body.children[0].parent = body;
+  const dom = fakeDom(body);
+  const baseline = struct(body);
+
+  // on
+  const log1 = new TransactionLog();
+  applySetText(log1, dom, '[data-rv-c="p1"]', 'on1');
+  const off1 = log1.undoLast(dom);
+  assert.equal(off1.undone, 1);
+  assert.equal(struct(body), baseline, 'first off (undoLast) == baseline');
+
+  // on again (fresh log)
+  const log2 = new TransactionLog();
+  applySetText(log2, dom, '[data-rv-c="p1"]', 'on2');
+  const off2 = log2.undoLast(dom);
+  assert.equal(off2.undone, 1);
+  assert.equal(struct(body), baseline, 'second off (undoLast) == baseline');
+
+  console.log('  ✓ on→off→on→off via undoLast is byte-identical at both offs');
+}
+
 // ── (5) validateOps guard smoke test ─────────────────────────────────
 // validateOps is the future structural-op guard (remove/move/wrap). Phase 2's
 // act tools don't emit these yet, but the port must compile + refuse correctly.
@@ -322,6 +404,8 @@ guard(testSetTextUndoRestores);
 guard(testOnOffOnOff);
 guard(testMultiOpFailureRollback);
 guard(testUndoAllIdempotent);
+guard(testUndoLastPerStep);
+guard(testUndoLastOnOffOnOff);
 guard(testGuardLaws);
 
 if (failures > 0) { console.error(`\n${failures} test(s) FAILED\n`); process.exit(1); }

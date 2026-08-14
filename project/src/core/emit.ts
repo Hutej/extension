@@ -122,3 +122,32 @@ export function primaryTarget(items: EmitItem[]): { selector: string; properties
   }
   return null;
 }
+
+/** Collect EVERY distinct selector the emitted CSS will match — every style
+ *  rule's selector split on its comma-parts, recursing into @media/@supports
+ *  (their inner rules apply to real DOM elements). @keyframes is EXCLUDED: its
+ *  inner keyText ('0%', 'from', 'to', …) is NOT a DOM selector and would throw
+ *  in querySelectorAll — it is an animation timing token, not an element match.
+ *  This is the F1 identity surface for applyCss: a CSS block targets the
+ *  cascade, so EVERY selector it carries is applied to matching elements, not
+ *  just the first. primaryTarget (assertApplied's measurement anchor) returns
+ *  only the first selector's properties; guarding only that lets a model
+ *  hide/move unintended elements via a secondary selector with no identity
+ *  check. */
+export function allSelectors(items: EmitItem[]): string[] {
+  const out: string[] = [];
+  const walk = (xs: EmitItem[]) => {
+    for (const item of xs) {
+      if (item.kind === 'style' && item.declarations.length > 0) {
+        for (const part of item.selector.split(',')) {
+          const s = part.trim();
+          if (s && !out.includes(s)) out.push(s);
+        }
+      } else if (item.kind === 'at' && !item.prelude.startsWith('@keyframes')) {
+        walk(item.items);
+      }
+    }
+  };
+  walk(items);
+  return out;
+}

@@ -17,8 +17,46 @@
 import type { ToolDef, ToolResult } from './index';
 import { sanitizeCss } from '../core/sanitize';
 import { applyHealing } from '../core/heal';
-import { parseCss, serializeEmit, primaryTarget, type EmitItem } from '../core/emit';
+import { parseCss, serializeEmit, primaryTarget, allSelectors, type EmitItem } from '../core/emit';
 import { recordStructural } from '../core/ops/recorder';
+import { resolveTarget, fingerprint, type IdentityDom } from '../core/identity';
+import { liveIdentityDom } from '../core/identity-dom';
+import { getIdentity } from '../core/identity-store';
+
+// ── F1 IDENTITY: fail-closed target guard ───────────────────────────
+// The act tools re-resolve the model's selector against the LIVE DOM at use
+// time and verify the (single) match is the element describePage described —
+// via the structural fingerprint captured at observe time. On zero/many/
+// wrong-target the tool REFUSES (ok:false, names an alternative per rule 13)
+// and records NO inverse (no mutation happened — this is not a second rollback
+// system; the guard runs before the mutation). This is the gap F5's geometry
+// check could not close: F5 checks the page AFTER an act; F1 refuses a bad
+// target BEFORE it. CSS acts (applyCss/hide/heal) target the cascade, so the
+// guard verifies the primary selector the CSS will hit.
+
+/** Re-resolve + verify a selector against the live DOM. Returns the element on
+ *  success, or a refusal ToolResult (ok:false) on a verify failure. On the
+ *  'unverified' success path (exactly one match but no observe-time
+ *  fingerprint — the model named a selector describePage never returned) the
+ *  reason is surfaced so the caller can set a low confidence. That confidence
+ *  is informational (shown to the model in the journal); it gates nothing — the
+ *  mutate-or-refuse decision here is the real gate. This fulfils identity.ts's
+ *  documented "mutate, flagged low-confidence" promise; the mutate-or-refuse
+ *  decision is unchanged (locked by tests/f1-identity-test.ts). */
+function guardTarget(selector: string): { ok: true; el: HTMLElement; unverified?: boolean } | { ok: false; result: ToolResult } {
+  const expectedFp = getIdentity(selector);
+  const r = resolveTarget(liveIdentityDom as IdentityDom, selector, expectedFp);
+  if (!r.ok || !r.el) {
+    return { ok: false, result: { ok: false, error: r.error, confidence: 0.1, costMs: 0 } };
+  }
+  return { ok: true, el: r.el, unverified: r.reason === 'unverified' };
+}
+
+/** Capture the post-resolve fingerprint of the element we are about to mutate,
+ *  for the setText/insert undo verify (the RC6-class fix). */
+function actFingerprint(el: Element): string {
+  return fingerprint(el, liveIdentityDom as IdentityDom);
+}
 
 // ── A: CSS origin helpers (content script → background) ───────────
 
@@ -181,6 +219,30 @@ async function applyCss(args: any): Promise<ToolResult> {
   const css = args?.css as string;
   if (!css || !css.trim()) return { ok: false, error: 'missing or empty "css" argument. Provide valid CSS rules as a string.' };
 
+  // F1: verify EVERY selector the emitted CSS will match BEFORE emitting.
+  // applyCss targets the cascade (the sheet hits every matching element of every
+  // rule), so a CSS block hides/moves not just its primary selector but every
+  // secondary selector too. Guarding only primaryTarget (the first rule's first
+  // comma-part) leaves the others unguarded — a model could verify `.a` and hide
+  // `.b` in the same sheet with no identity check on `.b`. Iterate allSelectors
+  // (every style rule's every comma-part, recursing into at-rules) and refuse the
+  // whole act if any selector fails the identity check (zero/many/wrong-target),
+  // naming which selector failed. A unique-but-unverified selector (model-named,
+  // no observe-time fingerprint) is NOT a failure — it mutates flagged unverified
+  // (the design decision locked by tests/f1-identity-test.ts); we only lower
+  // confidence when ANY selector is unverified.
+  const items = parseCss((sanitizeCss(css).css));
+  const selectors = allSelectors(items);
+  let unverified = false;
+  for (const sel of selectors) {
+    const g = guardTarget(sel);
+    if (!g.ok) {
+      // Append which CSS selector failed, so the model can fix it.
+      return { ok: false, error: `[F1 identity] ${g.result.error} (in CSS selector "${sel}")`, confidence: 0.1, costMs: 0 };
+    }
+    if (g.unverified) unverified = true;
+  }
+
   // B/C: emit normal first, measure, re-emit important only if not applied.
   const { css: insertedCss, assert, error } = await emitAndInsert(css, false);
   if (error) return { ok: false, error };
@@ -188,8 +250,9 @@ async function applyCss(args: any): Promise<ToolResult> {
 
   return {
     ok: true,
-    result: { chars: insertedCss.length, css: insertedCss, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null },
+    result: { chars: insertedCss.length, css: insertedCss, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null, unverified },
     inverse: { kind: 'removeCss', css: insertedCss },
+    confidence: unverified ? 0.45 : undefined,
     costMs: 0,
   };
 }
@@ -199,6 +262,13 @@ async function applyCss(args: any): Promise<ToolResult> {
 async function hide(args: any): Promise<ToolResult> {
   const selector = args?.selector as string;
   if (!selector) return { ok: false, error: 'missing "selector" argument. Call describePage or findElements to get a selector, then pass it here.' };
+
+  // F1: verify identity before the hide. hide already refused zero/over-broad;
+  // add the wrong-target guard so a selector that now points to a different
+  // element is refused, not hidden. A verified unique target only.
+  const g = guardTarget(selector);
+  if (!g.ok) return g.result;
+  const unverified = g.unverified;
 
   try {
     const els = document.querySelectorAll(selector);
@@ -220,8 +290,9 @@ async function hide(args: any): Promise<ToolResult> {
 
   return {
     ok: true,
-    result: { chars: insertedCss.length, css: insertedCss, healed: healResult.steps, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null },
+    result: { chars: insertedCss.length, css: insertedCss, healed: healResult.steps, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null, unverified },
     inverse: { kind: 'removeCss', css: insertedCss },
+    confidence: unverified ? 0.45 : undefined,
     costMs: 0,
   };
 }
@@ -250,8 +321,12 @@ async function setText(args: any): Promise<ToolResult> {
     return { ok: false, error: `mutation refused: no valid reason. Provide one of: ${[...TEXT_MUTATION_REASONS].join(', ')}. The reason declares why this is a DOM mutation, not CSS.` };
   }
 
-  const el = document.querySelector<HTMLElement>(selector);
-  if (!el) return { ok: false, error: `selector "${selector}" did not resolve` };
+  // F1: re-resolve + verify identity before the mutation. setText is a DOM
+  // mutation (textContent), so a wrong target is irreversible without the clone.
+  const g = guardTarget(selector);
+  if (!g.ok) return g.result;
+  const el = g.el;
+  const unverified = g.unverified;
 
   if (el.children.length > 0) {
     return { ok: false, error: `target has ${el.children.length} element children — replacing them would destroy the layout. Use insert instead to add content alongside the existing structure.` };
@@ -269,14 +344,23 @@ async function setText(args: any): Promise<ToolResult> {
   // the best available, a documented degradation; never used in-session).
   const clone = el.cloneNode(true);
   el.textContent = text;
-  recordStructural({ kind: 'setText', target: selector, inverse: { kind: 'setText', clone, selector } });
+  // F1: capture the act-time fingerprint AFTER the mutation. The undo verify
+  // compares this to the element's fingerprint AT UNDO TIME — which is the
+  // post-mutation state (the element still holds `text` until the clone restores
+  // it). So the fp must be the post-mutation state, not the pre-mutation one
+  // (a pre-mutation fp would never match at undo → every setText undo would
+  // refuse). The verify confirms the element at the selector is STILL the one we
+  // mutated (structure unchanged) before replaceWith(clone) — the RC6-class fix.
+  const actFp = actFingerprint(el);
+  recordStructural({ kind: 'setText', target: selector, inverse: { kind: 'setText', clone, selector, fingerprint: actFp } });
 
   await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
   return {
     ok: true,
-    result: { selector, textLength: text.length, reason, applied: true, before: prevHtml.slice(0, 50), after: text.slice(0, 50), matched: 1 },
+    result: { selector, textLength: text.length, reason, applied: true, before: prevHtml.slice(0, 50), after: text.slice(0, 50), matched: 1, unverified },
     inverse: { kind: 'restoreText', selector, prevHtml },
+    confidence: unverified ? 0.45 : undefined,
     costMs: 0,
   };
 }
@@ -354,8 +438,12 @@ async function insert(args: any): Promise<ToolResult> {
   if (!selector) return { ok: false, error: 'missing "selector" argument. Call describePage or findElements to get a selector, then pass it here.' };
   if (!html?.trim()) return { ok: false, error: 'missing "html" argument. Provide HTML content to insert as a string.' };
 
-  const el = document.querySelector<HTMLElement>(selector);
-  if (!el) return { ok: false, error: `selector "${selector}" did not resolve` };
+  // F1: re-resolve + verify identity before the insert. insert targets an anchor
+  // element by selector; a wrong anchor puts the inserted node in the wrong place.
+  const g = guardTarget(selector);
+  if (!g.ok) return g.result;
+  const el = g.el;
+  const unverified = g.unverified;
 
   const sanitized = sanitizeHtml(html);
   if (!sanitized.trim()) return { ok: false, error: 'HTML was entirely rejected by sanitizer. Remove script tags, event handlers, and javascript: URLs from your HTML.' };
@@ -373,26 +461,35 @@ async function insert(args: any): Promise<ToolResult> {
   const isInside = where === 'top' || where === 'bottom';
   const prevHtml = isInside ? el.innerHTML : (el.parentElement?.innerHTML ?? '');
 
-  el.insertAdjacentHTML(pos, marked);
+  // F1 fix: the old code re-found the inserted node by the GENERIC marker
+  // document.querySelector('[data-revueon-inserted="true"]') — a collision
+  // (two inserts in one turn, or a prior marker not cleaned) attached the
+  // inverse to the WRONG node. Build the node, insert it, and keep a DIRECT
+  // reference (insertAdjacentElement returns the node; insertAdjacentHTML does
+  // not, so we create a container and append the parsed content into it).
+  const container = document.createElement('div');
+  container.innerHTML = marked;
+  const insertedNode = container.firstElementChild as HTMLElement | null;
+  if (!insertedNode) return { ok: false, error: 'inserted content produced no element node' };
+  el.insertAdjacentElement(pos, insertedNode);
 
   await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
-  // C: assertApplied for insert — check that the element now has content.
-  const insertedEl = document.querySelector('[data-revueon-inserted="true"]');
-  const after = insertedEl ? getComputedStyle(insertedEl as HTMLElement).display : '';
-  const applied = insertedEl !== null && after !== 'none';
+  // C: assertApplied for insert — the node is present and displayed. We hold a
+  // direct ref, so no generic-marker re-query (no collision).
+  const after = getComputedStyle(insertedNode).display;
+  const applied = after !== 'none';
 
-  // F3: record an exact in-session inverse — the inserted node itself. undoAll
-  // removes it (no innerHTML re-parse). The serializable restoreHtml below is
-  // the post-reload fallback only (the inserted node is gone after reload).
-  if (insertedEl) {
-    recordStructural({ kind: 'insert', target: selector, inverse: { kind: 'insert', node: insertedEl } });
-  }
+  // F3: record an exact in-session inverse — the inserted node itself (direct
+  // ref, the F1 fix). undoAll removes it (no innerHTML re-parse). The
+  // serializable restoreHtml below is the post-reload fallback only.
+  recordStructural({ kind: 'insert', target: selector, inverse: { kind: 'insert', node: insertedNode } });
 
   return {
     ok: true,
-    result: { selector, where, chars: marked.length, applied, before: '', after, matched: insertedEl ? 1 : 0 },
+    result: { selector, where, chars: marked.length, applied, before: '', after, matched: 1, unverified },
     inverse: { kind: 'restoreHtml', selector, prevHtml, isInside },
+    confidence: unverified ? 0.45 : undefined,
     costMs: 0,
   };
 }
@@ -403,6 +500,18 @@ async function heal(args: any): Promise<ToolResult> {
   const selectors = args?.selectors as string[];
   if (!selectors?.length) return { ok: false, error: 'missing "selectors" argument (array of CSS selectors). Pass the selector of the hidden element(s) so healing can close the gap they left.' };
 
+  // F1: verify each healed selector is the intended (now-hidden) target. heal is
+  // a follow-up to a prior hide on a verified target; re-verify so a stale
+  // selector that now resolves to a different element is not healed. The
+  // fingerprint is style-agnostic, so a display:none element still verifies —
+  // being hidden does not change identity.
+  let anyUnverified = false;
+  for (const s of selectors) {
+    const g = guardTarget(s);
+    if (!g.ok) return g.result;
+    if (g.unverified) anyUnverified = true;
+  }
+
   const hiddenEls: Element[] = [];
   for (const s of selectors) {
     try { hiddenEls.push(...Array.from(document.querySelectorAll(s))); } catch { /* skip invalid */ }
@@ -411,7 +520,7 @@ async function heal(args: any): Promise<ToolResult> {
 
   const result = applyHealing(selectors, hiddenEls);
   if (!result.css.trim()) {
-    return { ok: true, result: { steps: result.steps, cssChars: 0, applied: null }, confidence: 0.6, costMs: 0 };
+    return { ok: true, result: { steps: result.steps, cssChars: 0, applied: null, unverified: anyUnverified }, confidence: anyUnverified ? 0.45 : 0.6, costMs: 0 };
   }
 
   // B/C: heal emits normal first.
@@ -421,9 +530,9 @@ async function heal(args: any): Promise<ToolResult> {
 
   return {
     ok: true,
-    result: { steps: result.steps, chars: insertedCss.length, css: insertedCss, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null },
+    result: { steps: result.steps, chars: insertedCss.length, css: insertedCss, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null, unverified: anyUnverified },
     inverse: { kind: 'removeCss', css: insertedCss },
-    confidence: 0.7,
+    confidence: anyUnverified ? 0.45 : 0.7,
     costMs: 0,
   };
 }

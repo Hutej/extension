@@ -59,17 +59,35 @@ export class Journal {
     return lines.join('\n');
   }
 
-  /** Undo the last N action entries by replaying their inverses. */
-  async undo(n: number, dispatch: (inverse: any) => Promise<void>): Promise<number> {
+  /** Undo the last N action entries by replaying their inverses.
+   *
+   *  dispatch reports whether the inverse actually restored the DOM:
+   *  `{ ok: false, failed: 1, reason }` (a stale/wrong-target undo) is NOT
+   *  counted as undone — the journal entry is kept so the model/loop know the
+   *  act is still live on the page, and the terminal rollback can still try it.
+   *  Returns { undone, failed, reason } so the loop can propagate the failure
+   *  (rule 13: a swallowed undo makes the loop report success on a still-broken
+   *  page). dispatch may return void (CSS/legacy paths) — treated as success. */
+  async undo(
+    n: number,
+    dispatch: (inverse: any) => Promise<{ ok?: boolean; failed?: number; reason?: string } | void>,
+  ): Promise<{ undone: number; failed: number; reason?: string }> {
     let undone = 0;
-    for (let i = this.entries.length - 1; i >= 0 && undone < n; i--) {
+    let failed = 0;
+    let reason: string | undefined;
+    for (let i = this.entries.length - 1; i >= 0 && (undone + failed) < n; i--) {
       const entry = this.entries[i];
       if (entry.kind !== 'act' || !entry.inverse) continue;
-      await dispatch(entry.inverse);
+      const r = await dispatch(entry.inverse);
+      if (r && r.ok === false) {
+        failed++;
+        reason = r.reason;
+        continue; // keep the entry — the act is still live on the page
+      }
       this.entries.splice(i, 1);
       undone++;
     }
-    return undone;
+    return { undone, failed, reason };
   }
 
   toState(): JournalState {
@@ -123,11 +141,12 @@ function serializeResult(entry: JournalEntry): string {
     if (r.before != null && r.after != null) parts.push(`${r.before} → ${r.after}`);
     if (r.chars != null) parts.push(`${r.chars} chars`);
     if (r.healed) parts.push(`healed: ${r.healed.length} steps`);
+    if (r.unverified) parts.push('UNVERIFIED target (selector describePage never returned — act on a single live match, not an observed identity)');
     return parts.join(', ');
   }
   if (r.issues) return r.issues.length ? `${r.issues.length} issues: ${r.issues.join('; ')}` : 'clean';
   if (r.changed !== undefined) return r.changed ? 'changed' : 'unchanged';
-  if (r.textLength != null) return `ok (${r.textLength} chars)`;
+  if (r.textLength != null) return `ok (${r.textLength} chars)${r.unverified ? ' [UNVERIFIED target]' : ''}`;
   if (r.error) return `error: ${r.error}`;
   return 'ok';
 }

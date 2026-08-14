@@ -1,0 +1,95 @@
+{
+  "checks": [
+    {
+      "name": "resolve: exactly-one + fp match → ok + el",
+      "pass": true,
+      "detail": "{\"ok\":true}"
+    },
+    {
+      "name": "resolve: zero match → refuse (reason zero)",
+      "pass": true,
+      "detail": "{\"ok\":false,\"reason\":\"zero\",\"matched\":0,\"error\":\"selector \\\"aside#gone\\\" matched nothing on the page now. The element may have been removed or re-rendered. Call describePage again to find the current region, then retry.\"}"
+    },
+    {
+      "name": "resolve: many match → refuse (reason ambiguous, fail-closed)",
+      "pass": true,
+      "detail": "{\"ok\":false,\"reason\":\"ambiguous\",\"matched\":3,\"error\":\"selector \\\"a\\\" matched 3 elements — that is not a unique identity. Refine the selector with a stable anchor (id, data-testid, role) or a parent that uniquely contains the target. If the matches are structurally identical twins (same tag, attrs, text), no selector can distinguish them — ask the user which one, or target a parent that uniquely contains it. Call describePage to see the regions and their selectors.\"}"
+    },
+    {
+      "name": "resolve: wrong-target (fp differs) → refuse, do NOT mutate",
+      "pass": true,
+      "detail": "{\"reason\":\"wrong-target\"}"
+    },
+    {
+      "name": "resolve: wrong-target (boilerplate-twin, shared 40-char prefix) → refuse, do NOT mutate wrong twin",
+      "pass": true,
+      "detail": "{\"reason\":\"wrong-target\"}"
+    },
+    {
+      "name": "resolve: unique selector, no fingerprint → ok + reason unverified (mutate, flagged)",
+      "pass": true,
+      "detail": "{\"ok\":true,\"reason\":\"unverified\"}"
+    },
+    {
+      "name": "fingerprint: style change does NOT change identity",
+      "pass": true,
+      "detail": "aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d76 vs aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d76"
+    },
+    {
+      "name": "fingerprint: data-rv-* stamp does NOT change identity",
+      "pass": true,
+      "detail": "aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d76 vs aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d76"
+    },
+    {
+      "name": "fingerprint: deterministic for identical structure",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "fingerprint: distinguishes text-differing siblings",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "fingerprint: distinguishes siblings sharing a 40-char text prefix (boilerplate collision)",
+      "pass": true,
+      "detail": "fa=a|class=card-link|c0|d0|Read more about this product and its ama|95acc7d fb=a|class=card-link|c0|d0|Read more about this product and its ama|3bf969e"
+    },
+    {
+      "name": "fingerprint: distinguishes structure-differing siblings",
+      "pass": true,
+      "detail": ""
+    },
+    {
+      "name": "undo setText: wrong-target → NOT replaced (clone not applied to wrong node)",
+      "pass": true,
+      "detail": "text=EXTERNALLY_CHANGED"
+    },
+    {
+      "name": "undo setText: wrong-target → failed counted (not silent success)",
+      "pass": true,
+      "detail": "undoAll must not throw; it counts failed"
+    },
+    {
+      "name": "undo setText: target removed → failed counted (no silent skip)",
+      "pass": true,
+      "detail": "{\"undone\":0,\"failed\":1}"
+    },
+    {
+      "name": "undo setText CONTROL: unchanged target → restored exactly",
+      "pass": true,
+      "detail": "text=orig"
+    },
+    {
+      "name": "undo insert: stale node (no parent) → failed counted (no silent no-op)",
+      "pass": true,
+      "detail": "{\"undone\":0,\"failed\":1}"
+    },
+    {
+      "name": "undo insert CONTROL: present node → removed exactly",
+      "pass": true,
+      "detail": "children=0"
+    }
+  ],
+  "pass": true
+}

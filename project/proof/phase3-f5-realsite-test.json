@@ -1,0 +1,25 @@
+{
+  "checks": [
+    {
+      "name": "HARNESS: extension loaded",
+      "pass": true,
+      "detail": "id=obonahlebekcckighkdfnmojogmmhenb"
+    },
+    {
+      "name": "F5.8 REAL-SITE: loop reached ACT on Wikipedia \"hide the sidebar\"",
+      "pass": true,
+      "detail": "status=done, acts=2, reason=undefined"
+    },
+    {
+      "name": "F5.8 REAL-SITE: forced checkLayout did NOT false-undo the legitimate hide",
+      "pass": true,
+      "detail": "checkLayout calls=2, none auto-undone (clean hide stayed)"
+    },
+    {
+      "name": "F5.8 VISION (kimi): sidebar hidden AND page not broken",
+      "pass": true,
+      "detail": "kimi words: The screenshot shows the Wikipedia article for CSS. The left sidebar/table of contents is not visible and appears to have been hidden or removed. The main article content is clearly readable and properly formatted, with the introductory paragraphs and right-side infobox displaying correctly."
+    }
+  ],
+  "pass": true
+}

@@ -32,6 +32,16 @@ export function undoAllStructural(): { undone: number; failed: number } {
   return txnLog.undoAll(liveDom);
 }
 
+/** Undo only the single most-recent structural op (the per-step mirror of
+ *  undoAllStructural). Used by content.ts on {action:'undoLast'} — which the
+ *  loop sends for the checkLayout auto-undo and the `undo` control tool — so
+ *  a DOM act (setText/insert) is reversed by the EXACT cloned-node inverse,
+ *  not the lossy innerHTML re-parse of the serializable fallback (Law 7).
+ *  Idempotent: marks the entry consumed; a repeat call undoes the next one. */
+export function undoLastStructural(): { undone: number; failed: number; reason?: string } {
+  return txnLog.undoLast(liveDom);
+}
+
 /** Clear the log — called on each "on" (re-apply) so a fresh cycle re-records. */
 export function resetTxnLog(): void {
   txnLog.reset();

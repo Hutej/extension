@@ -10,7 +10,8 @@
 
 import { getTool } from '@/tools/index';
 import { loadJournalState, originKey, saveJournalState } from '@/core/persist';
-import { undoAllStructural, resetTxnLog, txnSize } from '@/core/ops/recorder';
+import { undoAllStructural, undoLastStructural, resetTxnLog, txnSize } from '@/core/ops/recorder';
+import { resetIdentityStore } from '@/core/identity-store';
 
 export default defineContentScript({
   matches: ['<all_urls>'],
@@ -58,13 +59,6 @@ export default defineContentScript({
         return true;
       }
 
-      // Restore HTML for undo (from the loop's dispatchInverse).
-      if (message.action === 'restoreHtml') {
-        restoreHtmlLocal(message.selector, message.prevHtml, message.isInside);
-        sendResponse({ ok: true });
-        return;
-      }
-
       // F3: undoAll — the failure-path / toggle-off structural rollback. Replays
       // the content-script TransactionLog backwards (cloned-node exact undo for
       // setText/insert). CSS rollback is the background's job (removeCss). This
@@ -76,10 +70,27 @@ export default defineContentScript({
         return;
       }
 
+      // F5: undoLast — the per-step exact undo. Reverses the single most-recent
+      // structural op via the cloned-node inverse (NOT innerHTML re-parse). Sent
+      // by the loop for the checkLayout auto-undo and the `undo` control tool
+      // when the dispatched inverse is a DOM kind (setText/insert). CSS acts
+      // (removeCss) never reach here — the background undoes CSS directly.
+      // Idempotent (marks the entry consumed); a repeat call undoes the next.
+      if (message.action === 'undoLast') {
+        const { undone, failed, reason } = undoLastStructural();
+        // F1: surface the stale/wrong-target reason so the loop/model can recover
+        // (rule 13) — was a silent {undone:0, failed:1} before.
+        sendResponse({ ok: true, undone, failed, reason, size: txnSize() });
+        return;
+      }
+
       // F3: reset the structural log (called on each "on" / re-apply so a fresh
-      // cycle re-records clones, and after removeAllModifications).
+      // cycle re-records clones, and after removeAllModifications). F1: also
+      // reset the identity store so a fresh cycle re-registers fingerprints
+      // (a refreshed DOM gives a refreshed identity, not a stale one).
       if (message.action === 'resetTxn') {
         resetTxnLog();
+        resetIdentityStore();
         sendResponse({ ok: true });
         return;
       }
@@ -99,7 +110,10 @@ async function toggleModifications(): Promise<boolean> {
     // Turn on — background re-inserts CSS, content script re-applies DOM.
     // reset the structural log first so a fresh cycle re-records clones
     // (the re-applied act tools record into the TransactionLog on execute).
+    // F1: reset the identity store too — re-apply re-perceives, so the next
+    // describePage re-registers fresh fingerprints against the refreshed DOM.
     resetTxnLog();
+    resetIdentityStore();
     await sendToggleCss(true);
     await reapplyPersistedDom();
   } else {

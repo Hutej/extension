@@ -34,7 +34,7 @@ export type OpInverse =
   | { kind: 'reattach'; node: Node; parentHandle: string | null; nextSiblingHandle: string | null } // undo remove
   | { kind: 'reparent'; handle: string; parentHandle: string | null; nextSiblingHandle: string | null; prevCss?: string } // undo move/reorder
   | { kind: 'unwrap'; handle: string; wrapper: Node; parentHandle: string | null; nextSiblingHandle: string | null } // undo wrap
-  | { kind: 'setText'; clone: Node; selector: string } // undo setText — restore the cloned subtree
+  | { kind: 'setText'; clone: Node; selector: string; fingerprint?: string } // undo setText — restore the cloned subtree; F1: verify the current node is still the one we mutated
   | { kind: 'insert'; node: Node }; // undo insert — remove the inserted node
 
 /** One recorded transaction: the op kind + its inverse + the handle it targeted. */
@@ -65,6 +65,10 @@ export interface DomAdapter {
   resolveDestination(to: string | undefined): HTMLElement | null;
   /** Extract the handle from a live DOM node (the [data-rv-c] attribute). */
   handleOf(node: Node | null): string | null;
+  /** F1 IDENTITY: capture the structural fingerprint of a live node, for the
+   *  setText undo verify (the RC6-class fix — the undo must confirm the element
+   *  is STILL the one we mutated before replaceWith(clone)). */
+  fingerprintOf(node: Node): string;
   /** setText/insert undo: replace one node with another (clone restore). */
   replaceWith(node: Node, replacement: Node): void;
 }
@@ -101,6 +105,43 @@ export class TransactionLog {
     return { executed: this.entries.filter((e) => !e.undone).length, byKind };
   }
 
+  /** Undo the single most-recent not-yet-undone entry (the per-step mirror of
+   *  undoAll). Used by the loop's checkLayout auto-undo and the `undo` control
+   *  tool so a DOM act (setText/insert) is reversed by the EXACT cloned-node
+   *  inverse — not the lossy innerHTML re-parse the serializable fallback uses
+   *  (Law 7: textContent/innerHTML is never a valid in-session inverse; the
+   *  clone is available here). Returns {undone, failed, reason?}; idempotent on
+   *  SUCCESS (marks the entry undone). On FAILURE it does NOT mark the entry —
+   *  a failed undo must remain retryable so the terminal undoAll can still
+   *  attempt it (marking it consumed here would make undoAll skip it, leaving
+   *  the page mutated while the loop reports a clean rollback).
+   *  No-op if the log is empty / all consumed.
+   *
+   *  Sync invariant: the journal appends act entries in the same order act
+   *  tools call recordStructural (record happens inside execute, before the
+   *  tool returns; journal.append is after). So the last DOM act in the
+   *  journal == the last entry here. The loop only calls this when the
+   *  dispatched inverse is a DOM kind, so the entry popped is the right one. */
+  undoLast(dom: DomAdapter): { undone: number; failed: number; reason?: string } {
+    for (let i = this.entries.length - 1; i >= 0; i--) {
+      const e = this.entries[i];
+      if (e.undone) continue;
+      try {
+        applyInverse(e.inverse, dom);
+        e.undone = true;
+        return { undone: 1, failed: 0 };
+      } catch (err) {
+        // F1: surface the reason (stale/wrong-target) instead of swallowing it.
+        // Do NOT mark `undone` on failure: a failed restore must stay retryable
+        // so the terminal undoAll can attempt it (marking it consumed here would
+        // make undoAll skip it via `if (e.undone) continue`, leaving the page
+        // mutated while the loop reports a clean rollback).
+        return { undone: 0, failed: 1, reason: err instanceof Error ? err.message : String(err) };
+      }
+    }
+    return { undone: 0, failed: 0 };
+  }
+
   /** Replay the log BACKWARDS, applying each inverse. Restores the original DOM.
    *  Each undo is wrapped in try/catch so one failure cannot abandon the
    *  remainder. Inverses resolve by handle at undo time, not by stored Node
@@ -113,42 +154,7 @@ export class TransactionLog {
       const e = this.entries[i];
       if (e.undone) continue; // already restored — skip (idempotent)
       try {
-        const inv = e.inverse;
-        if (inv.kind === 'setText') {
-          // Restore the cloned subtree: replace the (possibly mutated) node
-          // with the clone captured before the textContent mutation.
-          const current = dom.querySelector(inv.selector);
-          if (!current) throw new Error(`setText target ${inv.selector} not found`);
-          dom.replaceWith(current, inv.clone);
-        } else if (inv.kind === 'insert') {
-          // The inserted node is still in the DOM (in-session); remove it.
-          // If the page removed it first, this is a harmless no-op.
-          const parent = dom.parent(inv.node);
-          if (parent) dom.removeChild(parent, inv.node);
-        } else if (inv.kind === 'unwrap') {
-          const node = dom.resolve(inv.handle);
-          if (!node) throw new Error(`handle ${inv.handle} not found`);
-          const parent = inv.parentHandle ? dom.resolve(inv.parentHandle) : null;
-          if (!parent) throw new Error(`parent handle ${inv.parentHandle} not found`);
-          dom.insertBefore(parent, node, inv.nextSiblingHandle ? dom.resolve(inv.nextSiblingHandle) : null);
-          const wParent = dom.parent(inv.wrapper);
-          if (wParent) dom.removeChild(wParent, inv.wrapper);
-        } else if (inv.kind === 'reattach') {
-          // Removed node: must use the stored Node (it's not in the DOM).
-          const parent = inv.parentHandle ? dom.resolve(inv.parentHandle) : null;
-          if (!parent) throw new Error(`parent handle ${inv.parentHandle} not found`);
-          dom.insertBefore(parent, inv.node, inv.nextSiblingHandle ? dom.resolve(inv.nextSiblingHandle) : null);
-        } else {
-          // reparent (move/reorder): resolve by handle.
-          const node = dom.resolve(inv.handle);
-          if (!node) throw new Error(`handle ${inv.handle} not found`);
-          const parent = inv.parentHandle ? dom.resolve(inv.parentHandle) : null;
-          if (!parent) throw new Error(`parent handle ${inv.parentHandle} not found`);
-          dom.insertBefore(parent, node, inv.nextSiblingHandle ? dom.resolve(inv.nextSiblingHandle) : null);
-          if (inv.prevCss !== undefined && node instanceof HTMLElement) {
-            (node as HTMLElement).style.cssText = inv.prevCss;
-          }
-        }
+        applyInverse(e.inverse, dom);
         e.undone = true;
         undone++;
       } catch {
@@ -157,5 +163,56 @@ export class TransactionLog {
       }
     }
     return { undone, failed };
+  }
+}
+
+/** Apply one inverse against the live DOM. Shared by undoLast and undoAll so
+ *  the per-step and all-or-nothing paths can never drift. */
+function applyInverse(inv: OpInverse, dom: DomAdapter): void {
+  if (inv.kind === 'setText') {
+    // F1 RC6-class fix: re-resolve + VERIFY before replaceWith(clone). The old
+    // undo keyed by a raw selector and blindly replaced whatever it found —
+    // if a re-render/reorder made the selector resolve to a DIFFERENT node, the
+    // undo would corrupt the wrong element. Verify the current node's structural
+    // fingerprint matches the act-time fingerprint; if not found → throw (the
+    // undoAll/undoLast caller reports it, not silently skips); if the wrong
+    // element → throw (refuse to corrupt it). The clone restore stays exact.
+    const current = dom.querySelector(inv.selector);
+    if (!current) throw new Error(`setText undo: target ${inv.selector} no longer exists (removed/re-rendered) — cannot restore`);
+    if (inv.fingerprint && dom.fingerprintOf(current) !== inv.fingerprint) {
+      throw new Error(`setText undo: ${inv.selector} now resolves to a different element than the one mutated — refusing to restore the clone onto the wrong node`);
+    }
+    dom.replaceWith(current, inv.clone);
+  } else if (inv.kind === 'insert') {
+    // F1 RC6-class fix: the inserted node is still in the DOM (in-session);
+    // remove it. If the page removed/re-rendered it away first, the old code
+    // was a SILENT no-op — the undo reported success while doing nothing. Now
+    // throw so the caller reports the stale node instead of swallowing it.
+    const parent = dom.parent(inv.node);
+    if (!parent) throw new Error('insert undo: the inserted node is no longer in the DOM (re-rendered/removed) — nothing to remove');
+    dom.removeChild(parent, inv.node);
+  } else if (inv.kind === 'unwrap') {
+    const node = dom.resolve(inv.handle);
+    if (!node) throw new Error(`handle ${inv.handle} not found`);
+    const parent = inv.parentHandle ? dom.resolve(inv.parentHandle) : null;
+    if (!parent) throw new Error(`parent handle ${inv.parentHandle} not found`);
+    dom.insertBefore(parent, node, inv.nextSiblingHandle ? dom.resolve(inv.nextSiblingHandle) : null);
+    const wParent = dom.parent(inv.wrapper);
+    if (wParent) dom.removeChild(wParent, inv.wrapper);
+  } else if (inv.kind === 'reattach') {
+    // Removed node: must use the stored Node (it's not in the DOM).
+    const parent = inv.parentHandle ? dom.resolve(inv.parentHandle) : null;
+    if (!parent) throw new Error(`parent handle ${inv.parentHandle} not found`);
+    dom.insertBefore(parent, inv.node, inv.nextSiblingHandle ? dom.resolve(inv.nextSiblingHandle) : null);
+  } else {
+    // reparent (move/reorder): resolve by handle.
+    const node = dom.resolve(inv.handle);
+    if (!node) throw new Error(`handle ${inv.handle} not found`);
+    const parent = inv.parentHandle ? dom.resolve(inv.parentHandle) : null;
+    if (!parent) throw new Error(`parent handle ${inv.parentHandle} not found`);
+    dom.insertBefore(parent, node, inv.nextSiblingHandle ? dom.resolve(inv.nextSiblingHandle) : null);
+    if (inv.prevCss !== undefined && node instanceof HTMLElement) {
+      (node as HTMLElement).style.cssText = inv.prevCss;
+    }
   }
 }

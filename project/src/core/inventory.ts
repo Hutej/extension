@@ -18,6 +18,8 @@
  */
 
 import { type ComponentType } from './perceive/semantics';
+import { fingerprint, type Fingerprint, type IdentityDom } from './identity';
+import { liveIdentityDom } from './identity-dom';
 
 export interface CandidateRegion {
   id: string;
@@ -34,6 +36,12 @@ export interface CandidateRegion {
   targetable: boolean;
   /** present when targetable is false — the reason, surfaced to the agent. */
   untargetableReason?: string;
+  /** F1 IDENTITY: the structural fingerprint captured at observe time. The act
+   *  tools re-resolve the selector at use time and verify the matched element's
+   *  fingerprint matches this — so a selector that now points to a DIFFERENT
+   *  element is caught (fail-closed), not silently mutated. Style-agnostic, so
+   *  it survives the transform we apply. Present only when targetable. */
+  fingerprint?: Fingerprint;
 }
 
 const IGNORED = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'BR', 'HR', 'WBR', 'LINK', 'META', 'TEMPLATE', 'SLOT', 'PATH', 'DEFS']);
@@ -110,8 +118,12 @@ function buildRegion(el: Element, rid: number, rect: DOMRect, vpH: number): Cand
   const selector = sel.selector;
   const targetable = sel.targetable;
   const untargetableReason = sel.reason;
+  // F1 IDENTITY: capture the structural fingerprint at observe time so the act
+  // tools can re-resolve + verify at use time. The fingerprint is style-agnostic
+  // (excludes `style` + our stamps), so it survives the transform we apply.
+  const fp = targetable ? fingerprint(el as Element, liveIdentityDom as IdentityDom) : undefined;
 
-  return { id: `r${rid}`, tag, role, componentType: compType, textSample, position, width, repeatCount, selector, targetable, untargetableReason };
+  return { id: `r${rid}`, tag, role, componentType: compType, textSample, position, width, repeatCount, selector, targetable, untargetableReason, fingerprint: fp };
 }
 
 function inferRole(el: Element): string {
@@ -245,7 +257,7 @@ export function buildStableSelector(el: HTMLElement): SelectorResult {
     if (anchor.id) parts.push(`${tag}#${cssEscape(anchor.id)}`);
     else if (anchor.getAttribute('data-testid')) parts.push(`${tag}[data-testid="${cssEscape(anchor.getAttribute('data-testid')!)}"]`);
     else if (anchor.getAttribute('role')) parts.push(`${tag}[role="${cssEscape(anchor.getAttribute('role')!)}"]`);
-    else if (anchor.getAttribute('aria-label')) parts.push(`${tag}[aria-label^="${cssEscape(anchor.getAttribute('aria-label')!.slice(0, 20))}"]`);
+    else if (anchor.getAttribute('aria-label')) parts.push(`${tag}[aria-label="${cssEscape(anchor.getAttribute('aria-label')!)}"]`);
     else if (anchor.getAttribute('name')) parts.push(`${tag}[name="${cssEscape(anchor.getAttribute('name')!)}"]`);
   } else {
     if (el === document.body) return { selector: 'body', targetable: true };
@@ -256,7 +268,14 @@ export function buildStableSelector(el: HTMLElement): SelectorResult {
   const chain: string[] = [];
   let node: HTMLElement | null = el;
   let d = 0;
-  while (node && node !== anchor && d < 10) {
+  // Chain depth cap MUST match the anchor searchDepth cap (searchDepth < 20
+  // above). An anchor found 11-20 levels up was reachable by the search but
+  // unreachable by the chain when this was `d < 10`: the chain stopped short of
+  // the anchor, the `>` child combinator then broke, and querySelector returned
+  // null → the element was silently marked untargetable with a generic reason,
+  // even though a stable anchor existed. Cap the chain at the same 20 so any
+  // anchor the search finds can actually be chained back to.
+  while (node && node !== anchor && d < 20) {
     const tag = node.tagName.toLowerCase();
     let cnt = 0;
     let sib = node.previousElementSibling;
@@ -279,11 +298,16 @@ function cssEscape(s: string): string {
   return (typeof CSS !== 'undefined' && CSS.escape) ? CSS.escape(s) : s.replace(/["\\]/g, '\\$&');
 }
 
-/** Serialize the inventory for the model call. Compact, a few thousand chars. */
+/** Serialize the inventory for the model call. Compact, a few thousand chars.
+ *  F1: surface the UNTARGETABLE REASON (not just the bare token) so the agent
+ *  can choose the alternative path (rule 13: every error names an alternative). */
 export function serializeInventory(regions: CandidateRegion[]): string {
   return regions.map((r) => {
     const text = r.textSample ? ` text="${r.textSample}"` : '';
-    const untargetable = r.targetable ? '' : ' UNTARGETABLE';
+    // R3: emit the reason text, not just the bare UNTARGETABLE token. A bare
+    // token leaves the agent unable to recover (no anchor? not unique? parse
+    // error?) and it falls back to guessing — the exact roadmap failure.
+    const untargetable = r.targetable ? '' : ` UNTARGETABLE(${r.untargetableReason ?? 'unknown'})`;
     return `[${r.id}] role=${r.role} type=${r.componentType}${text} pos=${r.position} width=${r.width} repeat=${r.repeatCount}${untargetable}`;
   }).join('\n');
 }

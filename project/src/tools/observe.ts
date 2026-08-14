@@ -17,8 +17,8 @@ import type { ToolDef, ToolResult } from './index';
 import { buildInventory, serializeInventory } from '../core/inventory';
 import { redactSensitiveData } from '../core/sanitize/redact';
 import { perceive, serializePerception } from '../core/perceive';
-
-const CONFIDENCE_FLOOR = 0.5;
+import { registerIdentity, getIdentity } from '../core/identity-store';
+import { liveIdentityDom } from '../core/identity-dom';
 
 /** D: verify a selector resolves. Accept 1..N, return the count.
  *  Refuse only on a clearly wrong match count (>200). */
@@ -36,12 +36,29 @@ async function describePage(_args: any): Promise<ToolResult> {
   const regions = buildInventory();
   const MAX_REGIONS = 60;
   const truncated = regions.length >= MAX_REGIONS;
+  // F1: register every targetable region's identity (selector -> fingerprint)
+  // so the act tools can re-resolve + verify at use time. Re-register on every
+  // describePage so a re-perceive refreshes the fingerprints (the last observe
+  // wins — a refreshed DOM gives a refreshed identity, not a stale one).
+  for (const r of regions) {
+    if (r.targetable && r.selector) {
+      const el = document.querySelector(r.selector);
+      if (el) registerIdentity(r.selector, el, liveIdentityDom);
+    }
+  }
   return {
     ok: true,
     truncated,
     result: {
       regionCount: regions.length,
       truncated,
+      // The model sees role/type/tag/textSample/position/width/repeat/selector/
+      // targetable/untargetableReason — everything it needs to CHOOSE a target.
+      // It does NOT see the fingerprint: that is internal identity evidence the
+      // act tools read from the identity-store (keyed by selector) to re-resolve +
+      // verify at use time. Emitting it would bloat the context with a long
+      // structural string per region (×60) for no model value — and was a real
+      // cost I introduced in the first F1 cut (caught by the real-site run).
       regions: regions.map((r) => ({
         id: r.id, role: r.role, type: r.componentType, tag: r.tag,
         textSample: r.textSample, position: r.position, width: r.width,
@@ -60,30 +77,49 @@ async function findElements(args: any): Promise<ToolResult> {
   const selector = args?.selector as string;
   if (!selector) return { ok: false, error: 'missing "selector" argument. The loop already has the describePage inventory — name a selector and findElements resolves it against the DOM (count + region metadata). No concept matching is done.' };
 
-  // D: resolve against the live DOM. Accept 1..N, return the count. Refuse
-  // only on a clearly wrong match count (>200). No keyword table, no concept
-  // scoring — the model picks the selector from the inventory it already saw.
-  const { count } = verifySelectorResult(selector);
+  // F1 R1: resolve with a MEASURED confidence. findElements fail-closes on a
+  // bad COUNT (0 / >200 / invalid selector -> ok:false naming an alternative),
+  // NOT on a confidence floor: the confidence is informational (shown to the
+  // model in the journal) and gates nothing. The real gate is the act guard
+  // (resolveTarget in tools/act.ts), which re-resolves + verifies before any
+  // mutation — not the old ok:true-with-empty-matches fail-open.
+  let count = 0;
+  try { count = document.querySelectorAll(selector).length; }
+  catch { return { ok: false, error: `invalid selector "${selector}" — check syntax and call describePage to see available regions`, confidence: 0.1 }; }
+
   if (count === 0) {
-    return {
-      ok: true,
-      result: { selector, matches: [], count: 0, truncated: false },
-      confidence: 0.1,
-      costMs: 0,
-    };
+    return { ok: false, error: `selector "${selector}" matched nothing. The element may have been removed or re-rendered. Call describePage to find the current region, then retry.`, confidence: 0.1 };
   }
+  if (count > 200) {
+    return { ok: false, error: `selector "${selector}" matched ${count} elements — too broad. Refine your selector to target fewer elements. Call describePage to see the regions.`, confidence: 0.1 };
+  }
+
+  // F1: a MEASURED confidence. A unique match the store recognizes is high; a
+  // multi-match or an unrecognized selector is low. This confidence is
+  // INFORMATIONAL (shown to the model in the journal) — the loop does NOT gate
+  // on it; consecutiveNoInfo is computed from matches/error/regionCount, not
+  // from confidence. The act guard is the real gate, and an unrecognized UNIQUE
+  // selector is NOT refused there: resolveTarget returns {ok, reason:'unverified'}
+  // and the act mutates by design (locked by tests/f1-identity-test.ts). This
+  // replaces the old hardcoded 0.8.
+  const recognized = getIdentity(selector) !== null;
+  const confidence = count === 1 && recognized ? 0.85 : count === 1 ? 0.45 : 0.2;
 
   const regions = buildInventory();
   const truncated = regions.length >= 60;
 
-  // Map the resolved elements to inventory regions by selector, when present.
+  // F1: matches are the inventory regions whose selector string equals this one
+  // (still string equality — the count above is the live-DOM truth). Surface the
+  // live match count so the model knows if its selector is unique on the page now.
   const matches = regions
     .filter(r => r.targetable && r.selector === selector)
     .slice(0, 10)
     .map(r => ({
       id: r.id,
-      confidence: 0.8,
-      reason: `selector "${selector}" resolved by the model`,
+      confidence,
+      reason: recognized
+        ? `selector "${selector}" is a unique, describePage-verified target`
+        : `selector "${selector}" resolved ${count} element(s) but was not returned by describePage — identity unverified`,
       selector: r.selector,
       targetable: r.targetable,
       untargetableReason: r.untargetableReason,
@@ -97,9 +133,10 @@ async function findElements(args: any): Promise<ToolResult> {
       count,
       matches,
       truncated,
-      message: count > 200 ? `selector matched ${count} elements — too broad; refine it` : undefined,
+      recognized,
+      message: count > 1 ? `selector matched ${count} elements — refine it to one for a safe act` : undefined,
     },
-    confidence: count > 0 && count <= 200 ? 0.8 : 0.2,
+    confidence,
     costMs: 0,
   };
 }

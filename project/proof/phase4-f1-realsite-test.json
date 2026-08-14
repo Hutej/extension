@@ -1,0 +1,25 @@
+{
+  "checks": [
+    {
+      "name": "HARNESS: extension loaded",
+      "pass": true,
+      "detail": "id=obonahlebekcckighkdfnmojogmmhenb"
+    },
+    {
+      "name": "F1 REAL-SITE: loop reached ACT on Wikipedia \"hide the sidebar\"",
+      "pass": false,
+      "detail": "status=budgetExhausted, acts=0, reason=loop exhausted budget without acting or giving up"
+    },
+    {
+      "name": "F1 REAL-SITE: the hide succeeded (done, not auto-undone, not gaveUp)",
+      "pass": false,
+      "detail": "status=budgetExhausted, autoUndone=0, f1Refusals=0"
+    },
+    {
+      "name": "F1 VISION (kimi): sidebar hidden AND page not broken (right target)",
+      "pass": false,
+      "detail": "kimi words: A left sidebar/table of contents is clearly visible on the left, listing sections such as Syntax, History, Browser support, and others. The main article content is fully readable and properly formatted, with no overlap, garbled text, or clipped columns. Overall, the Wikipedia page for CSS appears complete and intact."
+    }
+  ],
+  "pass": false
+}

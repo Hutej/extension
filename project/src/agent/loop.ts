@@ -37,6 +37,15 @@ import { saveJournalState, originKey, loadJournalState } from '../core/persist';
 const ACT_RESERVE_MS = 12_000;  // reserve this much wall time for acting
 const MIN_TURN_MS = 5_000;     // below this, no turn can complete — break
 
+// F5: circuit-breaker on repeated checkLayout-triggered auto-undo. The loop
+// can silently burn the budget re-acting-and-breaking (act → forced checkLayout
+// fails → undo → act again → fails → undo …). After this many CONSECUTIVE
+// checkLayout undos the loop gives up (gaveUp + rollback) instead of burning
+// the whole budget. 2 = "two consecutive acts each broke the page layout, stop
+// trying" — mirrors consecutiveNoInfo (which restricts at 2). The counter
+// resets on a CLEAN checkLayout, so a transient break does not poison the run.
+const MAX_CHECKLAYOUT_UNDOS = 2;
+
 export interface ParseFailure {
   model: string;
   /** raw model output that failed JSON parsing (capped for transport). */
@@ -46,6 +55,34 @@ export interface ParseFailure {
   turn: number;
   /** model error/timeout message when raw is absent (the call didn't complete). */
   error?: string;
+}
+
+/**
+ * F5: classify the result of a forced checkLayout after a successful act.
+ * PURE — extracted so the loop's integrity DECISION is unit-testable without
+ * the model or a live tab (adversarial review wf_21a77cf9, RUNNER major: the
+ * branch logic was previously only regex-guarded, never executed by a test).
+ *
+ * checkLayout's contract: it returns `ok: issues.length === 0` — so `ok:false`
+ * means ISSUES WERE FOUND, NOT "the check failed". A naive `clOk = !!cl.ok`
+ * made every real break look like a verifier error → the undo branch + the
+ * circuit-breaker were dead code. This function encodes the correct contract:
+ *   - 'error'  : the dispatch failed or checkLayout itself errored (no undo;
+ *                we don't KNOW the act broke, only that we couldn't verify it).
+ *   - 'issues' : checkLayout found layout issues → undo the act; the caller
+ *                increments the circuit-breaker and may giveUp at the cap.
+ *   - 'clean'  : no issues → accept the act; the caller resets the breaker.
+ */
+export type CheckLayoutOutcome = 'error' | 'issues' | 'clean';
+export function classifyCheckLayout(cl: any): { outcome: CheckLayoutOutcome; issues: string[]; allIssues: string[] } {
+  const dispatchFailed = !cl || !!cl?.error || !cl?.result;
+  if (dispatchFailed) return { outcome: 'error', issues: [], allIssues: [] };
+  const issues = (cl?.result?.issues as string[] | undefined) ?? [];
+  // allIssues is the UNCAPPED issue list (for baseline-diff). Falls back to the
+  // capped `issues` if a checkLayout build predates the field.
+  const allIssues = (cl?.result?.allIssues as string[] | undefined) ?? issues;
+  if (issues.length > 0) return { outcome: 'issues', issues, allIssues };
+  return { outcome: 'clean', issues: [], allIssues: [] };
 }
 
 export interface LoopResult {
@@ -91,6 +128,7 @@ export async function runLoop(
   const budget = new Budget({ maxSteps: AI_CONFIG.maxSteps, maxWallMs: AI_CONFIG.maxWallMs });
   let paidCalls = 0;
   let consecutiveNoInfo = 0;
+  let consecutiveCheckLayoutUndos = 0; // F5 circuit-breaker — consecutive forced-checkLayout undos
   let hasActed = false;
   // Phase 2.5 TASK1 — collect REAL malformed model outputs for root-cause
   // classification. Deterministic: surfaced via LoopResult.parseFailures.
@@ -270,8 +308,8 @@ export async function runLoop(
     if (tool.kind === 'control') {
       if (toolName === 'undo') {
         const steps = typeof toolArgs.steps === 'number' ? toolArgs.steps : 1;
-        const undone = await journal.undo(steps, (inverse) => dispatchInverse(tabId, inverse));
-        onProgress?.({ tool: 'undo', undone });
+        const r = await journal.undo(steps, (inverse) => dispatchInverse(tabId, inverse));
+        onProgress?.({ tool: 'undo', undone: r.undone, failed: r.failed, reason: r.reason });
         continue;
       }
       if (toolName === 'done') {
@@ -287,6 +325,20 @@ export async function runLoop(
 
     // Dispatch the tool.
     let toolResult;
+    // F5.8 real-site fix (baseline-diff): a STATELESS post-act checkLayout
+    // flags EVERY pre-existing clipped/collapsed element on a real site (Wikipedia
+    // has many legitimately-clipped controls/tables), false-undoing legitimate
+    // transforms. The forced check exists to catch issues the ACT INTRODUCED, so
+    // we capture a PRE-ACT baseline checkLayout and diff — flag only issues NOT in
+    // the baseline. (Matches the resize gate's newViolations approach.) The
+    // baseline is cheap: one verify dispatch before the act; stored per-loop.
+    let preActIssues: string[] | null = null;
+    if (tool.kind === 'act' && !tool.background) {
+      try {
+        const pre = await dispatchTool(tabId, 'checkLayout', {}, Math.min(budget.remaining().wallMs - ACT_RESERVE_MS, 20_000));
+        preActIssues = (classifyCheckLayout(pre).allIssues) ?? [];
+      } catch { preActIssues = null; } // baseline capture must never block an act
+    }
     try {
       if (tool.background) {
         toolResult = await handleBackgroundTool(tabId, toolName, toolArgs, credentials);
@@ -343,12 +395,103 @@ export async function runLoop(
       await journal.undo(1, (inverse) => dispatchInverse(tabId, inverse));
     }
 
-    // F5: a failed checkLayout triggers undo, not repair.
-    if (toolName === 'checkLayout' && toolResult.result?.issues?.length > 0) {
-      const undone = await journal.undo(1, (inverse) => dispatchInverse(tabId, inverse));
-      if (undone > 0) {
-        (toolResult.result as any).autoUndone = true;
-        (toolResult.result as any).message = 'checkLayout found issues — last action was automatically undone. Try a different approach or give up.';
+    // F5 INTEGRITY: after every successful ACT, FORCE checkLayout to run (the
+    // browser owns geometry, rule 8 — this is a deterministic measurement, not
+    // a model decision, so it does not violate "every request goes to the
+    // model"). The model could already call checkLayout itself; this guarantees
+    // it. A failed check (issues) triggers UNDO, not repair (roadmap Phase 3:
+    // "repairing in place produces a differently-broken result nobody planned").
+    // This is additive — one extra verify turn per act — and reuses the exact
+    // F3 inverse path (dispatchInverse → cloned-node undoLast for DOM, exact
+    // removeCss for CSS). checkLayout itself is a verify tool already in the
+    // registry; the forced call reuses the same dispatch path a model call uses.
+    //
+    // Three outcomes, all surfaced to the model via the journal entry:
+    //  - CLEAN (ok, no issues): the act is accepted; reset the circuit-breaker.
+    //  - ISSUES (ok, issues): undo the act; increment the circuit-breaker.
+    //  - ERROR (the check itself failed): do NOT assume clean (that would be a
+    //    false pass — a broken verifier silently accepting a maybe-broken act).
+    //    Surface the error, do NOT reset the counter, do NOT undo — we don't
+    //    know the act is broken, only that we couldn't check it. The model
+    //    decides whether to re-check, give up, or proceed.
+    if (tool.kind === 'act' && toolResult.ok && !toolResult.worse) {
+      // F5 adversarial review (RUNNER blocker): checkLayout returns
+      // ok: issues.length === 0 — so `ok:false` means ISSUES WERE FOUND, not
+      // "the check failed". Distinguish the three cases by structure, not by
+      // `ok`: ERROR = dispatch failed or `cl.error` set; ISSUES = cl.result.issues
+      // non-empty (regardless of ok, since ok is false on issues); CLEAN =
+      // otherwise. The old `clOk = !!cl?.ok && !cl?.error` made every real
+      // break look like "checkLayout itself failed" → the undo branch + the
+      // circuit-breaker were DEAD CODE. Fixed.
+      //
+      // F5 adversarial review (ARITHMETIC major): only run the forced check
+      // when there is room for it AND a following turn without dipping below
+      // MIN_TURN_MS — a forced check that runs at the reserve edge can exhaust
+      // the wall budget and the act gets rolled back for the wrong reason.
+      const rem = budget.remaining();
+      const clTimeout = Math.max(MIN_TURN_MS, Math.min(rem.wallMs - ACT_RESERVE_MS, 30_000));
+      const cl = await dispatchTool(tabId, 'checkLayout', {}, clTimeout);
+      const { outcome, issues: rawIssues, allIssues: rawAll } = classifyCheckLayout(cl);
+      // F5.8 baseline-diff: keep only issues the ACT INTRODUCED — after-act
+      // allIssues NOT in the pre-act baseline allIssues. checkLayout now returns
+      // an UNCAPPED allIssues (the display `issues` is capped for the model) so
+      // the diff matches every pre-existing issue (Wikipedia has 700+) exactly.
+      // Exact-string match: pre-existing issues are byte-identical pre/post for
+      // unchanged elements. A normalized-key fallback covers a label that
+      // shifts a few chars. If the baseline capture failed (null), flag all
+      // (conservative — better a false-undo than a false-pass with no baseline).
+      const normKey = (s: string) => {
+        const m = s.match(/^([^:]+: <[a-z0-9]+> )"([^"]{0,12})/);
+        return m ? m[1] + m[2] : s.slice(0, 40);
+      };
+      const clIssues = preActIssues
+        ? rawAll.filter((iss) => !preActIssues.includes(iss) && !preActIssues.some((b) => normKey(b) === normKey(iss)))
+        : rawIssues;
+      const diffedOutcome: 'issues' | 'clean' = outcome === 'error' ? 'clean' : (clIssues.length > 0 ? 'issues' : 'clean');
+      const clEntry = {
+        tool: 'checkLayout', kind: 'verify' as const, args: {},
+        result: cl?.result ?? { error: cl?.error ?? 'checkLayout dispatch failed' },
+        confidence: cl?.confidence, reasoning: 'forced integrity check after act',
+        costMs: cl?.costMs ?? 0, timestamp: Date.now(),
+      };
+      journal.append(clEntry);
+      onProgress?.(clEntry);
+      if (outcome === 'error') {
+        // Verifier error — surface it, don't assume clean, don't undo. We don't
+        // KNOW the act is broken, only that we couldn't check it.
+        (clEntry.result as any).message = 'checkLayout itself failed — could not verify the page is not broken. Re-run checkLayout, or give up if you cannot verify.';
+      } else if (diffedOutcome === 'issues') {
+        const u = await journal.undo(1, (inverse) => dispatchInverse(tabId, inverse));
+        if (u.undone > 0) {
+          consecutiveCheckLayoutUndos++;
+          (clEntry.result as any).autoUndone = true;
+          (clEntry.result as any).message = `checkLayout found ${clIssues.length} NEW issue(s) (pre-existing baseline issues excluded): ${clIssues.join('; ')}. The last action was automatically undone — the page's layout would have been broken. Try a different approach or give up.`;
+        } else if (u.failed > 0) {
+          // F1: the undo did NOT restore the DOM (stale/wrong-target — the page
+          // re-rendered so the selector now resolves to a different element).
+          // Do NOT count this as a clean undo or bump the circuit breaker — the
+          // act is still live on the page (journal kept the entry). Surface the
+          // failure so the model knows the break is still there and must undo
+          // it itself (the `undo` control tool) or give up. Rule 13: a swallowed
+          // failure here would have the loop report success on a still-broken page.
+          (clEntry.result as any).autoUndone = false;
+          (clEntry.result as any).undoFailed = true;
+          (clEntry.result as any).message = `checkLayout found ${clIssues.length} NEW issue(s) but the automatic undo FAILED to restore the DOM (${u.reason ?? 'stale/wrong-target'}). The action is still on the page. Call the undo tool (steps: 1) to retry, or give up.`;
+        }
+        if (consecutiveCheckLayoutUndos >= MAX_CHECKLAYOUT_UNDOS) {
+          await rollbackDomIfActed(tabId, journal, origin);
+          return {
+            status: 'gaveUp', reason: `giving up: ${consecutiveCheckLayoutUndos} consecutive actions each broke the page layout (checkLayout failed). The page has been rolled back to its original state.`,
+            journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures,
+          };
+        }
+      } else {
+        // CLEAN — reset the circuit-breaker. The streak counts BACK-TO-BACK
+        // break→undo with no successful act in between; a clean checkLayout
+        // means the act SUCCEEDED (the page is good), which terminates the
+        // streak. (A clean after an undo = the undo restored the page → not a
+        // streak; a clean after a fresh act = the act worked. Both reset.)
+        consecutiveCheckLayoutUndos = 0;
       }
     }
   }
@@ -423,24 +566,53 @@ function dispatchTool(tabId: number, toolName: string, args: any, timeoutMs: num
 }
 
 /** A: dispatch an inverse. removeCss is handled directly in the background
- *  via chrome.scripting.removeCSS — no content script round trip. */
-async function dispatchInverse(tabId: number, inverse: any): Promise<void> {
-  if (!inverse) return;
+ *  via chrome.scripting.removeCSS — no content script round trip.
+ *
+ *  F5: DOM inverses (restoreText/restoreHtml) route through the content-script
+ *  TransactionLog's exact cloned-node `undoLast`, NOT a lossy innerHTML
+ *  re-parse. Law 7: textContent/innerHTML is never a valid in-session inverse —
+ *  the cloned subtree the act captured is still in the content-script log, so
+ *  use it. This is the shared dispatch the `undo` control tool, the checkLayout
+ *  auto-undo, and the P10 worse-undo all use, so fixing it here fixes every
+ *  per-step undo path at once (root cause, not symptom). undoLast undoes the
+ *  single most-recent structural op; because recordStructural + journal.append
+ *  happen in the same order inside one tool execute, the popped entry is the
+ *  matching one.
+ *
+ *  F1 (adversarial review wf): AWAIT the content-script reply and report failure.
+ *  The old `() => resolve()` discarded {undone, failed, reason} — so a
+ *  stale/wrong-target undo (the page re-rendered so aside#sb is now a different
+ *  element → fingerprint mismatch → undoLast throws) was silently swallowed:
+ *  journal.undo counted it as undone, the loop set autoUndone:true and bumped
+ *  the circuit breaker, and the model was told the undo succeeded while the
+ *  page kept the broken mutation. Now dispatch reports {ok:false, failed, reason}
+ *  when undoLast failed, and journal.undo keeps the entry + counts it failed.
+ *
+ *  POST-RELOAD fallback (the clone is gone): content.ts undoPersistedDom reads
+ *  the persisted journal and calls restoreHtmlLocal directly — fully
+ *  content-side, no message round trip, no Node crossing the boundary. */
+async function dispatchInverse(
+  tabId: number,
+  inverse: any,
+): Promise<{ ok: boolean; failed?: number; reason?: string }> {
+  if (!inverse) return { ok: true };
   if (inverse.kind === 'removeCss') {
     try {
       await chrome.scripting.removeCSS({ target: { tabId }, css: inverse.css, origin: 'USER' });
-    } catch { /* tab may be gone */ }
-  } else if (inverse.kind === 'restoreText') {
-    await dispatchRestoreHtml(tabId, inverse.selector, inverse.prevHtml, true);
-  } else if (inverse.kind === 'restoreHtml') {
-    await dispatchRestoreHtml(tabId, inverse.selector, inverse.prevHtml, inverse.isInside);
+      return { ok: true };
+    } catch { /* tab may be gone */ return { ok: true }; /* best-effort CSS removal */ }
+  } else if (inverse.kind === 'restoreText' || inverse.kind === 'restoreHtml') {
+    // Exact in-session undo via the cloned-node TransactionLog. AWAIT the reply
+    // so a stale/wrong-target undo is reported, not swallowed.
+    const reply = await new Promise<any>((resolve) => {
+      chrome.tabs.sendMessage(tabId, { action: 'undoLast' }, (response) => resolve(response));
+    });
+    if (reply && reply.failed > 0) {
+      return { ok: false, failed: reply.failed, reason: reply.reason };
+    }
+    return { ok: true };
   }
-}
-
-function dispatchRestoreHtml(tabId: number, selector: string, prevHtml: string, isInside: boolean): Promise<void> {
-  return new Promise((resolve) => {
-    chrome.tabs.sendMessage(tabId, { action: 'restoreHtml', selector, prevHtml, isInside }, () => resolve());
-  });
+  return { ok: true };
 }
 
 /** F3 (RC3 fix): on a terminal loop failure, roll back EVERY change the run
@@ -466,9 +638,18 @@ async function rollbackDomIfActed(tabId: number, journal: Journal, origin: strin
   // 2. Structural undo — the content-script TransactionLog replays its cloned-
   //    node inverses backwards. Returns {undone, failed}; we don't throw on
   //    failed (one failed undo must not abandon the rest — per-op try/catch).
-  await new Promise<void>((resolve) => {
-    chrome.tabs.sendMessage(tabId, { action: 'undoAll' }, () => resolve());
+  //    F1 (adversarial review wf): AWAIT the reply and surface a dirty rollback.
+  //    The old `() => resolve()` discarded {undone, failed}, so a stale/wrong-
+  //    target undo (left un-consumed by undoLast so undoAll retries it here) was
+  //    silently dropped — the loop reported a clean rollback while one mutation
+  //    stayed on the page. Now a non-zero `failed` is surfaced (console.warn,
+  //    visible in the content-script log) so a dirty rollback is never silent.
+  const undoReply = await new Promise<any>((resolve) => {
+    chrome.tabs.sendMessage(tabId, { action: 'undoAll' }, (response) => resolve(response));
   });
+  if (undoReply?.failed > 0) {
+    console.warn(`[Revueon] F1: terminal rollback could not fully restore the DOM — ${undoReply.failed} structural undo(s) failed (stale/wrong-target). ${undoReply.undone} of ${(undoReply.undone ?? 0) + (undoReply.failed ?? 0)} restored. The page may still carry a mutation; storage has been cleared so a reload restores the original.`);
+  }
   // 3. Drop the persisted journal state for this run so a reload doesn't
   //    re-apply a failed/partial transform. (CSS + DOM both undone above;
   //    clearing storage prevents the webNavigation re-insert path reviving it.)
