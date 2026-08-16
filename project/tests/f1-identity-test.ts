@@ -39,20 +39,47 @@ function link(children: N[], parent: N) { for (const c of children) c.parent = p
 
 // A tiny in-memory DOM enough for identity + txn. querySelectorAll supports the
 // tiny selector grammar the tests use: `tag`, `tag#id`, `tag[attr=value]`,
-// `tag:nth-of-type(k)`, and comma lists. attrs() returns sorted pairs.
+// `tag:nth-of-type(k)` and the an+b formula forms (-n+1, 0n+1, 2n+1, odd, even),
+// `tag:nth-last-of-type(...)`, and comma lists. attrs() returns sorted pairs.
+// Formula support is required by the rule-15 formula-positional twin case: a
+// selector written as :nth-of-type(-n+1) (== first-of-type) must be stripped by
+// stripPositional exactly like :nth-of-type(1); without it the guard would pass
+// the wrong twin.
 function fakeDom(root: N): IdentityDom {
   const all = (n2: N): N[] => [n2, ...n2.children.flatMap(all)];
+  // Evaluate an an+b step function against a 1-based position. Covers -n+k,
+  // 0n+k, an+b (a>=1), odd, even, and bare integers.
+  const nthOk = (idx: number, arg: string): boolean => {
+    if (arg === 'odd') return idx % 2 === 1;
+    if (arg === 'even') return idx % 2 === 0;
+    if (/^\d+$/.test(arg)) return idx === +arg;
+    const m = arg.match(/^(-?\d*)n(?:\+(-?\d+))?$/);
+    if (!m) return false;
+    const a = m[1] === '' ? 1 : m[1] === '-' ? -1 : +m[1];
+    const b = m[2] ? +m[2] : 0;
+    if (a === 0) return idx === b;            // 0n+b
+    const k = (idx - b) / a;                  // an+b
+    return Number.isInteger(k) && k >= 0 && idx > 0;
+  };
   const matches = (el: N, sel: string): boolean => {
     // comma list
     for (const part of sel.split(',')) {
       const s = part.trim();
       let m;
-      // tag:nth-of-type(k)
-      if ((m = s.match(/^(\w+):nth-of-type\((\d+)\)$/))) {
+      // tag:nth-of-type(<an+b>)
+      if ((m = s.match(/^(\w+):nth-of-type\(([^)]+)\)$/))) {
         if (el.tag !== m[1]) continue;
         if (!el.parent) continue;
         const sibs = el.parent.children.filter((c) => c.tag === m[1]);
-        if (sibs.indexOf(el) + 1 !== +m[2]) continue;
+        if (!nthOk(sibs.indexOf(el) + 1, m[2])) continue;
+        return true;
+      }
+      // tag:nth-last-of-type(<an+b>)
+      if ((m = s.match(/^(\w+):nth-last-of-type\(([^)]+)\)$/))) {
+        if (el.tag !== m[1]) continue;
+        if (!el.parent) continue;
+        const sibs = el.parent.children.filter((c) => c.tag === m[1]);
+        if (!nthOk(sibs.length - sibs.indexOf(el), m[2])) continue;
         return true;
       }
       // tag#id
@@ -71,6 +98,7 @@ function fakeDom(root: N): IdentityDom {
     childElementCount(el) { return (el as unknown as N).children.length; },
     depthFromRoot(el) { let d = 0, n2 = el as unknown as N; while (n2.parent) { n2 = n2.parent; d++; } return d; },
     parent(el) { return (el as unknown as N).parent as unknown as Element | null; },
+    fingerprintOfRef(el) { return fingerprint(el as unknown as Element, fakeDom(root)); },
   };
 }
 
@@ -96,6 +124,7 @@ function fakeAdapter(root: N): DomAdapter {
     resolveDestination() { return null; },
     handleOf() { return null; },
     fingerprintOf(node) { return fingerprint(node as unknown as Element, dom); },
+    identityDom() { return dom; }, // the fake IdentityDom (full matcher) for the undo resolveTarget
     replaceWith(node, replacement) { const n2 = node as unknown as N, r = replacement as unknown as N; if (!n2.parent) return; const i = n2.parent.children.indexOf(n2); n2.parent.children[i] = r; r.parent = n2.parent; n2.parent = null; },
   };
 }
@@ -302,6 +331,245 @@ function ck(name: string, cond: boolean, detail: string) { checks.push({ name, p
   log.record({ kind: 'insert', target: 'body', inverse: { kind: 'insert', node: node as unknown as Node } });
   const res = log.undoAll(dom);
   ck('undo insert CONTROL: present node → removed exactly', res.undone === 1 && body.children.length === 0, `children=${body.children.length}`);
+}
+
+// ── IDENTICAL-TWIN fail-closed (Phase-4 review finding; the reorder attack) ──
+//
+// The hole: a positional selector (nth-of-type/nth-child) resolves to ONE
+// element whose fingerprint matches — but a SIBLING with an identical
+// fingerprint exists. A reorder silently reroutes the selector to that twin,
+// and the (now-identical) fingerprint verifies it → WRONG element mutated. The
+// fix: after the fp verify passes, check the flippable set (selector with
+// positional pseudo-classes stripped) for another element sharing the fp. If
+// found → refuse (reason 'indistinguishable-twin'), mutate neither.
+
+// TWIN-REFUSE: two genuinely identical siblings. A positional selector targets
+// one; the other has the same fingerprint → refuse (not "pick the first one").
+{
+  const body = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+  ] }); link(body.children, body);
+  const dom = fakeDom(body);
+  const a = body.children[0];
+  // The selector describePage would build for the FIRST card:
+  const sel = 'article:nth-of-type(1)';
+  const fp = fingerprint(a as unknown as Element, dom);
+  const r = resolveTarget(dom, sel, fp);
+  ck('twin: identical siblings → refuse (reason indistinguishable-twin)', !r.ok && r.reason === 'indistinguishable-twin', JSON.stringify({ ok: r.ok, reason: r.reason }));
+  // The error must NOT suggest nth-of-type as the fix (that is the move that
+  // creates the hole) — rule 13 names a distinguishing anchor / parent instead.
+  // (The selector string is echoed and may legitimately contain nth-of-type; the
+  // check is that the ADVICE does not recommend adding/using nth-of-type.)
+  const advice = (r.error || '').replace(/"[^"]*"/g, ''); // strip quoted selector echoes
+  ck('twin: refusal error names an anchor/parent alternative, does NOT advise nth-of-type',
+    /anchor|parent| id|data-testid|aria/i.test(r.error || '') && !/\b(add|use|refine|try)[^.!]*nth-of-type/i.test(advice),
+    String(r.error || '').slice(0, 200));
+}
+
+// TWIN-REFUSE-REORDER (the actual attack, rule 15): observe A, REORDER so B is
+// now first, re-resolve the original selector. The selector now resolves to B,
+// and fingerprint(B) === fingerprint(A). Without the twin check, fp-verify
+// would PASS (B has A's fp) and mutate the wrong twin. With the check, refuse.
+// This is the most important test — it reproduces the Phase-4 finding exactly.
+{
+  // observed tree: A first, B second. observe A via its positional selector.
+  const bodyA = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+  ] }); link(bodyA.children, bodyA);
+  const domA = fakeDom(bodyA);
+  const sel = 'article:nth-of-type(1)';
+  const observedFp = fingerprint(bodyA.children[0] as unknown as Element, domA);
+  // re-rendered tree: reordered — B is now first (an SPA reorder of identical items).
+  const bodyB = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+  ] }); link(bodyB.children, bodyB);
+  const domB = fakeDom(bodyB);
+  const r = resolveTarget(domB, sel, observedFp);
+  // B is at nth-of-type(1) now and has the SAME fp as A → fp-verify alone would
+  // pass. The twin check must catch it: refuse.
+  ck('twin-reorder: observe A, reorder → B at selector, fp(B)==fp(A) → REFUSE (not accidental pass)', !r.ok && r.reason === 'indistinguishable-twin', JSON.stringify({ ok: r.ok, reason: r.reason }));
+}
+
+// TWIN-REORDER-FORMULA (rule 15): the same identical-twin attack, but the
+// positional is written as a FORMULA — :nth-of-type(-n+1) — which is semantically
+// identical to :nth-of-type(1) (first-of-type) and matches exactly one element.
+// The original stripPositional matched only :nth-(...)\(\d+\) (bare integer), so a
+// formula positional passed through UNSTRIPPED: the flippable set collapsed to
+// the selector itself (size 1), isUniqueInFlippableSet returned true, and
+// resolveTarget returned ok — mutating the wrong twin on the reorder. This case
+// FAILS if stripPositional's regexes are reverted to \d+ (the deliberate failing
+// case rule 15 requires). Sibling vectors :nth-of-type(0n+1) and
+// :nth-last-of-type(-n+1) (== last-of-type) are equivalent and equally bypass.
+{
+  const bodyA = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+  ] }); link(bodyA.children, bodyA);
+  const domA = fakeDom(bodyA);
+  const sel = 'article:nth-of-type(-n+1)';
+  const observedFp = fingerprint(bodyA.children[0] as unknown as Element, domA);
+  const bodyB = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+  ] }); link(bodyB.children, bodyB);
+  const r = resolveTarget(fakeDom(bodyB), sel, observedFp);
+  ck('twin-reorder-formula: observe A, reorder → B at selector (-n+1 == first-of-type), fp(B)==fp(A) → REFUSE (stripPositional must strip an+b forms, not just \\d+)', !r.ok && r.reason === 'indistinguishable-twin', JSON.stringify({ ok: r.ok, reason: r.reason }));
+}
+// Formula vector on the UNVERIFIED path (the twin bypass via unverified).
+{
+  const body = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+  ] }); link(body.children, body);
+  const r = resolveTarget(fakeDom(body), 'article:nth-of-type(-n+1)', null);
+  ck('twin-reorder-formula: unverified path (no fp) with -n+1 on a twin also refuses (no formula bypass via unverified)', !r.ok && r.reason === 'indistinguishable-twin', JSON.stringify({ ok: r.ok, reason: r.reason }));
+}
+// Sibling vector :nth-last-of-type(-n+1) (== last-of-type).
+{
+  const bodyA = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+  ] }); link(bodyA.children, bodyA);
+  const domA = fakeDom(bodyA);
+  const sel = 'article:nth-last-of-type(-n+1)';
+  const observedFp = fingerprint(bodyA.children[1] as unknown as Element, domA); // observe the last (last-of-type)
+  const bodyB = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+  ] }); link(bodyB.children, bodyB);
+  const r = resolveTarget(fakeDom(bodyB), sel, observedFp);
+  ck('twin-reorder-formula: nth-last-of-type(-n+1) (== last-of-type) twin also refuses', !r.ok && r.reason === 'indistinguishable-twin', JSON.stringify({ ok: r.ok, reason: r.reason }));
+}
+
+// TWIN-UNVERIFIED-ALSO-REFUSES: a unique selector describePage never returned
+// (no expectedFp) that happens to land on a twin must ALSO refuse — the twin
+// ambiguity is structural, independent of whether we have an observe-time fp.
+// (If it did NOT refuse, the unverified path would be the twin bypass.)
+{
+  const body = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+  ] }); link(body.children, body);
+  const dom = fakeDom(body);
+  const r = resolveTarget(dom, 'article:nth-of-type(1)', null);
+  ck('twin: unverified path (no fp) on a twin also refuses (no twin bypass via unverified)', !r.ok && r.reason === 'indistinguishable-twin', JSON.stringify({ ok: r.ok, reason: r.reason }));
+}
+
+// TWIN-CONTROL distinct siblings still work: two cards that differ in text are
+// NOT twins (distinct fingerprints). A positional selector on one must SUCCEED —
+// the safety rule must not destroy legitimate targeting (acceptance criterion 8).
+{
+  const body = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'First card unique text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Second card unique text' }),
+  ] }); link(body.children, body);
+  const dom = fakeDom(body);
+  const sel = 'article:nth-of-type(1)';
+  const fp = fingerprint(body.children[0] as unknown as Element, dom);
+  const r = resolveTarget(dom, sel, fp);
+  ck('twin CONTROL: distinct-text siblings → ok (legitimate targeting preserved)', r.ok && !!r.el, JSON.stringify({ ok: r.ok, reason: r.reason }));
+}
+
+// TWIN-CONTROL id-anchored unique target: an id-anchored selector (no positional
+// parts to flip) is its own flippable set of size 1 → never trips. A unique
+// aside with an id and an identical-twin pair elsewhere must still target.
+{
+  const body = n('body', { children: [
+    n('aside', { attrs: { id: 'sb' }, text: 'Sidebar' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+  ] }); link(body.children, body);
+  const dom = fakeDom(body);
+  const fp = fingerprint(body.children[0] as unknown as Element, dom);
+  const r = resolveTarget(dom, 'aside#sb', fp);
+  ck('twin CONTROL: id-anchored unique target (twins elsewhere) → ok', r.ok && r.el === (body.children[0] as unknown as Element), JSON.stringify({ ok: r.ok, reason: r.reason }));
+}
+
+// EXISTING many-match still intact: a bare selector matching both twins must
+// STILL refuse as 'ambiguous' (not be swallowed by the twin check). The twin
+// check runs only on exactly-one-match; the many-match path is unchanged.
+{
+  const body = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+    n('article', { attrs: { class: 'card' }, text: 'Twin card text' }),
+  ] }); link(body.children, body);
+  const r = resolveTarget(fakeDom(body), 'article', 'fp');
+  ck('twin: bare selector matching both → still ambiguous (many-match intact)', !r.ok && r.reason === 'ambiguous', JSON.stringify({ ok: r.ok, reason: r.reason }));
+}
+
+// ── UNDO-TWIN: the act CREATES a twin; a reorder then reroutes the undo ──
+// (Phase-4 review RUNNER major finding #1 — the undo path's bare fp-verify
+// would PASS on the wrong twin. Fix: applyInverse runs the SAME resolveTarget
+// guard, so the twin check refuses the undo instead of restoring the clone
+// onto the wrong twin.)
+//
+// Sequence:
+//   1. A="A", B="B" (distinct → unique). setText(A, "B"). Now A="B" and B="B":
+//      they are IDENTICAL TWINS (the act itself created the twin).
+//   2. act-fp = fingerprint of the post-mutation A ("B").
+//   3. REORDER so B occupies A's positional selector slot.
+//   4. undo: the selector resolves to B; fingerprint(B="B") == act-fp. A bare
+//      fp-verify would PASS → restore the clone (A's original "orig") onto B →
+//      B corrupted to "orig", and the ACTUALLY-mutated A is left "B" (NOT
+//      restored). The resolveTarget twin check must REFUSE: B has a twin (A,
+//      still "B") in the flippable set → not unique → throw → neither restored.
+{
+  // A and B are distinct BEFORE the act (so the act-time guard passes — the twin
+  // is created by the setText itself, which the act-time guard cannot see).
+  const body = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'A' }),
+    n('article', { attrs: { class: 'card' }, text: 'B' }),
+  ] }); link(body.children, body);
+  const dom = fakeAdapter(body);
+  // Simulate the act: setText(A, 'B') — A now holds 'B', matching B exactly.
+  // The clone holds A's ORIGINAL content ('orig') to restore on undo.
+  const a = body.children[0]; // A (the mutated node)
+  const cloneOfA = n('article', { attrs: { class: 'card' }, text: 'orig' });
+  a.text = 'B'; // the act mutated A's text to 'B' → A and B are now identical twins
+  const actFp = fingerprint(a as unknown as Element, fakeDom(body)); // fp of post-mutation A ("B")
+  const log = new TransactionLog();
+  log.record({ kind: 'setText', target: 'article:nth-of-type(1)',
+    inverse: { kind: 'setText', clone: cloneOfA as unknown as Node, selector: 'article:nth-of-type(1)', fingerprint: actFp } });
+
+  // REORDER: swap so B is now nth-of-type(1) (the selector slot), A is nth-of-type(2).
+  // B holds 'B'; A holds 'B' (mutated). fingerprint(B) == actFp (both 'B').
+  const b = body.children[1];
+  body.children[0] = b; body.children[1] = a; b.parent = body; a.parent = body;
+  // (nth-of-type(1) now resolves to B.)
+
+  const beforeB = b.text; // 'B'
+  let threw = false;
+  try { log.undoAll(dom); } catch { threw = true; } // undoAll wraps per-op; counts failed
+  // The twin check (via resolveTarget in applyInverse) must REFUSE: B has a twin
+  // (A, still 'B') → restore refused → B is NOT corrupted to 'orig'.
+  const afterB = body.children[0].text;
+  ck('undo-twin: act creates a twin, reorder reroutes undo → REFUSE (clone NOT applied to wrong twin)', afterB === beforeB, `before=${beforeB} after=${afterB} (wrong-twin corruption would set after='orig')`);
+  ck('undo-twin: refused undo counts as failed (not silent success)', !threw, 'undoAll must not throw; it counts the refused undo as failed');
+  // And the actually-mutated A is also untouched by the refused undo (still 'B').
+  ck('undo-twin: the actually-mutated node untouched by the refused undo', body.children[1].text === 'B', `A.text=${body.children[1].text}`);
+}
+
+// ── UNDO-TWIN CONTROL: distinct siblings undo normally (no over-refuse) ──
+// A and B are distinct ("A" vs "B"); setText(A, "X") does NOT create a twin
+// (B is still "B", distinct from A="X"). The undo must SUCCEED — the twin
+// check must not refuse a legitimate undo of a uniquely-identified target.
+{
+  const body = n('body', { children: [
+    n('article', { attrs: { class: 'card' }, text: 'X' }), // A, after a setText to 'X'
+    n('article', { attrs: { class: 'card' }, text: 'B' }), // B, distinct
+  ] }); link(body.children, body);
+  const dom = fakeAdapter(body);
+  const a = body.children[0];
+  const clone = n('article', { attrs: { class: 'card' }, text: 'orig' });
+  const actFp = fingerprint(a as unknown as Element, fakeDom(body)); // fp of A='X'
+  const log = new TransactionLog();
+  log.record({ kind: 'setText', target: 'article:nth-of-type(1)',
+    inverse: { kind: 'setText', clone: clone as unknown as Node, selector: 'article:nth-of-type(1)', fingerprint: actFp } });
+  const res = log.undoAll(dom);
+  ck('undo-twin CONTROL: distinct (non-twin) siblings undo normally', res.undone === 1 && body.children[0].text === 'orig', `undone=${res.undone} text=${body.children[0].text}`);
 }
 
 // ── Report ──────────────────────────────────────────────────────────

@@ -3,17 +3,17 @@
     {
       "name": "A:setText mdn",
       "pass": true,
-      "detail": "target=#rvafcvbn9 on1.applied=true off1=MATCH on2.applied=true off2=MATCH"
+      "detail": "target=#rvaxg7jvy on1.applied=true off1=MATCH on2.applied=true off2=MATCH"
     },
     {
       "name": "A:setText wikipedia",
       "pass": true,
-      "detail": "target=#rvaptwoqb on1.applied=true off1=MATCH on2.applied=true off2=MATCH"
+      "detail": "target=#rvalu33s7 on1.applied=true off1=MATCH on2.applied=true off2=MATCH"
     },
     {
       "name": "A:setText hackernews",
       "pass": true,
-      "detail": "target=#rva8ibulv on1.applied=true off1=MATCH on2.applied=true off2=MATCH"
+      "detail": "target=#rvafrjmoq on1.applied=true off1=MATCH on2.applied=true off2=MATCH"
     },
     {
       "name": "B:cssCycle mdn",

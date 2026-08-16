@@ -25,6 +25,8 @@
  *  validateOps in index.ts); setText/insert are the live act tools. */
 export type OpKind = 'remove' | 'move' | 'reorder' | 'wrap' | 'setText' | 'insert';
 
+import { resolveTarget, type IdentityDom } from '../identity.ts';
+
 /** The inverse of one op — exactly enough to undo it. Parent/nextSibling are
  *  resolved by HANDLE at undo time, not by stored Node reference (which goes
  *  stale on framework re-render — the old RC6 bug). Removed nodes (reattach)
@@ -69,6 +71,12 @@ export interface DomAdapter {
    *  setText undo verify (the RC6-class fix — the undo must confirm the element
    *  is STILL the one we mutated before replaceWith(clone)). */
   fingerprintOf(node: Node): string;
+  /** F1 IDENTICAL-TWIN: the IdentityDom view the undo verify uses to run the
+   *  single authoritative identity guard (resolveTarget) — so the undo path
+   *  catches zero/many/wrong-target AND the identical-twin ambiguity through ONE
+   *  decision point, not a second hand-rolled verify. The live adapter returns
+   *  liveIdentityDom; the fake returns the test's fake. */
+  identityDom(): IdentityDom;
   /** setText/insert undo: replace one node with another (clone restore). */
   replaceWith(node: Node, replacement: Node): void;
 }
@@ -170,19 +178,19 @@ export class TransactionLog {
  *  the per-step and all-or-nothing paths can never drift. */
 function applyInverse(inv: OpInverse, dom: DomAdapter): void {
   if (inv.kind === 'setText') {
-    // F1 RC6-class fix: re-resolve + VERIFY before replaceWith(clone). The old
-    // undo keyed by a raw selector and blindly replaced whatever it found —
-    // if a re-render/reorder made the selector resolve to a DIFFERENT node, the
-    // undo would corrupt the wrong element. Verify the current node's structural
-    // fingerprint matches the act-time fingerprint; if not found → throw (the
-    // undoAll/undoLast caller reports it, not silently skips); if the wrong
-    // element → throw (refuse to corrupt it). The clone restore stays exact.
-    const current = dom.querySelector(inv.selector);
-    if (!current) throw new Error(`setText undo: target ${inv.selector} no longer exists (removed/re-rendered) — cannot restore`);
-    if (inv.fingerprint && dom.fingerprintOf(current) !== inv.fingerprint) {
-      throw new Error(`setText undo: ${inv.selector} now resolves to a different element than the one mutated — refusing to restore the clone onto the wrong node`);
+    // F1 RC6-class fix + F1 IDENTICAL-TWIN: run the SAME authoritative identity
+    // guard the act path uses (resolveTarget) at undo time. This is ONE decision
+    // point, not a second hand-rolled verify — so the undo catches zero (target
+    // gone), many (selector now ambiguous), wrong-target (a different element),
+    // AND the identical-twin ambiguity (the selector reroutes to a twin whose
+    // fingerprint == the act-time fingerprint) — refuse to restore the clone
+    // onto the wrong node rather than corrupt it. The clone restore stays exact
+    // on a verified target. expectedFp = inv.fingerprint (the act-time fp).
+    const r = resolveTarget(dom.identityDom(), inv.selector, inv.fingerprint ?? null);
+    if (!r.ok || !r.el) {
+      throw new Error(`setText undo: ${inv.selector} — ${r.error ?? 'identity check failed'} — refusing to restore the clone`);
     }
-    dom.replaceWith(current, inv.clone);
+    dom.replaceWith(r.el, inv.clone);
   } else if (inv.kind === 'insert') {
     // F1 RC6-class fix: the inserted node is still in the DOM (in-session);
     // remove it. If the page removed/re-rendered it away first, the old code

@@ -205,6 +205,174 @@ try {
     await page.close();
   }
 
+  // ── 7. IDENTICAL TWINS — the act path refuses, no mutation, no txn ──
+  // Two genuinely-identical article.cards. describePage would build a positional
+  // selector (article.card:nth-of-type(k)) for one; the other has the same
+  // structural fingerprint. The LIVE act guard must refuse (ok:false) — and the
+  // refusal must leave the DOM UNCHANGED and record NO transaction (the guard
+  // runs before the mutation; this is the safety boundary, not a message swap).
+  // The fixture has a stable anchor on the <main> so buildStableSelector can chain
+  // to each card; the cards are identical text so their fingerprints collide.
+  {
+    const TWIN_FIXTURE = `<!doctype html><html><head><meta charset=utf-8><style>
+      body { margin:0; font:14px/1.4 sans-serif }
+      #main { padding:12px }
+      .card { border:1px solid #ccc; padding:8px; margin:8px 0 }
+    </style></head><body>
+      <main id="main">
+        <h1>Article Title</h1>
+        <article class="card">Twin card text</article>
+        <article class="card">Twin card text</article>
+      </main>
+    </body></html>`;
+    const page = await openFixture(TWIN_FIXTURE);
+    const dp = await describePage(context, page);
+    // Find a targetable card region (describePage registers its identity). The
+    // selector describePage builds is `main#main > article:nth-of-type(k)` — it
+    // does NOT echo the class, so match on the article tag (the twin cards share
+    // a fingerprint; either region's selector is the twin-under-test).
+    const card = (dp.result?.regions ?? []).find((r: any) => r.targetable && r.tag === 'article');
+    ck('7a TWIN setup: a card region is targetable with a selector', !!card?.selector, JSON.stringify(card ?? {}).slice(0, 200));
+    if (card?.selector) {
+      // Capture the live fingerprints of BOTH cards + the flippable-set count for the proof.
+      const probe = await page.evaluate((sel: string) => {
+        const cards = Array.from(document.querySelectorAll('article.card')) as HTMLElement[];
+        // The "flippable set" = the selector with positional pseudo-classes stripped.
+        // For a describePage selector like `main#main > article.card:nth-of-type(k)`,
+        // that is `main#main > article.card` — the set a reorder reroutes through.
+        const stripped = sel.replace(/:nth-(?:of-type|child)\(([^)]*)\)/g, '').replace(/:nth-last-(?:of-type|child)\(([^)]*)\)/g, '')
+          .replace(/:(?:first|last|only)-(?:of-type|child)/g, '');
+        const flippable: string[] = [];
+        try { for (const e of document.querySelectorAll(stripped)) flippable.push((e.textContent || '').trim()); } catch {}
+        return {
+          cardCount: cards.length,
+          fpA: `${cards[0]?.tagName}|${cards[0]?.getAttribute('class')}|t=${(cards[0]?.textContent || '').trim()}`,
+          fpB: `${cards[1]?.tagName}|${cards[1]?.getAttribute('class')}|t=${(cards[1]?.textContent || '').trim()}`,
+          sameText: (cards[0]?.textContent || '').trim() === (cards[1]?.textContent || '').trim(),
+          selector: sel,
+          stripped,
+          flippableCount: flippable.length,
+          flippableTexts: flippable,
+        };
+      }, card.selector);
+      ck('7b TWIN proof: two cards, identical text (a genuine twin pair)',
+        probe.cardCount === 2 && probe.sameText,
+        JSON.stringify(probe));
+      ck('7c TWIN proof: the flippable set (selector stripped of positionals) contains both twins',
+        probe.flippableCount >= 2,
+        JSON.stringify(probe));
+
+      // Read the pre-act display state of both cards.
+      const before = await page.evaluate(() => {
+        const cs = (e: Element) => getComputedStyle(e).display;
+        return Array.from(document.querySelectorAll('article.card')).map(cs);
+      });
+
+      const res = await sendToolCall(context, page, 'hide', { selector: card.selector });
+      ck('7d TWIN ACT: hide on an indistinguishable twin → REFUSES (ok:false)', !res?.ok, JSON.stringify(res).slice(0, 200));
+      ck('7e TWIN ACT: refusal reason is indistinguishable-twin / structurally ambiguous',
+        /indistinguishable|structurally|cannot determine|same structural|identical/i.test(String(res?.error ?? '')),
+        String(res?.error ?? '').slice(0, 200));
+      ck('7f TWIN ACT: refusal does NOT advise nth-of-type',
+        !/\b(add|use|refine|try)[^.]*nth-of-type/i.test(String(res?.error ?? '').replace(/"[^"]*"/g, '')),
+        String(res?.error ?? '').slice(0, 120));
+
+      // CRITICAL — no mutation: the computed display of BOTH cards is unchanged.
+      const after = await page.evaluate(() => {
+        const cs = (e: Element) => getComputedStyle(e).display;
+        return Array.from(document.querySelectorAll('article.card')).map(cs);
+      });
+      ck('7g TWIN SAFETY: neither twin was mutated (display unchanged on both)', JSON.stringify(before) === JSON.stringify(after), `before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+
+      // CRITICAL — no transaction recorded: an undoAll must report size 0 (the
+      // guard refused before recordStructural). hide records no structural op
+      // anyway (CSS inverse), so check the CSS was never inserted: query the
+      // page for any element whose display became 'none' among the cards.
+      const anyHidden = await page.evaluate(() =>
+        Array.from(document.querySelectorAll('article.card')).some((e) => getComputedStyle(e).display === 'none'));
+      ck('7h TWIN SAFETY: no CSS applied (no card is display:none)', !anyHidden, `anyHidden=${anyHidden}`);
+    }
+    await page.close();
+  }
+
+  // ── 8. REORDERED IDENTICAL TWINS — the actual attack, refused end-to-end ──
+  // observe card A (describePage registers A's identity at its positional
+  // selector), REORDER so card B is now at that positional slot, then act using
+  // the ORIGINAL selector. B is now at the selector AND fingerprint(B)==fp(A),
+  // so a bare fp-verify would PASS and mutate B. The twin check must refuse,
+  // and BOTH cards must remain unmutated (B not the wrong twin; A not touched).
+  {
+    const page = await openFixture(`<!doctype html><html><head><meta charset=utf-8><style>
+      body { margin:0; font:14px/1.4 sans-serif }
+      #main { padding:12px }
+      .card { border:1px solid #ccc; padding:8px; margin:8px 0 }
+    </style></head><body>
+      <main id="main">
+        <h1>Article Title</h1>
+        <article class="card">Twin card text</article>
+        <article class="card">Twin card text</article>
+      </main>
+    </body></html>`);
+    const dp1 = await describePage(context, page); // observe → register A's identity
+    const card = (dp1.result?.regions ?? []).find((r: any) => r.targetable && r.tag === 'article');
+    ck('8a REORDER setup: card targetable after first describePage', !!card?.selector, JSON.stringify(card ?? {}).slice(0, 120));
+    if (card?.selector) {
+      const sel = card.selector;
+      // Reorder: swap the two cards so B is now at the positional slot the
+      // selector targets (an SPA reorder of identical items).
+      await page.evaluate(() => {
+        const cards = Array.from(document.querySelectorAll('article.card')) as HTMLElement[];
+        const main = document.getElementById('main')!;
+        const [a, b] = cards;
+        main.insertBefore(b, a); // B now precedes A at the same nth-of-type slot
+      });
+      // Snapshot both cards' display + text before the act.
+      const before = await page.evaluate(() => Array.from(document.querySelectorAll('article.card'))
+        .map((e) => ({ display: getComputedStyle(e).display, text: (e.textContent || '').trim() })));
+
+      const res = await sendToolCall(context, page, 'hide', { selector: sel });
+      ck('8b REORDER ACT: observe A, reorder → B at selector, act → REFUSES (not wrong-twin mutation)', !res?.ok, JSON.stringify(res).slice(0, 200));
+      ck('8c REORDER ACT: refusal reason is indistinguishable-twin',
+        /indistinguishable|structurally|cannot determine|same structural|identical/i.test(String(res?.error ?? '')),
+        String(res?.error ?? '').slice(0, 160));
+
+      // Both cards untouched (B not the wrong twin; A not touched either).
+      const after = await page.evaluate(() => Array.from(document.querySelectorAll('article.card'))
+        .map((e) => ({ display: getComputedStyle(e).display, text: (e.textContent || '').trim() })));
+      ck('8d REORDER SAFETY: neither card mutated (display+text unchanged)', JSON.stringify(before) === JSON.stringify(after), `before=${JSON.stringify(before)} after=${JSON.stringify(after)}`);
+    }
+    await page.close();
+  }
+
+  // ── 9. CONTROL: distinct siblings still act (the rule must not over-refuse) ──
+  // Two cards that differ in text are NOT twins (distinct fingerprints). A hide
+  // on one must SUCCEED — the new safety rule does not destroy legitimate targeting.
+  {
+    const page = await openFixture(`<!doctype html><html><head><meta charset=utf-8><style>
+      body { margin:0; font:14px/1.4 sans-serif }
+      #main { padding:12px }
+      .card { border:1px solid #ccc; padding:8px; margin:8px 0 }
+    </style></head><body>
+      <main id="main">
+        <h1>Article Title</h1>
+        <article class="card">First card unique text AAA</article>
+        <article class="card">Second card unique text BBB</article>
+      </main>
+    </body></html>`);
+    const dp = await describePage(context, page);
+    const card = (dp.result?.regions ?? []).find((r: any) => r.targetable && r.tag === 'article' && /AAA/.test(r.textSample ?? ''));
+    ck('9a CONTROL setup: distinct card is targetable', !!card?.selector, JSON.stringify(card ?? {}).slice(0, 140));
+    if (card?.selector) {
+      const res = await sendToolCall(context, page, 'hide', { selector: card.selector });
+      ck('9b CONTROL: hide on a distinct (non-twin) card → ok:true (legitimate targeting preserved)', !!res?.ok, JSON.stringify(res).slice(0, 160));
+      // And confirm the OTHER card is untouched (only the named one hidden).
+      const states = await page.evaluate(() => Array.from(document.querySelectorAll('article.card'))
+        .map((e) => getComputedStyle(e).display));
+      ck('9c CONTROL: only the named card hidden, the other visible', states.includes('none') && states.filter((s: string) => s !== 'none').length >= 1, JSON.stringify(states));
+    }
+    await page.close();
+  }
+
   // ── 6. UNTARGETABLE REASON: a region with no stable anchor surfaces the reason ──
   {
     // A fixture with regions that have NO stable anchor (no id/data-testid/role/

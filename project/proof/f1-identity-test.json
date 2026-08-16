@@ -33,12 +33,12 @@
     {
       "name": "fingerprint: style change does NOT change identity",
       "pass": true,
-      "detail": "aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d76 vs aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d76"
+      "detail": "aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d767 vs aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d767"
     },
     {
       "name": "fingerprint: data-rv-* stamp does NOT change identity",
       "pass": true,
-      "detail": "aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d76 vs aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d76"
+      "detail": "aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d767 vs aside|class=nav,id=sb|c0|d0|Sidebar|a2e5d767"
     },
     {
       "name": "fingerprint: deterministic for identical structure",
@@ -53,7 +53,7 @@
     {
       "name": "fingerprint: distinguishes siblings sharing a 40-char text prefix (boilerplate collision)",
       "pass": true,
-      "detail": "fa=a|class=card-link|c0|d0|Read more about this product and its ama|95acc7d fb=a|class=card-link|c0|d0|Read more about this product and its ama|3bf969e"
+      "detail": "fa=a|class=card-link|c0|d0|Read more about this product and its ama|95acc7d5 fb=a|class=card-link|c0|d0|Read more about this product and its ama|3bf969e5"
     },
     {
       "name": "fingerprint: distinguishes structure-differing siblings",
@@ -89,6 +89,76 @@
       "name": "undo insert CONTROL: present node → removed exactly",
       "pass": true,
       "detail": "children=0"
+    },
+    {
+      "name": "twin: identical siblings → refuse (reason indistinguishable-twin)",
+      "pass": true,
+      "detail": "{\"ok\":false,\"reason\":\"indistinguishable-twin\"}"
+    },
+    {
+      "name": "twin: refusal error names an anchor/parent alternative, does NOT advise nth-of-type",
+      "pass": true,
+      "detail": "target \"article:nth-of-type(1)\" is structurally indistinguishable from another element (identical tag, attributes, text, and children). Revueon cannot determine which one you mean, so it refuses to ch"
+    },
+    {
+      "name": "twin-reorder: observe A, reorder → B at selector, fp(B)==fp(A) → REFUSE (not accidental pass)",
+      "pass": true,
+      "detail": "{\"ok\":false,\"reason\":\"indistinguishable-twin\"}"
+    },
+    {
+      "name": "twin-reorder-formula: observe A, reorder → B at selector (-n+1 == first-of-type), fp(B)==fp(A) → REFUSE (stripPositional must strip an+b forms, not just \\d+)",
+      "pass": true,
+      "detail": "{\"ok\":false,\"reason\":\"indistinguishable-twin\"}"
+    },
+    {
+      "name": "twin-reorder-formula: unverified path (no fp) with -n+1 on a twin also refuses (no formula bypass via unverified)",
+      "pass": true,
+      "detail": "{\"ok\":false,\"reason\":\"indistinguishable-twin\"}"
+    },
+    {
+      "name": "twin-reorder-formula: nth-last-of-type(-n+1) (== last-of-type) twin also refuses",
+      "pass": true,
+      "detail": "{\"ok\":false,\"reason\":\"indistinguishable-twin\"}"
+    },
+    {
+      "name": "twin: unverified path (no fp) on a twin also refuses (no twin bypass via unverified)",
+      "pass": true,
+      "detail": "{\"ok\":false,\"reason\":\"indistinguishable-twin\"}"
+    },
+    {
+      "name": "twin CONTROL: distinct-text siblings → ok (legitimate targeting preserved)",
+      "pass": true,
+      "detail": "{\"ok\":true}"
+    },
+    {
+      "name": "twin CONTROL: id-anchored unique target (twins elsewhere) → ok",
+      "pass": true,
+      "detail": "{\"ok\":true}"
+    },
+    {
+      "name": "twin: bare selector matching both → still ambiguous (many-match intact)",
+      "pass": true,
+      "detail": "{\"ok\":false,\"reason\":\"ambiguous\"}"
+    },
+    {
+      "name": "undo-twin: act creates a twin, reorder reroutes undo → REFUSE (clone NOT applied to wrong twin)",
+      "pass": true,
+      "detail": "before=B after=B (wrong-twin corruption would set after='orig')"
+    },
+    {
+      "name": "undo-twin: refused undo counts as failed (not silent success)",
+      "pass": true,
+      "detail": "undoAll must not throw; it counts the refused undo as failed"
+    },
+    {
+      "name": "undo-twin: the actually-mutated node untouched by the refused undo",
+      "pass": true,
+      "detail": "A.text=B"
+    },
+    {
+      "name": "undo-twin CONTROL: distinct (non-twin) siblings undo normally",
+      "pass": true,
+      "detail": "undone=1 text=orig"
     }
   ],
   "pass": true

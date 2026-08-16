@@ -11,6 +11,7 @@
 import assert from 'node:assert/strict';
 import { TransactionLog, type DomAdapter } from '../src/core/ops/txn.ts';
 import { validateOps, REMOVE_EMPTINESS_FLOOR } from '../src/core/ops/index.ts';
+import type { IdentityDom } from '../src/core/identity.ts';
 import type { Perception, Cluster, ClusterLayout, ClusterStyle } from '../src/core/perceive/index.ts';
 
 // ── fake DOM ────────────────────────────────────────────────────────
@@ -102,6 +103,38 @@ function fakeDom(root: FakeNode): DomAdapter {
       n.parent.children[i] = r;
       r.parent = n.parent;
       n.parent = null;
+    },
+    // F1 IDENTICAL-TWIN: an IdentityDom view over the same fake tree, so the undo
+    // verify (resolveTarget via applyInverse) works in the pure test. Supplies only
+    // what resolveTarget/isUniqueInFlippableSet read: querySelectorAll (ALL bare-tag
+    // matches, not first), parent, fingerprintOfRef (reuses fingerprintOf), and
+    // attrs (for the [data-revueon-inserted] exclusion).
+    identityDom() {
+      const findAll = (sel: string): FakeNode[] => {
+        const out: FakeNode[] = [];
+        const m = sel.match(/data-rv-c="([^"]+)"/);
+        if (m) { const h = findByHandle(m[1]); return h ? [h] : []; }
+        const dfs = (n: FakeNode) => {
+          if (n.tag === sel) out.push(n);
+          for (const c of n.children) dfs(c);
+        };
+        dfs(root);
+        return out;
+      };
+      return {
+        querySelectorAll: (sel) => findAll(sel) as unknown as Element[],
+        tagName: (el) => (el as unknown as FakeNode).tag,
+        attrs: (el) => (el as unknown as FakeNode).inserted ? [['data-revueon-inserted', '']] : [],
+        text: (el) => (el as unknown as FakeNode).text ?? '',
+        childElementCount: (el) => (el as unknown as FakeNode).children.length,
+        depthFromRoot: (el) => { let d = 0, n = el as unknown as FakeNode; while (n.parent) { n = n.parent; d++; } return d; },
+        parent: (el) => (el as unknown as FakeNode).parent as unknown as Element | null,
+        fingerprintOfRef: (el) => {
+          const n = el as unknown as FakeNode;
+          const text = (n.text ?? '').replace(/\s+/g, ' ').trim().slice(0, 40);
+          return `${n.tag}|c${n.children.length}|${text}`;
+        },
+      } satisfies IdentityDom;
     },
     // helper for setText/insert test scaffolding (not in DomAdapter): resolve a CSS selector.
   };

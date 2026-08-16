@@ -53,6 +53,10 @@ export interface IdentityDom {
   childElementCount(el: Element): number;
   depthFromRoot(el: Element): number;
   parent(el: Element): Element | null;
+  /** F1 IDENTICAL-TWIN: the fingerprint of a live element, used to count twins
+   *  in the flippable set. Delegates to fingerprint(el, dom) so the adapter stays
+   *  a thin shim (the real one and the fake both supply it via fingerprint). */
+  fingerprintOfRef(el: Element): Fingerprint;
 }
 
 /** Capture a structural fingerprint of an element.
@@ -87,26 +91,34 @@ function norm(s: string): string {
   return s.replace(/\s+/g, ' ').trim();
 }
 
-/** A tiny deterministic hash (FNV-1a, 30-bit) as ~7 hex chars. Used so two
+/** A tiny deterministic hash (FNV-1a, 32-bit) as 8 hex chars. Used so two
  *  elements whose normalized text shares the 40-char prefix but differs
  *  anywhere beyond it still get distinct fingerprints. Pure, no dependency,
- *  deterministic for the same input string. */
+ *  deterministic for the same input string. Uses the full 32-bit result: a
+ *  prior .slice(0,7) dropped the top nibble to ~28 effective bits, and for
+ *  text-only siblings that share the 40-char prefix this hash is the ONLY
+ *  discriminator — so ~28 bits made a real (if rare) collision plausible
+ *  (≈C(k,2)·2^-28 per page), producing a false twin-negative (two genuinely
+ *  distinct siblings treated as identical twins → resolveTarget refuses a
+ *  legit target) with no truncated:true signal. Keep all 8 hex chars (32
+ *  bits): the cost is one char, the collision space is 16× larger. */
 function shortHash(s: string): string {
   let h = 0x811c9dc5;
   for (let i = 0; i < s.length; i++) {
     h ^= s.charCodeAt(i);
-    // h *= 0x01000193, keeping it a 30-bit integer via Math.imul + mask.
+    // h *= 0x01000193 (FNV-1a prime), kept a 32-bit unsigned int via >>> 0.
     h = Math.imul(h, 0x01000193) >>> 0;
   }
-  return h.toString(16).padStart(7, '0').slice(0, 7);
+  return h.toString(16).padStart(8, '0');
 }
 
 /** Why a target failed to resolve — surfaced to the model (rule 13). */
 export type ResolveReason =
-  | 'zero'        // selector matched nothing
-  | 'ambiguous'    // selector matched >1 element (not an identity)
-  | 'wrong-target' // the matched element's fingerprint differs (a different element)
-  | 'unverified';  // exactly one match but no observe-time fingerprint (model used a selector describePage never returned)
+  | 'zero'                 // selector matched nothing
+  | 'ambiguous'            // selector matched >1 element (not an identity)
+  | 'wrong-target'         // the matched element's fingerprint differs (a different element)
+  | 'indistinguishable-twin' // the resolved element has an identical structural fingerprint elsewhere in the set a sibling/div reorder could route the selector to — F1 cannot tell which physical element is intended
+  | 'unverified';          // exactly one match but no observe-time fingerprint (model used a selector describePage never returned)
 
 export interface ResolveResult {
   ok: boolean;
@@ -151,17 +163,110 @@ export function resolveTarget(
     return { ok: false, reason: 'ambiguous', matched,
       error: `selector "${selector}" matched ${matched} elements — that is not a unique identity. Refine the selector with a stable anchor (id, data-testid, role) or a parent that uniquely contains the target. If the matches are structurally identical twins (same tag, attrs, text), no selector can distinguish them — ask the user which one, or target a parent that uniquely contains it. Call describePage to see the regions and their selectors.` };
   }
-  // Exactly one match. If we have an observe-time fingerprint, verify identity.
+  // Exactly one match. Compute the live fingerprint ONCE — it is used for both
+  // the observe-time verify (if we have one) and the identical-twin check below.
   const el = live[0] as HTMLElement;
+  const liveFp = fingerprint(el, dom);
+
+  // F1 IDENTICAL-TWIN fail-closed: run BEFORE the observe-time verify and before
+  // the unverified branch, so the twin ambiguity is caught in BOTH paths. If
+  // another element in the set a sibling/div reorder could route this selector
+  // to has the SAME fingerprint, identity is genuinely ambiguous — F1 cannot
+  // tell which physical element is intended (Phase-4 review finding; the reorder
+  // case is the attack). Refuse rather than mutate either. This runs on the
+  // UNVERIFIED path too: otherwise `unverified` would be the twin bypass.
+  if (!isUniqueInFlippableSet(el, liveFp, selector, dom)) {
+    return { ok: false, reason: 'indistinguishable-twin', matched: 1,
+      error: `target "${selector}" is structurally indistinguishable from another element (identical tag, attributes, text, and children). Revueon cannot determine which one you mean, so it refuses to change either. Give the target a stable distinguishing anchor (a unique id, data-testid, role, or aria-label) or target a parent that uniquely contains the one you want, then call describePage and retry.` };
+  }
+
   if (!expectedFp) {
     // No prior observe for this selector: a unique target, but unverified. Mutate
     // (single element is not wrong by construction), flagged unverified.
     return { ok: true, el, reason: 'unverified', matched: 1 };
   }
-  const liveFp = fingerprint(el, dom);
   if (liveFp !== expectedFp) {
     return { ok: false, reason: 'wrong-target', matched: 1,
       error: `selector "${selector}" now resolves to a different element than the one describePage described (structure changed). Call describePage again to get the current selector for that region, then retry.` };
   }
   return { ok: true, el };
+}
+
+/** Strip the positional pseudo-classes (`:nth-of-type(k)`, `:nth-child(k)`,
+ *  `:first|last|only-of-type|-child`) from a selector. These are the ONLY parts
+ *  that can silently reroute to a different physical element under a sibling/div
+ *  reorder — the identical-twin attack. What remains ("the flippable set") is the
+ *  set of elements the selector could resolve to AFTER a reorder of equivalent
+ *  structure: an id-anchored descendant chain (e.g. `main#main > article`), a
+ *  role-anchored chain, or — for a bare positional selector — the bare tag. A
+ *  bare selector matching one element (e.g. `aside#sb`) relaxes to itself and is
+ *  its own flippable set of size 1 → never trips. Returns '' if the selector is
+ *  ONLY positional (a bare `:nth-of-type(k)` with no compound) — in that case the
+ *  bare tag must be derived from the element instead (caller falls back to tag). */
+function stripPositional(sel: string): string {
+  // Comma lists: relax each part and re-join. (A twin in any part's flippable set
+  // is reachable by a reorder through that part, so each part is relaxed on its own.)
+  const relaxed = sel.split(',').map((raw) => {
+    let s = raw.trim();
+    s = s.replace(/:nth-of-type\(([^)]*)\)/g, '');
+    s = s.replace(/:nth-child\(([^)]*)\)/g, '');
+    s = s.replace(/:nth-last-of-type\(([^)]*)\)/g, '');
+    s = s.replace(/:nth-last-child\(([^)]*)\)/g, '');
+    s = s.replace(/:first-of-type/g, '');
+    s = s.replace(/:last-of-type/g, '');
+    s = s.replace(/:only-of-type/g, '');
+    s = s.replace(/:first-child/g, '');
+    s = s.replace(/:last-child/g, '');
+    s = s.replace(/:only-child/g, '');
+    return s.replace(/\s+/g, ' ').trim();
+  }).filter((s) => s.length > 0);
+  return relaxed.length > 0 ? relaxed.join(',') : '';
+}
+
+/** Is `el` uniquely identifiable by its fingerprint within the set of elements a
+ *  reorder of equivalent structure could route its selector to? The flippable set
+ *  is the selector with positional pseudo-classes stripped (the parts a reorder
+ *  re-routes). If another element in that set shares `el`'s fingerprint, identity
+ *  is genuinely ambiguous → NOT unique. Excludes elements we may have inserted
+ *  (`[data-revueon-inserted]`) and our `[data-rv-c]` stamps are already
+ *  fingerprint-agnostic, so a twin set never counts our own nodes. */
+function isUniqueInFlippableSet(
+  el: Element, elFp: Fingerprint, selector: string, dom: IdentityDom,
+): boolean {
+  let flippableSel = stripPositional(selector);
+  // A selector that was ONLY positional (bare :nth-of-type(k)) has nothing left
+  // to relax to. Derive the flippable set from the element itself: its same-tag
+  // siblings — the set a reorder routes through. (buildStableSelector always
+  // emits an anchored chain, so this branch is defensive, not the common path.)
+  let flippable: Element[];
+  if (flippableSel) {
+    try { flippable = dom.querySelectorAll(flippableSel); }
+    catch { return false; } // malformed relaxed selector (e.g. a bare positional that was the right-hand compound of a combinator relaxes to a dangling combinator): a parse quirk is exactly when 'unique' is unsafe — fail-closed
+  } else {
+    const p = dom.parent(el);
+    if (!p) return true; // no parent: the root element; nothing to flip to
+    flippable = dom.querySelectorAll('*').filter((e) => dom.parent(e) === p);
+  }
+  // Count how many elements in the flippable set share el's fingerprint. A twin
+  // (a distinct element with the same fp) means a reorder reroutes the selector
+  // to it with an identical fp → the guard would verify the wrong twin. Exclude
+  // our own inserted nodes (they are not user content and never a legit twin).
+  let twinCount = 0;
+  for (const e of flippable) {
+    if (isOurInsertedNode(e, dom)) continue;
+    if (dom.fingerprintOfRef(e) === elFp) twinCount++;
+  }
+  // Fail-closed when the flippable set is empty: a relaxed selector that matched
+  // nothing (e.g. a bare positional that was the right-hand compound of a
+  // combinator relaxes to a dangling combinator, which the live adapter swallows
+  // to []) could not be evaluated — identity is uncertain, so refuse rather than
+  // assume unique (twinCount 0 would otherwise read as 'no twin' → false-unique,
+  // bypassing the guard for the exact reorder attack it exists to stop).
+  return flippable.length > 0 && twinCount <= 1;
+}
+
+/** Our own inserted nodes (carry [data-revueon-inserted]) are not user content
+ *  and never a legitimate twin. Read via attrs so it works on the fake DOM too. */
+function isOurInsertedNode(el: Element, dom: IdentityDom): boolean {
+  return dom.attrs(el).some(([k]) => k === 'data-revueon-inserted');
 }

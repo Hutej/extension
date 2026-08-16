@@ -1,0 +1,172 @@
+{
+  "_doc": "F1 IDENTICAL-TWIN fail-closed patch — REAL execution proof. Every field below is derived from actual test runs (tests/f1-identity-test.ts pure, tests/f1-identity-browser-test.ts real Chromium), not hand-rolled expectations. No fake PASS: the refusal, mutation count, and final DOM state were read back from the live browser after the act.",
+  "patch": "indistinguishable-twin fail-closed in core/identity.ts resolveTarget",
+  "invariant": "A target is actionable only if its structural fingerprint is UNIQUE within the set a sibling/div reorder could route the selector to. If not unique → refuse (ok:false, reason 'indistinguishable-twin'), mutate neither, record no inverse.",
+  "date": "2026-08-16",
+  "model": "cf/@cf/zai-org/glm-5.2",
+
+  "fixture": {
+    "html": "<main id=\"main\"><h1>Article Title</h1><article class=\"card\">Twin card text</article><article class=\"card\">Twin card text</article></main>",
+    "note": "Two genuinely-identical <article class=\"card\"> siblings — same tag, same class, same child structure, same text. A structural fingerprint cannot distinguish them."
+  },
+
+  "initialTarget": {
+    "describePageSelector": "main#main > article:nth-of-type(1)",
+    "howDerived": "buildStableSelector (core/inventory.ts) chains the card from the main#main anchor via :nth-of-type(1). Verified real: tests/f1-identity-browser-test.json case 7a returned exactly this selector.",
+    "regionId": "r2",
+    "repeatCount": 2
+  },
+
+  "fingerprintValues": {
+    "note": "The browser probe read both cards' tag|class|text directly. They are identical (the twin condition). The full structural fingerprint (identity.ts: tag|attrs|c|d|text(40)|shortHash) is identical for both because text, attrs, childCount, depth are all identical.",
+    "cardA": "ARTICLE|card|t=Twin card text",
+    "cardB": "ARTICLE|card|t=Twin card text",
+    "identicalText": true,
+    "fullFingerprintIdentical": true
+  },
+
+  "duplicateCount": {
+    "flippableSetSelector": "main#main > article",
+    "howDerived": "stripPositional('main#main > article:nth-of-type(1)') removes :nth-of-type(1). The relaxed selector is the set a sibling reorder could route the original selector to.",
+    "flippableSetSize": 2,
+    "flippableSetTexts": ["Twin card text", "Twin card text"],
+    "twinCount_includingTarget": 2,
+    "twinCount_excludingTarget": 1,
+    "decision": "twinCount > 1 → NOT unique → refuse"
+  },
+
+  "reorderOperation": {
+    "applied": "observe card A via describePage (registers identity at selector), then DOM reorder: main.insertBefore(B, A) so B is now first — B occupies the nth-of-type(1) slot the original selector targets.",
+    "afterReorder": "card B is at main#main > article:nth-of-type(1); card A is now nth-of-type(2). fingerprint(B) === fingerprint(A) (identical).",
+    "attackWithoutPatch": "a bare fingerprint-verify would PASS (B has A's fingerprint) and mutate the WRONG twin (B)."
+  },
+
+  "resolutionResult": {
+    "case_twinRefuse": {
+      "selector": "main#main > article:nth-of-type(1)",
+      "expectedFingerprint": "fingerprint of card A (observed)",
+      "ok": false,
+      "reason": "indistinguishable-twin",
+      "error": "target \"main#main > article:nth-of-type(1)\" is structurally indistinguishable from another element (identical tag, attributes, text, and children). Revueon cannot determine which one you mean, so it refuses to change either. Give the target a stable distinguishing anchor (a unique id, data-testid, role, or aria-label) or target a parent that uniquely contains the one you want, then call describePage and retry."
+    },
+    "case_reorderRefuse": {
+      "selector": "main#main > article:nth-of-type(1)",
+      "expectedFingerprint": "fingerprint of card A (observed before reorder)",
+      "afterReorder": "card B at the selector slot, fingerprint(B)==fingerprint(A)",
+      "ok": false,
+      "reason": "indistinguishable-twin",
+      "note": "The twin check fires on the post-reorder tree regardless of the observe-time fingerprint — identity is genuinely ambiguous, so the act is refused. This is the exact attack the patch prevents."
+    }
+  },
+
+  "refusalReason": {
+    "reason": "indistinguishable-twin",
+    "surfacedToModel": true,
+    "advisesNthOfType": false,
+    "namesAlternative": "stable distinguishing anchor (id/data-testid/role/aria-label) or a parent that uniquely contains it",
+    "rule13": "the error names an alternative recovery path, not a bare 'target not found'"
+  },
+
+  "mutationCount": {
+    "twinRefuse_displayChanged": 0,
+    "evidence": "tests/f1-identity-browser-test.json case 7g: before=[\"block\",\"block\"] after=[\"block\",\"block\"] — neither twin's computed display changed.",
+    "reorderRefuse_displayOrTextChanged": 0,
+    "evidenceReorder": "case 8d: before=[{display:block,text:'Twin card text'},{display:block,text:'Twin card text'}] after=identical — neither card mutated."
+  },
+
+  "transactionCount": {
+    "structuralEntriesRecordedAfterRefusedAct": 0,
+    "evidence": "case 7h: anyHidden=false — no CSS sheet was inserted (hide's CSS would set display:none; neither card is display:none). guardTarget refused before emitAndInsert/recordStructural, so no inverse and no structural entry.",
+    "note": "The guard runs BEFORE the mutation (act.ts guardTarget short-circuits the tool). On refusal the tool returns g.result before any sendInsertCSS / el.textContent= / insertAdjacentElement / recordStructural call. This is the safety boundary, not a message swap."
+  },
+
+  "finalDomState": {
+    "twinRefuse": "both cards remain <article class=\"card\">Twin card text</article>, display:block, no display:none, no inserted nodes, no data-rv stamps.",
+    "reorderRefuse": "both cards present, unchanged text, unchanged display. The reorder (B before A) persists; no act reversed or extended it."
+  },
+
+  "controls": {
+    "distinctSiblingsAct": {
+      "fixture": "<article class=\"card\">First card unique text AAA</article><article class=\"card\">Second card unique text BBB</article>",
+      "result": "ok:true (the named card hidden, the other visible)",
+      "evidence": "case 9b/9c — distinct-text siblings are NOT twins (distinct fingerprints), so legitimate targeting is preserved. The rule does not over-refuse.",
+      "purpose": "acceptance criterion 8: legitimately distinguishable elements still work."
+    },
+    "idAnchoredUniqueWithTwinsElsewhere": {
+      "fixture": "<aside id=\"sb\">Sidebar</aside> + two twin cards",
+      "result": "ok:true (aside#sb targeted)",
+      "evidence": "pure test 'twin CONTROL: id-anchored unique target' — an id-anchored selector is its own flippable set of size 1, never trips on twins elsewhere.",
+      "purpose": "the scope (flippable set) is correct, not whole-document."
+    },
+    "existingManyMatch": {
+      "fixture": "bare 'article' matching both twins",
+      "result": "ok:false, reason 'ambiguous'",
+      "evidence": "pure test 'bare selector matching both → still ambiguous' — the many-match path is unchanged; the twin check runs only on exactly-one-match.",
+      "purpose": "acceptance criterion 7: existing zero/many refusal intact."
+    },
+    "existingWrongTarget": {
+      "evidence": "pure test wrong-target cases still pass — the fingerprint compare (now after the twin check) still refuses a re-rendered element whose fingerprint differs.",
+      "purpose": "no regression to the verified wrong-target path."
+    }
+  },
+
+  "testResults": {
+    "pureUnit_f1-identity-test": "32/32 passed (tests/f1-identity-test.json; was 18 baseline + 14 twin/undo/formula cases)",
+    "liveBrowser_f1-identity-browser-test": "32/32 passed on real Chromium (tests/f1-identity-browser-test.json)",
+    "regression": "ops.test 5/5, classify-checklayout 8/8, parse-extract (4+8), budget-reserve, check-layout-hard 5/5, resize-gate 4/4, phase2.5-review-regression 9/9, assert-dom-clean-blindspots, f1-selector-stability PROVEN — all green, typecheck clean, audit-wiring OK."
+  },
+
+  "scopeDecision": {
+    "whatIsAStructuralTwin": "another element in the set a sibling/div reorder could route the selector to (the 'flippable set' = selector with positional pseudo-classes :nth-of-type/:nth-child/:first|last|only-* stripped) that shares the resolved element's full structural fingerprint.",
+    "whyNotSameParent": "a same-parent check would UNDER-refuse: a deeper <div> reorder reroutes an anchored chain's :nth-of-type(k) part (e.g. adding/removing a <section> shifts the count). The relaxed-selector scope catches that deeper reorder.",
+    "whyNotWholeDocument": "a whole-document check would OVER-refuse: an id-anchored main#main > article:nth-of-type(1) relaxes to main#main > article, excluding a fingerprint-twin in #footer that the anchored selector could never route to.",
+    "whyRelaxedSelector": "it is the one scope that is both sound (catches sibling AND div reorders) and precise (excludes unreachable cross-subtree twins). This resolved the scope question without asking — it is not genuinely ambiguous once the architecture is read.",
+    "noNthOfTypeIndex": "no 1-based index, no DOM-order identity, no nth-of-type as persistent identity, no stamped attribute, no UUID — the policy is refuse-when-not-unique, period."
+  },
+
+  "outOfScope": {
+    "phase5_f4_continuity": "NOT touched. No persisted fingerprints, no replay fingerprints, no SPA persistence, no origin/path persistence, no first-paint replay.",
+    "parseDeath_wall": "NOT touched. No parse retries, no model-JSON reliability, no budget-exhaustion work, no Cloudflare changes.",
+    "newDisambiguator": "NOT built. No twin index, no coordinate identity, no model-named distinguishing feature. The fix is refuse-only.",
+    "otherF1": "secondary CSS selector guarding, chain-depth redesign, confidence-model — NOT changed (unless the review found a directly-required one)."
+  },
+
+  "honestLimitation": "A structural fingerprint CANNOT distinguish two genuinely-identical siblings — that is irreducible. This patch does NOT claim to make them distinguishable; it makes Revueon REFUSE to act when the current identity evidence cannot determine which physical element is intended, rather than guessing (pick-first / trust nth-of-type). The correct claim: when the current identity evidence cannot distinguish the target from an identical twin, Revueon now refuses to act rather than guessing.",
+
+  "undoTwinFix": {
+    "finding": "#1 RUNNER major — the undo verify (applyInverse setText) did a bare querySelector + fingerprint compare with NO twin check. The act itself can CREATE a twin (setText A->'B' makes A and B identical); a reorder reroutes the undo to B (fp(B)==act-fp) -> bare verify PASSES -> clone restores onto the WRONG twin (B corrupted; the mutated A left unrestored).",
+    "fix": "applyInverse (core/ops/txn.ts) now runs the SAME resolveTarget guard via a new DomAdapter.identityDom() accessor — one authoritative identity decision for both the act and undo paths, catching zero/many/wrong-target AND twin. A refused undo throws (counted failed); the clone is NOT applied.",
+    "proof_pure": "tests/f1-identity-test.ts undo-twin case: before='B' after='B' (clone NOT applied; wrong-twin corruption would set after='orig'); refused undo counts failed; the mutated node untouched. Control: distinct (non-twin) siblings undo normally (undone=1, text='orig').",
+    "scopeRuling": "The verifier left this stillBroken. I assessed it as in-scope: the invariant 'a target is actionable only if identity can establish uniqueness' must hold on the undo path too (acceptance criteria 3 & 5), and the spec permits fixes 'directly necessary to make the identical-twin fail-closed invariant actually work.' It reuses the one guard, adds no second system, no persistence, no parse-death work."
+  },
+
+  "adversarialReview": {
+    "dimensions": "RUNNER / SKEPTIC / ARITHMETIC (3 reviewers + 5 verifiers + synthesis, against the real code)",
+    "findingsRaised": 6,
+    "findingsConfirmed": 5,
+    "resolved": [
+      { "n": 1, "dim": "runner", "sev": "major", "title": "undo verify skipped the twin check (act creates a twin, reorder reroutes undo to wrong twin)", "fix": "applyInverse uses resolveTarget via DomAdapter.identityDom() — one guard for act+undo", "status": "FIXED (by me; verifier had declined)" },
+      { "n": 2, "dim": "runner", "sev": "minor", "title": "hide healing CSS selectors bypassed guardTarget (reorder reroutes a positional healing selector onto wrong twin via cascade)", "fix": "hide parses the full sheet, guards every comma-part via guardTarget, drops any healing rule whose selector refuses (keeps the guarded primary hide)", "status": "FIXED (by verifier)" },
+      { "n": 3, "dim": "skeptic", "sev": "major", "title": "stripPositional missed formula positionals (-n+1, 0n+1, 2n+1, odd, even, nth-last) -> flippable set collapsed to size 1 -> wrong twin mutated", "fix": "regexes now use \\(([^)]*)\\) to strip every an+b form", "status": "FIXED (by verifier, +3 rule-15 formula twin tests)" },
+      { "n": 4, "dim": "arithmetic", "sev": "major", "title": "dangling-combinator relaxed selector throws -> live adapter swallowed -> twin guard bypassed (false-unique)", "fix": "malformed-selector branch now fails closed (returns false) instead of fail-open true", "status": "FIXED (by verifier)" },
+      { "n": 5, "dim": "arithmetic", "sev": "minor", "title": "FNV-1a hash truncated to ~28 bits -> false twin-negative on boilerplate siblings (no truncated signal)", "fix": "keep all 8 hex chars (full 32-bit FNV-1a) — 16x larger collision space, one-char cost", "status": "FIXED (by verifier)" }
+    ],
+    "refuted": "none — every confirmed finding survived verification.",
+    "stillBroken": "none after fixes — all 5 confirmed findings resolved. The full suite is green: typecheck 0 errors; f1-identity-test 32/32; f1-identity-browser-test 32/32; ops.test 5/5; classify-checklayout 8/8; parse-extract; budget-reserve; check-layout-hard 5/5; resize-gate 4/4; phase2.5-review-regression 9/9; assert-dom-clean-blindspots; f1-selector-stability PROVEN; audit-wiring OK; audit-env OK; build clean."
+  },
+
+  "acceptanceCriteria": {
+    "1_genuineTwinsDetected": true,
+    "2_refusesMutateTwin": true,
+    "3_reorderCannotRedirect": true,
+    "4_realActPathRespectsRefusal": true,
+    "5_noMutationAfterRefusal": true,
+    "6_noInverseRecordedWhenNoMutation": true,
+    "7_zeroAndManyRefusalIntact": true,
+    "8_distinguishableElementsStillWork": true,
+    "9_reasonExplicitActionable": true,
+    "10_noNthOfTypeIndexGuessing": true,
+    "11_noSecondIdentitySystem": true,
+    "12_noPhase5Functionality": true
+  }
+}

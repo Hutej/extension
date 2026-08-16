@@ -76,6 +76,81 @@
       "detail": "{\"ok\":true,\"result\":{\"chars\":211,\"css\":\"aside#sb {\\n  display: none !important;\\n}\\np#c1 {\\n  border-top-width: medium !important;\\n  border-top-style: none !im"
     },
     {
+      "name": "7a TWIN setup: a card region is targetable with a selector",
+      "pass": true,
+      "detail": "{\"id\":\"r2\",\"role\":\"article\",\"type\":\"unknown\",\"tag\":\"article\",\"textSample\":\"Twin card text\",\"position\":\"top\",\"width\":\"full\",\"repeat\":2,\"selector\":\"main#main > article:nth-of-type(1)\",\"targetable\":true}"
+    },
+    {
+      "name": "7b TWIN proof: two cards, identical text (a genuine twin pair)",
+      "pass": true,
+      "detail": "{\"cardCount\":2,\"fpA\":\"ARTICLE|card|t=Twin card text\",\"fpB\":\"ARTICLE|card|t=Twin card text\",\"sameText\":true,\"selector\":\"main#main > article:nth-of-type(1)\",\"stripped\":\"main#main > article\",\"flippableCount\":2,\"flippableTexts\":[\"Twin card text\",\"Twin card text\"]}"
+    },
+    {
+      "name": "7c TWIN proof: the flippable set (selector stripped of positionals) contains both twins",
+      "pass": true,
+      "detail": "{\"cardCount\":2,\"fpA\":\"ARTICLE|card|t=Twin card text\",\"fpB\":\"ARTICLE|card|t=Twin card text\",\"sameText\":true,\"selector\":\"main#main > article:nth-of-type(1)\",\"stripped\":\"main#main > article\",\"flippableCount\":2,\"flippableTexts\":[\"Twin card text\",\"Twin card text\"]}"
+    },
+    {
+      "name": "7d TWIN ACT: hide on an indistinguishable twin → REFUSES (ok:false)",
+      "pass": true,
+      "detail": "{\"ok\":false,\"error\":\"target \\\"main#main > article:nth-of-type(1)\\\" is structurally indistinguishable from another element (identical tag, attributes, text, and children). Revueon cannot determine whic"
+    },
+    {
+      "name": "7e TWIN ACT: refusal reason is indistinguishable-twin / structurally ambiguous",
+      "pass": true,
+      "detail": "target \"main#main > article:nth-of-type(1)\" is structurally indistinguishable from another element (identical tag, attributes, text, and children). Revueon cannot determine which one you mean, so it r"
+    },
+    {
+      "name": "7f TWIN ACT: refusal does NOT advise nth-of-type",
+      "pass": true,
+      "detail": "target \"main#main > article:nth-of-type(1)\" is structurally indistinguishable from another element (identical tag, attri"
+    },
+    {
+      "name": "7g TWIN SAFETY: neither twin was mutated (display unchanged on both)",
+      "pass": true,
+      "detail": "before=[\"block\",\"block\"] after=[\"block\",\"block\"]"
+    },
+    {
+      "name": "7h TWIN SAFETY: no CSS applied (no card is display:none)",
+      "pass": true,
+      "detail": "anyHidden=false"
+    },
+    {
+      "name": "8a REORDER setup: card targetable after first describePage",
+      "pass": true,
+      "detail": "{\"id\":\"r2\",\"role\":\"article\",\"type\":\"unknown\",\"tag\":\"article\",\"textSample\":\"Twin card text\",\"position\":\"top\",\"width\":\"ful"
+    },
+    {
+      "name": "8b REORDER ACT: observe A, reorder → B at selector, act → REFUSES (not wrong-twin mutation)",
+      "pass": true,
+      "detail": "{\"ok\":false,\"error\":\"target \\\"main#main > article:nth-of-type(1)\\\" is structurally indistinguishable from another element (identical tag, attributes, text, and children). Revueon cannot determine whic"
+    },
+    {
+      "name": "8c REORDER ACT: refusal reason is indistinguishable-twin",
+      "pass": true,
+      "detail": "target \"main#main > article:nth-of-type(1)\" is structurally indistinguishable from another element (identical tag, attributes, text, and children). Revueon cann"
+    },
+    {
+      "name": "8d REORDER SAFETY: neither card mutated (display+text unchanged)",
+      "pass": true,
+      "detail": "before=[{\"display\":\"block\",\"text\":\"Twin card text\"},{\"display\":\"block\",\"text\":\"Twin card text\"}] after=[{\"display\":\"block\",\"text\":\"Twin card text\"},{\"display\":\"block\",\"text\":\"Twin card text\"}]"
+    },
+    {
+      "name": "9a CONTROL setup: distinct card is targetable",
+      "pass": true,
+      "detail": "{\"id\":\"r2\",\"role\":\"article\",\"type\":\"unknown\",\"tag\":\"article\",\"textSample\":\"First card unique text AAA\",\"position\":\"top\",\"width\":\"full\",\"repe"
+    },
+    {
+      "name": "9b CONTROL: hide on a distinct (non-twin) card → ok:true (legitimate targeting preserved)",
+      "pass": true,
+      "detail": "{\"ok\":true,\"result\":{\"chars\":267,\"css\":\"main#main > article:nth-of-type(1) {\\n  display: none !important;\\n}\\nmain#main > article:nth-of-type(2) {\\n  border-top"
+    },
+    {
+      "name": "9c CONTROL: only the named card hidden, the other visible",
+      "pass": true,
+      "detail": "[\"none\",\"block\"]"
+    },
+    {
       "name": "6a UNTARGETABLE: an untargetable region is detected",
       "pass": true,
       "detail": "[{\"tag\":\"body\",\"tgt\":true},{\"tag\":\"main\",\"tgt\":true},{\"tag\":\"nav\",\"tgt\":false,\"reason\":\"no stable anchor (id/data-testid/role/aria-label/name) within 20 ancestors\"},{\"tag\":\"aside\",\"tgt\":false,\"reason\":\"no stable anchor (id/data-testid/role/aria-label/name) within 20 ancestors\"}]"

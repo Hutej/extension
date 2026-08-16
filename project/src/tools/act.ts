@@ -281,7 +281,41 @@ async function hide(args: any): Promise<ToolResult> {
   // F5: always heal — a removal that leaves a hole is an unfinished job.
   const hiddenEls = Array.from(document.querySelectorAll(selector));
   const healResult = applyHealing([selector], hiddenEls);
-  const fullCss = healResult.css.trim() ? hideCss + '\n' + healResult.css : hideCss;
+  const rawFullCss = healResult.css.trim() ? hideCss + '\n' + healResult.css : hideCss;
+
+  // F1: guard EVERY selector the emitted sheet will match, not just the primary.
+  // applyHealing builds parent/sibling selectors via buildStableSelector (heal.ts
+  // steps 2–6), which are positional (nth-of-type) when the sibling has no anchor
+  // of its own — a page reorder of identical twins then reroutes that positional
+  // healing selector onto the wrong twin via the cascade (the indistinguishable-
+  // twin attack F1 refuses for the primary). Guarding only the primary selector
+  // (line 269) leaves the healing selectors unguarded — the gap applyCss already
+  // closes via its allSelectors loop. Mirror that here: parse the full sheet,
+  // guard each style rule's selectors, and DROP any healing rule whose selector
+  // refuses (fail-closed — refuse to emit it unguarded) rather than refusing the
+  // whole hide (the primary target is already verified; losing cosmetic healing
+  // is preferable to a wrong-twin mutation, and preferable to blocking the hide).
+  const healedItems = parseCss((sanitizeCss(rawFullCss).css));
+  const guardedItems: EmitItem[] = [];
+  for (const item of healedItems) {
+    if (item.kind !== 'style' || item.declarations.length === 0) { guardedItems.push(item); continue; }
+    // Keep the rule only if EVERY one of its selectors verifies. Split the comma
+    // list; if any part refuses, drop the whole rule (healing rules are
+    // single-selector, so this is exact — no partial-comma heal rules exist).
+    let allOk = true;
+    for (const sel of item.selector.split(',')) {
+      const s = sel.trim();
+      if (!s) continue;
+      const hg = guardTarget(s);
+      if (!hg.ok) { allOk = false; break; }
+    }
+    if (allOk) guardedItems.push(item);
+  }
+  const guardedCss = serializeEmit(guardedItems);
+  // ponytail: fall back to the bare hide rule if every healing rule was dropped
+  // and the sheet ended up empty (the hide rule itself always survives — it was
+  // guarded at line 269 — so this branch is defensive, not reachable in practice).
+  const fullCss = guardedCss.trim() ? guardedCss : hideCss;
 
   // B/C: hide defaults to important.
   const { css: insertedCss, assert, error } = await emitAndInsert(fullCss, true);

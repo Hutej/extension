@@ -6,7 +6,7 @@
  * the pure identity logic DOM-agnostic so it is unit-testable with a fake tree.
  */
 
-import type { IdentityDom } from './identity';
+import { fingerprint, type IdentityDom } from './identity';
 
 export const liveIdentityDom: IdentityDom = {
   querySelectorAll(selector) {
@@ -42,5 +42,8 @@ export const liveIdentityDom: IdentityDom = {
   },
   parent(el) {
     return el.parentElement;
+  },
+  fingerprintOfRef(el) {
+    return fingerprint(el, liveIdentityDom);
   },
 };

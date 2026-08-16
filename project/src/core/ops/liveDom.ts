@@ -34,6 +34,10 @@ export const liveDom: DomAdapter = {
     if (!(node instanceof Element)) return '';
     return fingerprint(node, liveIdentityDom as IdentityDom);
   },
+  // F1 IDENTICAL-TWIN: the IdentityDom view the undo verify (resolveTarget) uses.
+  identityDom() {
+    return liveIdentityDom as IdentityDom;
+  },
   replaceWith(node, replacement) {
     // Element.replaceWith is the native inverse for a cloned-node setText restore.
     (node as Element).replaceWith(replacement);
