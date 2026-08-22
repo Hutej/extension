@@ -200,11 +200,18 @@ async function runGoal(page: any, context: any, url: string, goal: string, name:
   await page.bringToFront();
   await page.waitForTimeout(500);
 
-  // Set credentials.
+  // Set credentials + acknowledge consent. The harness is a dev/QA tool: it
+  // stands in for a developer who has already reviewed the disclosure. The
+  // consent gate (Phase 6) is enforced in BOTH the popup UI and the background's
+  // runLoop handler; without this the popup's click handler returns before
+  // sending runLoop (90s timeout). This injects dev state into storage, the
+  // same path the production popup uses — no bypass of the gate, just a
+  // consenting caller.
   await popup.evaluate(async ({ accountId, apiToken }: { accountId: string; apiToken: string }) => {
     await chrome.storage.local.set({
       cloudflare_account_id: accountId,
       cloudflare_api_token: apiToken,
+      revueonConsentShown: true,
     });
   }, { accountId: ACCOUNT_ID, apiToken: API_TOKEN });
 
@@ -382,25 +389,39 @@ async function main() {
         results.push(r);
         console.log(formatReport(r));
 
-        // Row 3: Wikipedia persistence check — reload + navigate to /wiki/HTML.
+        // Row 3: Wikipedia F4 continuity — the approved strict-scope design
+        // (Phase 5, origin+pathname keying): a hide on /wiki/CSS survives reload,
+        // does NOT propagate to /wiki/HTML (a different scope), and returns when
+        // you come back to /wiki/CSS. The roadmap's "survive reload and a second
+        // article" = durable for its OWN scope + returns when revisited — NOT
+        // origin-wide propagation (that was the old, deleted design). This matches
+        // the authoritative tests/f4-second-article-test.ts. Measure the actual
+        // target the run hid (nav#mw-panel-toc), not a body border the run never set.
         if (g.name === 'run3-wikipedia-sidebar' && r.whatChanged !== 'No changes detected') {
-          console.log(`  [run3] persistence check: reload + navigate to /wiki/HTML`);
+          const sidebarHidden = () => page.evaluate(() => {
+            const el = document.querySelector('nav#mw-panel-toc, #mw-panel, .vector-sidebar, .vector-toc');
+            if (!el) return null; // page structure differs — inconclusive
+            return getComputedStyle(el).display === 'none';
+          });
+          // (A) reload /wiki/CSS — same scope → hide should persist.
           await page.reload({ waitUntil: 'domcontentloaded' });
           await page.waitForTimeout(2000);
+          const afterReload = await sidebarHidden();
+          // (B) navigate to /wiki/HTML — different scope → hide should NOT propagate.
           await page.goto('https://en.wikipedia.org/wiki/HTML', { waitUntil: 'domcontentloaded' });
           await page.waitForTimeout(2500);
-          const persisted = await page.evaluate(() => {
-            // A: no style node — check if user-origin CSS is applied
-            // by reading the computed style of a common modification target.
-            const bodyBorder = getComputedStyle(document.body).borderWidth;
-            return bodyBorder !== '0px' && bodyBorder !== '';
-          });
-          console.log(`  [run3] sidebar modification persisted on /wiki/HTML: ${persisted ? 'YES ✓' : 'NO ✗'}`);
-          if (!persisted) {
+          const onSecond = await sidebarHidden();
+          // (A again) return to /wiki/CSS — hide should return.
+          await page.goto('https://en.wikipedia.org/wiki/CSS', { waitUntil: 'domcontentloaded' });
+          await page.waitForTimeout(2500);
+          const onReturn = await sidebarHidden();
+          const passed = afterReload === true && onSecond === false && onReturn === true;
+          console.log(`  [run3] F4 continuity: reload=${afterReload} /wiki/HTML=${onSecond} (should be false) return=${onReturn} → ${passed ? 'PASS ✓' : 'FAIL ✗'}`);
+          if (!passed) {
             r.status = 'partial';
-            r.reason = 'sidebar modification did not persist across navigation';
+            r.reason = `F4 continuity failed: reload=${afterReload}, secondArticle=${onSecond}, return=${onReturn}`;
           } else {
-            r.whatChanged += ` · persisted across navigation ✓`;
+            r.whatChanged += ` · F4 continuity (strict scope) ✓`;
           }
         }
 

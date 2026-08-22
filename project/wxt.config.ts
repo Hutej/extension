@@ -16,7 +16,6 @@ export default defineConfig({
     // (the whole content script fails to load → no onMessage listener →
     // "Could not establish connection" → 130s timeout). audit-env.ts enforces this.
     define: {
-      'process.env.RV_MODEL_FAST': process.env.RV_MODEL_FAST ? JSON.stringify(process.env.RV_MODEL_FAST) : 'undefined',
       'process.env.RV_MODEL_STRONG': process.env.RV_MODEL_STRONG ? JSON.stringify(process.env.RV_MODEL_STRONG) : 'undefined',
       'process.env.RV_DEBUG': process.env.RV_DEBUG ? JSON.stringify(process.env.RV_DEBUG) : 'undefined',
     },

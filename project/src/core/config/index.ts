@@ -1,17 +1,22 @@
 /**
  * core/config — model + loop settings for the agent.
  *
- * One loop, two models: fast for concept matching (findElements), strong for
- * loop turns (decisions + content). Budgets: 12 steps, 60s wall clock.
+ * Production Revueon uses EXACTLY ONE model: GLM 5.2 (reasoning, 262K ctx).
+ * Vision (screenshots → a vision model) is TEST/QA infrastructure only and
+ * lives in tests/, never in production src/ — production never sends a
+ * screenshot to a vision model. See CORE MEMORY / CLAUDE.md image rule.
+ *
+ * Budgets: 12 steps, 60s wall clock.
  */
 
 export const AI_CONFIG = {
-  // Models on Cloudflare Workers AI. GLM 5.2 is the flagship (reasoning, 262K ctx);
-  // glm-4.7-flash is the fast companion for concept matching.
+  // The ONE production model. Cloudflare Workers AI, OpenAI-compatible.
   strongModel: process.env.RV_MODEL_STRONG ?? '@cf/zai-org/glm-5.2',
-  fastModel: process.env.RV_MODEL_FAST ?? '@cf/zai-org/glm-4.7-flash',
-  // F7: vision model for screenshots (kimi).
-  visionModel: '@cf/moonshotai/kimi-k2.7-code',
+
+  // Consent gate (Phase 6 launch requirement). Enforced in BOTH the popup UI
+  // (shows the disclosure) and the background's runLoop handler (the single
+  // entry point, so no caller bypasses it). One constant so they cannot drift.
+  consentRequired: true,
 
   // Loop budget
   maxSteps: 12,

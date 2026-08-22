@@ -114,53 +114,63 @@ Remember after you write code, this code will verify by codex, claude code and s
 
 ---
 
+## Browser Automation
+
+Revueon uses two browser automation layers.
+
+### Playwright — authoritative testing
+
+Playwright is the canonical deterministic test harness.
+
+Use Playwright for:
+- regression tests
+- extension/MV3 lifecycle tests
+- service-worker tests
+- deterministic DOM assertions
+- timing/race-condition tests
+- viewport/resize tests
+- CI and reproducible proof
+- real-site behavioral proof
+
+Do NOT replace existing Playwright tests with agent-browser without explicit approval.
+
+### agent-browser — exploration and debugging
+
+agent-browser is available in this project.
+
+Use agent-browser for:
+- exploratory browser investigation
+- quickly reproducing a browser/page issue
+- interactive debugging
+- navigating real websites during development
+- inspecting accessibility/DOM state
+- investigating SPA navigation
+- quick manual-style validation before writing a deterministic test
+
+When using agent-browser, load its current skill/instructions rather than inventing commands.
+
+agent-browser is NOT the authoritative regression/proof harness.
+
+If an exploratory result from agent-browser becomes an important behavioral claim, reproduce it with the appropriate deterministic Playwright test before treating it as project proof.
+
+### Decision rule
+
+Use agent-browser when the task is primarily:
+"explore / investigate / reproduce / debug this browser behavior."
+
+Use Playwright when the task is primarily:
+"prove / regression-test / deterministically verify this behavior."
+
+Use both when appropriate:
+agent-browser → investigate quickly
+Playwright → encode the discovered behavior as a reproducible test.
+
 ## Two banned words
 
 **"Intermittent"** — nothing in a deterministic system is intermittent. It is a race, a timeout, or
 unmodelled state. Say "I do not know why this happens." That sentence is respected.
 
 **"Harness artifact"** — used twice, wrong twice. If the harness sees it, the user will see it.
-
----
-
-## Ponytail — lazy senior developer mode
-
-Apply this mode to all coding work in Revueon. Lazy means efficient, not careless. The best code is the code never written.
-
-Before writing code, stop at the first rung that holds:
-
-1. Does this need to be built at all? (YAGNI)
-2. Does it already exist in this codebase? Reuse the helper, util, or pattern already here; don't rewrite it.
-3. Does the standard library already do this? Use it.
-4. Does a native platform feature cover it? Use it.
-5. Does an already-installed dependency solve it? Use it.
-6. Can this be one line? Make it one line.
-7. Only then: write the minimum code that works.
-
-The ladder runs after understanding the problem, not instead of it: read the task and the code it touches, trace the real flow end to end, then climb.
-
-**Bug fix = root cause, not symptom.** Grep every caller of the function you touch and fix the shared function once. One guard there is a smaller diff than one per caller; patching only the path named by a ticket leaves sibling callers broken.
-
-Rules:
-- No abstractions that weren't explicitly requested.
-- No new dependency if it can be avoided.
-- No boilerplate nobody asked for.
-- Deletion over addition. Boring over clever. Fewest files possible.
-- Shortest working diff wins, but only once you understand the problem.
-- Question complex requests: "Do you actually need X, or does Y cover it?"
-- Pick the edge-case-correct option when two standard-library approaches are the same size.
-- Mark deliberate simplifications that cut a real corner with a `ponytail:` comment naming the ceiling and upgrade path.
-
-Not lazy about:
-- understanding the problem and tracing the real flow before coding
-- input validation at trust boundaries
-- error handling that prevents data loss
-- security
-- accessibility
-- calibration real hardware needs
-- anything explicitly requested
-
-Lazy code without its check is unfinished: non-trivial logic leaves ONE runnable check behind—the smallest thing that fails if the logic breaks. Trivial one-liners need no test.
 
 ## Working style
 
@@ -170,11 +180,120 @@ Lazy code without its check is unfinished: non-trivial logic leaves ONE runnable
   50, rewrite it. Nothing speculative, no abstraction for single-use code.
 - **Surgical changes.** Every changed line traces to the request. Don't improve adjacent code.
   Remove orphans *your* change created.
-- **Use as many subagents as you want** — for parallel work, for review, for cleanup. Give each one
-  a scope it can hold entirely; vague scope produces vague work. Never let a subagent decide scope,
-  delete something outside its brief, or edit a test to make it pass. **Always run a review subagent**
-  against `02_PRINCIPLES.md` and the ten-point check in `04_CAPABILITIES.md` §9 before you report,
-  and report what it found even when it is unflattering.
+
+---
+# 5. IMAGE / VISION RULE — CRITICAL
+
+Production Revueon DOES NOT send screenshots to a vision model.
+
+Production flow:
+
+user webpage
+→ Revueon
+→ normal DOM/browser evidence
+→ model
+→ action
+
+NOT:
+
+user webpage
+→ screenshot
+→ vision model
+
+Vision models may ONLY be used for development and testing:
+
+- visual QA
+- screenshot inspection
+- browser debugging
+- visual regression testing
+- validating that a transformation visually worked
+- helping evaluate test results
+
+If a screenshot is needed during development:
+
+browser/test harness
+→ screenshot
+→ test-only vision model
+→ textual description
+→ developer reasoning
+
+Never add vision-model screenshot calls to production code.
+
+Never claim the production system "uses vision" because the test harness does.
+
+---
+ASK-QUESTION RULE
+
+Do not ask the user about ordinary implementation details.
+
+Make normal engineering decisions yourself using:
+
+- roadmap
+- current code
+- tests
+- architecture
+- existing conventions
+
+Ask the user ONLY when the decision is genuinely architectural or cannot be
+safely inferred.
+
+Examples:
+
+- two materially different architectures
+- privacy/product decision
+- conflicting authoritative documents
+- changing an approved foundation invariant
+- unclear product behavior
+- uncertainty about the intended roadmap
+
+When asking:
+
+1. State the exact decision.
+2. Give the realistic options.
+3. Recommend one.
+4. Explain the important trade-off.
+5. Stop and wait.
+
+Do not guess through genuine ambiguity.
+---
+ARCHIVE RULE
+
+Before implementing something that has historical precedent, inspect archive/.
+
+Use archive/ to:
+
+- recover useful ideas
+- understand previous failures
+- avoid repeating mistakes
+- identify reusable browser techniques
+
+Do NOT treat archive/ as current production architecture.
+
+Do NOT resurrect the old pipeline.
+
+When reusing archive material, adapt the principle to the current architecture.
+
+---
+
+SENIOR DEVELOPER ADVICE
+
+Read relevant material under:
+
+Senior_developer_advices/
+
+Use it to understand:
+
+- previous architectural reasoning
+- browser constraints
+- known failure modes
+- rejected approaches
+- important invariants
+
+But current roadmap + explicit current user decisions win over historical
+advice.
+
+Do not blindly implement old advice if it belongs to an obsolete architecture.
+
 
 ## Reporting
 

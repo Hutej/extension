@@ -24,6 +24,31 @@
       "name": "no `throw` on a parse/model error in the loop body",
       "pass": true,
       "detail": "a parse death surfaces as a LoopResult, not an exception"
+    },
+    {
+      "name": "Phase6: parse-error branch retries EXACTLY once (one callLoopModel, no while/for/do loop)",
+      "pass": true,
+      "detail": "retry calls in branch=1, hasRetryLoop=false"
+    },
+    {
+      "name": "Phase6: retry timeout capped at min(retryCap, 12_000) — cannot burn the full budget",
+      "pass": true,
+      "detail": "retryCap bounded to 12s so one malformed response costs at most 12s, not the full 30s"
+    },
+    {
+      "name": "Phase6: every rollbackDomIfActed is followed by return before continue (no rollback-then-continue)",
+      "pass": true,
+      "detail": "6 rollback site(s); allReturnFirst=true"
+    },
+    {
+      "name": "Phase6: circuit-breaker giveUp (consecutive checkLayout undos) returns, does not continue the loop",
+      "pass": true,
+      "detail": "2 consecutive layout breaks → return gaveUp (exits runLoop)"
+    },
+    {
+      "name": "Phase6: all giveUp branches return out of runLoop (giveUp stops model calls)",
+      "pass": true,
+      "detail": "3 gaveUp return site(s) — model giveUp, tool giveUp, circuit-breaker"
     }
   ],
   "pass": true

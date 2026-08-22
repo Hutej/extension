@@ -23,7 +23,7 @@
  */
 
 import assert from 'node:assert/strict';
-import { writeFileSync, mkdirSync } from 'node:fs';
+import { writeFileSync, mkdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import { Budget } from '../src/agent/budget.ts';
@@ -42,12 +42,18 @@ const MAX_WALL_MS = 60_000;
 // ── 1. observationCap preserves the reserve by construction ──────────────
 {
   const b = new Budget({ maxWallMs: MAX_WALL_MS });
-  // At t=0, rem=60s. observationCap must be 60-12=48s (leaves 12s reserve).
+  // observationCap must be (remaining - actReserve), floored at MIN_TURN. Derive
+  // the expected value from the budget's ACTUAL remaining so the check is free
+  // of the Date.now() granularity race (a 1ms tick between `new Budget()` and the
+  // call used to make this flake at 47999 vs 48000). The invariant under test is
+  // the arithmetic, not the wall clock.
+  const rem0 = b.remaining().wallMs;
   const cap0 = b.observationCap(ACT_RESERVE_MS, MIN_TURN_MS);
+  const expected0 = Math.max(MIN_TURN_MS, rem0 - ACT_RESERVE_MS);
   checks.push({
-    name: 'observationCap at 60s remaining = 48s (leaves 12s act reserve)',
-    pass: cap0 === 48_000,
-    detail: `expected 48000, got ${cap0}`,
+    name: 'observationCap = remaining − act reserve (leaves the 12s act reserve)',
+    pass: cap0 === expected0,
+    detail: `rem0=${rem0}, expected=${expected0}, got=${cap0}`,
   });
   // After an observation call consuming the FULL cap (48s), rem=12s — the
   // reserve is intact, not breached.
@@ -151,6 +157,80 @@ const MAX_WALL_MS = 60_000;
     pass: noBreachAboveWindow,
     detail: cases.filter((c) => c.rem > ACT_RESERVE_MS + MIN_TURN_MS)
       .map((c) => `rem=${c.rem} cap=${c.turnCap} worst=${c.worstRemainingAfterObservation}${c.reserveIntact ? '(>=12k ✓)' : '(BREACH!)'}`).join('; '),
+  });
+}
+
+// ── 4. Phase 6 correction: NO model-call COST gate (do not refuse a call on
+// predicted cost). Revueon does not stop an agent task because the next model
+// call is predicted too expensive. Model-call cost is NOT a correctness
+// constraint in the core agent loop (future hosted/BYOK/local models make any
+// cost assumption wrong). The loop may stop ONLY on: task done, model/agent
+// giveUp, unrecoverable error, or a HARD execution-safety limit (maxSteps /
+// maxWallMs runaway). Pin that the avgCallMs() pre-call gate is GONE and that
+// the genuine safety limits REMAIN.
+{
+  const loopSrc = readFileSync(join(__dirname, '..', 'src', 'agent', 'loop.ts'), 'utf-8');
+  const budgetSrc = readFileSync(join(__dirname, '..', 'src', 'agent', 'budget.ts'), 'utf-8');
+
+  // 4a. The avgCallMs() pre-call gate is removed from the loop: no break driven
+  //     by predicted call cost. A future refactor must not re-introduce a gate
+  //     that refuses a model call because `rem - avgCallMs()` is "too small".
+  checks.push({
+    name: 'Phase6 correction: loop has NO avgCallMs()-based pre-call gate (no cost-prediction break)',
+    pass: !/avgCallMs\(\)/.test(loopSrc) && !/predictedAfterCall/.test(loopSrc),
+    detail: 'loop.ts must not reference avgCallMs() or a predicted-after-call gate',
+  });
+  // 4b. The cost-prediction machinery is removed from the budget: no
+  //     recordCallDuration / callDurations / avgCallMs. (avgCallMs existed ONLY
+  //     to feed the removed gate; removing it is the root-cause delete, not a
+  //     per-call patch.)
+  checks.push({
+    name: 'Phase6 correction: budget has NO call-duration tracking (avgCallMs/recordCallDuration/callDurations removed)',
+    pass: !/avgCallMs|recordCallDuration|callDurations/.test(budgetSrc),
+    detail: 'budget.ts must not track per-call durations (that was only the cost gate)',
+  });
+
+  // 4c. HARD runaway limits REMAIN — the loop stops on maxSteps AND maxWallMs.
+  //     These are execution-safety, not cost: a runaway loop / hung page must
+  //     terminate regardless of how "expensive" individual calls are.
+  const bSteps = new Budget({ maxSteps: 3, maxWallMs: 600_000 });
+  bSteps.stepsUsed = 3;
+  checks.push({
+    name: 'Phase6 correction: hard maxSteps runaway limit still terminates (exhausted() at the step cap)',
+    pass: bSteps.exhausted() === true,
+    detail: `maxSteps=3, stepsUsed=3 → exhausted=${bSteps.exhausted()} (runaway step loop still stopped)`,
+  });
+  const bWall = new Budget({ maxSteps: 600_000, maxWallMs: MAX_WALL_MS });
+  (bWall as any).wallStart = Date.now() - (MAX_WALL_MS + 1);
+  checks.push({
+    name: 'Phase6 correction: hard maxWallMs runaway limit still terminates (exhausted() at the wall cap)',
+    pass: bWall.exhausted() === true,
+    detail: `maxWallMs=60s, elapsed>60s → exhausted=${bWall.exhausted()} (runaway wall loop still stopped)`,
+  });
+  // The loop's hard-stop break on the wall floor REMAINS: below MIN_TURN_MS no
+  // turn can complete — the loop breaks. This is a turn-shape guard, not a
+  // cost gate (it stops a structurally-impossible turn, not an "expensive" one).
+  checks.push({
+    name: 'Phase6 correction: loop still breaks below MIN_TURN_MS (turn-shape guard, not cost)',
+    pass: /if \(rem\.wallMs <= MIN_TURN_MS\) break;/.test(loopSrc),
+    detail: 'loop.ts keeps `if (rem.wallMs <= MIN_TURN_MS) break;` — a turn that cannot complete, not a costly one',
+  });
+
+  // 4d. ACT / rollback safety REMAINS — the act-reserve invariant is intact.
+  //     restrictToAct + observationCap + reserveIntact reserve time for the act
+  //     AND for rolling back, which is TRANSACTION INTEGRITY (rule 7), not model-
+  //     call cost. A model call is not refused here on cost; observation is just
+  //     capped so it cannot eat the act/undo reserve.
+  const bReserve = new Budget({ maxWallMs: MAX_WALL_MS });
+  checks.push({
+    name: 'Phase6 correction: ACT reserve intact — observationCap still leaves the act reserve',
+    pass: bReserve.observationCap(ACT_RESERVE_MS, MIN_TURN_MS) === 48_000 && bReserve.reserveIntact(ACT_RESERVE_MS) === true,
+    detail: `observationCap=${bReserve.observationCap(ACT_RESERVE_MS, MIN_TURN_MS)}ms, reserveIntact=${bReserve.reserveIntact(ACT_RESERVE_MS)} (act/undo reserve preserved)`,
+  });
+  checks.push({
+    name: 'Phase6 correction: loop still restricts to act at the reserve boundary (restrictToAct kept)',
+    pass: /const restrictToAct = rem\.wallMs <= ACT_RESERVE_MS \+ MIN_TURN_MS;/.test(loopSrc),
+    detail: 'loop.ts keeps restrictToAct — transaction-integrity restriction, not a cost gate',
   });
 }
 

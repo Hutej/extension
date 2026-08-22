@@ -1,9 +1,9 @@
 {
   "checks": [
     {
-      "name": "observationCap at 60s remaining = 48s (leaves 12s act reserve)",
+      "name": "observationCap = remaining − act reserve (leaves the 12s act reserve)",
       "pass": true,
-      "detail": "expected 48000, got 48000"
+      "detail": "rem0=60000, expected=48000, got=48000"
     },
     {
       "name": "after one full-cap observation (48s), 12s act reserve still intact",
@@ -28,12 +28,47 @@
     {
       "name": "breach window rem ∈ (12000,17000]: observation REFUSED (no MIN_TURN-floor breach)",
       "pass": true,
-      "detail": "rem=12001 restrict=true; rem=13000 restrict=true; rem=16999 restrict=true; rem=17000 restrict=true"
+      "detail": "rem=13000 restrict=true; rem=16999 restrict=true; rem=17000 restrict=true"
     },
     {
       "name": "above the window (rem >17000): observation permitted, full cap never breaches the 12s reserve",
       "pass": true,
       "detail": "rem=17001 cap=5001 worst=12000(>=12k ✓); rem=25000 cap=13000 worst=12000(>=12k ✓)"
+    },
+    {
+      "name": "Phase6 correction: loop has NO avgCallMs()-based pre-call gate (no cost-prediction break)",
+      "pass": true,
+      "detail": "loop.ts must not reference avgCallMs() or a predicted-after-call gate"
+    },
+    {
+      "name": "Phase6 correction: budget has NO call-duration tracking (avgCallMs/recordCallDuration/callDurations removed)",
+      "pass": true,
+      "detail": "budget.ts must not track per-call durations (that was only the cost gate)"
+    },
+    {
+      "name": "Phase6 correction: hard maxSteps runaway limit still terminates (exhausted() at the step cap)",
+      "pass": true,
+      "detail": "maxSteps=3, stepsUsed=3 → exhausted=true (runaway step loop still stopped)"
+    },
+    {
+      "name": "Phase6 correction: hard maxWallMs runaway limit still terminates (exhausted() at the wall cap)",
+      "pass": true,
+      "detail": "maxWallMs=60s, elapsed>60s → exhausted=true (runaway wall loop still stopped)"
+    },
+    {
+      "name": "Phase6 correction: loop still breaks below MIN_TURN_MS (turn-shape guard, not cost)",
+      "pass": true,
+      "detail": "loop.ts keeps `if (rem.wallMs <= MIN_TURN_MS) break;` — a turn that cannot complete, not a costly one"
+    },
+    {
+      "name": "Phase6 correction: ACT reserve intact — observationCap still leaves the act reserve",
+      "pass": true,
+      "detail": "observationCap=48000ms, reserveIntact=true (act/undo reserve preserved)"
+    },
+    {
+      "name": "Phase6 correction: loop still restricts to act at the reserve boundary (restrictToAct kept)",
+      "pass": true,
+      "detail": "loop.ts keeps restrictToAct — transaction-integrity restriction, not a cost gate"
     },
     {
       "name": "OLD arithmetic let a retry at 15s run 15s -> 0s remaining (reserve breached) — the bug",

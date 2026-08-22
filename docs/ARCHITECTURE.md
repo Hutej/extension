@@ -211,20 +211,32 @@ value moved, and re-emits important only if it did not.
 returns `{ applied, before, after, matched }`. A run where every act returned
 `applied: false` is a FAILED run. Bytes reaching a stylesheet is not evidence.
 
-**Persistence scope — decision.** The journal is keyed by **origin only** (no path,
-no query, no fragment), so a look saved on one page applies to the whole site.
-Reasoning: a request like *"hide the sidebar"* describes a site-level preference, not
-a per-URL one — the user does not want to re-hide the sidebar on every Wikipedia
-article they open. Keying by origin+path would fragment that intent across every
-article URL and defeat continuity. The privacy commitment (never store a full URL)
-is preserved because the key is the origin alone. This is a product decision, not a
-bug-fix accident; revisit it only if a goal is genuinely per-URL (none today).
+**Persistence scope — decision (F4 CONTINUITY, Phase 5).** The journal is
+keyed by **origin + pathname** (`scopeKey(url)` = `u.origin + u.pathname`) —
+never query, never fragment (tokens and personal data live there), never a
+full URL. A look saved on `/wiki/CSS` applies to `/wiki/CSS`, not to
+`/wiki/HTML`. Reasoning: per `06_FOUNDATION.md` F4 and `roadmap.txt` Phase 5,
+the binding unit of continuity is the page scope, and "survives a second
+article" means the modification is durable for *its* scope and is not
+corrupted by visiting another page — it returns when you come back. It does
+*not* mean the modification propagates everywhere. The earlier "origin only"
+position (a "hide the sidebar" is a site-level preference) is **superseded**;
+the SPA-CSS leak it caused (a hide on `/page1` staying on `/page2` because
+USER-origin `insertCSS` persists across `pushState`) is closed by the
+background's strict-scope enforcement in `reinsertSavedCss`. The privacy
+commitment (never store a full URL) is preserved: the key is origin + pathname
+only. This is a product decision ratified 12 Aug 2026; revisit it only if a
+goal is genuinely site-level (then a per-origin site-level layer may return —
+deferred, YAGNI today).
 
 **Cold-navigation flash.** `insertCSS` has no `runAt` in MV3, so a saved look
 can paint one unstyled frame. The background subscribes to
-`chrome.webNavigation.onCommitted` and re-inserts the saved CSS before the
-page renders. The static CSS gap cover is **not measured** — the report says
-so rather than asserting it is fine.
+`chrome.webNavigation.onCommitted` (full navigations — fires before paint) and
+`chrome.webNavigation.onHistoryStateUpdated` (SPA `pushState`/`replaceState` —
+`onCommitted` does *not* fire for those) and re-inserts the saved CSS for the
+new scope before the page renders. The background also **removes** the prior
+scope's CSS so a hide on `/page1` does not leak onto `/page2`. The static CSS
+gap cover is **not measured** — the report says so rather than asserting it.
 
 **Exception: DOM mutation.** Required for inserting content, rewriting text,
 binding keys, and our own affordances. Allowed, rare, and it must record a

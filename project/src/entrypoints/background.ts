@@ -5,7 +5,11 @@
  */
 
 import { runLoop, type LoopResult } from '@/agent/loop';
-import { loadJournalState, saveJournalState, originKey } from '@/core/persist';
+import { AI_CONFIG } from '@/core/config';
+import { loadJournalState, saveJournalState, scopeKey } from '@/core/persist';
+
+/** Phase 6 consent gate — same constant the popup enforces, one source. */
+const CONSENT_REQUIRED = AI_CONFIG.consentRequired;
 
 export default defineBackground(() => {
   // MV3 keepalive — the loop's tool dispatchs keep this SW alive.
@@ -22,7 +26,17 @@ export default defineBackground(() => {
       if (tabId == null) { sendResponse({ ok: false, error: 'no tab id' }); return; }
       chrome.scripting.insertCSS(
         { target: { tabId }, css: message.css, origin: 'USER' },
-        () => sendResponse({ ok: !chrome.runtime.lastError, error: chrome.runtime.lastError?.message }),
+        () => {
+          // F4: track inserted CSS per tab so reinsertSavedCss's strict-scope
+          // leak-fix can remove it when the scope changes (a /page1 hide must
+          // not stay on /page2). Session-persisted so a SW restart keeps it.
+          if (!chrome.runtime.lastError) {
+            const s = insertedCssByTab.get(tabId) ?? new Set<string>();
+            s.add(message.css as string); insertedCssByTab.set(tabId, s);
+            void persistTabTracker();
+          }
+          sendResponse({ ok: !chrome.runtime.lastError, error: chrome.runtime.lastError?.message });
+        },
       );
       return true;
     }
@@ -33,7 +47,12 @@ export default defineBackground(() => {
       if (tabId == null) { sendResponse({ ok: false, error: 'no tab id' }); return; }
       chrome.scripting.removeCSS(
         { target: { tabId }, css: message.css, origin: 'USER' },
-        () => sendResponse({ ok: !chrome.runtime.lastError, error: chrome.runtime.lastError?.message }),
+        () => {
+          if (!chrome.runtime.lastError) {
+            const s = insertedCssByTab.get(tabId); if (s) { s.delete(message.css as string); void persistTabTracker(); }
+          }
+          sendResponse({ ok: !chrome.runtime.lastError, error: chrome.runtime.lastError?.message });
+        },
       );
       return true;
     }
@@ -49,9 +68,18 @@ export default defineBackground(() => {
       const tabId = message.tabId as number;
       const goal = message.goal as string;
 
-      chrome.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token'], async (result) => {
+      chrome.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token', 'revueonConsentShown'], async (result) => {
         const accountId = result.cloudflare_account_id as string | undefined;
         const apiToken = result.cloudflare_api_token as string | undefined;
+        // Consent gate (Phase 6 launch requirement). Checked FIRST — the single
+        // entry point every run goes through, so no caller (popup or a direct
+        // runtime.sendMessage) can bypass it. Before credentials: an unconsented
+        // caller should not even learn whether credentials are set. Rule 13:
+        // name the recovery action.
+        if (CONSENT_REQUIRED && !result.revueonConsentShown) {
+          sendResponse({ ok: false, error: 'Consent not acknowledged. Review the disclosure in the Revueon popup first, then run again.' });
+          return;
+        }
         if (!accountId || !apiToken) {
           sendResponse({ ok: false, error: 'No Cloudflare credentials set. Set them in Revueon settings.' });
           return;
@@ -81,33 +109,105 @@ export default defineBackground(() => {
     return false;
   });
 
-  // ── D: Continuity — re-insert saved CSS on navigation ────────────
-  // No MutationObserver, no replay. The background subscribes to
-  // webNavigation.onCommitted and re-inserts the saved CSS look.
+  // ── D/F4: Continuity — re-insert saved CSS on navigation ──────────
+  // webNavigation.onCommitted fires for FULL navigations (link/reload/typed)
+  // BEFORE first paint → CSS re-applied before paint (no FOUC). It does NOT
+  // fire for history.pushState/replaceState — those fire onHistoryStateUpdated.
+  // F4 Step4: add onHistoryStateUpdated so a CSS hide survives an SPA
+  // pushState route change (the "hide stops working when you click a link"
+  // gap). Both are keyed by scopeKey(details.url) — origin + pathname — so a
+  // hide on /page1 is re-inserted on return to /page1 but NOT on /page2.
   chrome.webNavigation?.onCommitted.addListener((details) => {
     if (details.frameId !== 0) return; // main frame only
     void reinsertSavedCss(details.tabId, details.url);
   });
+
+  // F4 Step4: SPA pushState/replaceState CSS replay. onHistoryStateUpdated
+  // fires for same-document navigations (pushState/replaceState) the content
+  // script's history-patch does NOT reach the background for. This is the
+  // single highest-leverage F4 fix. frameId==0 = top frame only.
+  chrome.webNavigation?.onHistoryStateUpdated.addListener((details) => {
+    if (details.frameId !== 0) return; // main frame only
+    void reinsertSavedCss(details.tabId, details.url);
+  });
+
+  // F4: drop the per-tab tracker when a tab closes (bounded growth + the
+  // session-storage copy drops the dead tabId).
+  chrome.tabs?.onRemoved.addListener((tabId) => {
+    if (insertedCssByTab.delete(tabId)) void persistTabTracker();
+  });
 });
 
-/** D: Re-insert saved CSS from the journal for this origin. */
+/** D/F4: Re-insert saved CSS from the journal for this SCOPE (origin + path).
+ *  Called before first paint on full navigation (onCommitted) and on SPA
+ *  pushState/replaceState (onHistoryStateUpdated). Keyed by scopeKey(url) —
+ *  origin + pathname, never query/fragment. A CSS hide on /wiki/CSS does NOT
+ *  re-insert on /wiki/HTML (different scope); it returns on /wiki/CSS.
+ *
+ *  F4 strict-scope enforcement (the leak the spa-route test caught): USER-origin
+ *  CSS inserted via chrome.scripting persists on the TAB across pushState — it
+ *  does NOT auto-remove when the URL changes. So a hide on /page1 would leak onto
+ *  /page2 unless we explicitly REMOVE it. On each reinsert we remove every CSS
+ *  string the background previously inserted for this tab that is NOT in the new
+ *  scope's set, then insert the new scope's set. (Inserting an already-present
+ *  USER-origin sheet is a deduped no-op in Chrome, so re-inserting the same scope
+ *  on reload is harmless.) Tracked per-tab so a tab's CSS never leaks to another.
+ *
+ *  MV3 durability: the tracker survives a service-worker restart by living in
+ *  chrome.storage.session (in-memory, cleared on browser close — appropriate for
+ *  per-tab live CSS state). An in-memory Map would be wiped on SW restart, and
+ *  the leak-fix would stop removing stale CSS — so the tracker is session-backed. */
+const RV_TABS = 'rv_insertedCssByTab'; // storage.session key: { [tabId]: string[] }
+const insertedCssByTab = new Map<number, Set<string>>();
+
+/** Rehydrate the per-tab tracker from session storage on SW start. Best-effort. */
+async function rehydrateTabTracker(): Promise<void> {
+  try {
+    const r = await chrome.storage.session.get(RV_TABS);
+    const obj = r[RV_TABS] as Record<string, string[]> | undefined;
+    if (obj) for (const [id, arr] of Object.entries(obj)) insertedCssByTab.set(Number(id), new Set(arr));
+  } catch { /* ignore */ }
+}
+void rehydrateTabTracker();
+
+async function persistTabTracker(): Promise<void> {
+  try {
+    const obj: Record<string, string[]> = {};
+    for (const [id, set] of insertedCssByTab) obj[String(id)] = [...set];
+    await chrome.storage.session.set({ [RV_TABS]: obj });
+  } catch { /* ignore */ }
+}
+
 async function reinsertSavedCss(tabId: number, url: string): Promise<void> {
   try {
-    const origin = (() => { try { return new URL(url).origin; } catch { return ''; } })();
-    if (!origin) return;
-    const key = originKey(origin);
+    const key = scopeKey(url);
+    if (!key || key === 'null' || key.startsWith('null')) return; // bad url
     const state = await loadJournalState(key);
-    if (!state.enabled || !state.entries?.length) return;
-    // Collect CSS strings from act entries with removeCss inverses.
-    for (const entry of state.entries) {
-      if (entry.kind !== 'act') continue;
-      const inv = entry.inverse as any;
-      if (inv?.kind === 'removeCss' && inv.css) {
-        try {
-          await chrome.scripting.insertCSS({ target: { tabId }, css: inv.css, origin: 'USER' });
-        } catch { /* ignore — tab may be gone */ }
+    // Collect the CSS strings this scope wants active.
+    const want = new Set<string>();
+    if (state.enabled && state.entries?.length) {
+      for (const entry of state.entries) {
+        if (entry.kind !== 'act') continue;
+        const inv = entry.inverse as any;
+        if (inv?.kind === 'removeCss' && inv.css) want.add(inv.css as string);
       }
     }
+    // Remove CSS the background previously inserted for this tab that is NOT in
+    // the new scope's want-set (the leak source: a /page1 hide staying on /page2).
+    const have = insertedCssByTab.get(tabId) ?? new Set<string>();
+    for (const css of have) {
+      if (!want.has(css)) {
+        try { await chrome.scripting.removeCSS({ target: { tabId }, css, origin: 'USER' }); }
+        catch { /* ignore — tab may be gone */ }
+      }
+    }
+    // Insert the new scope's CSS.
+    for (const css of want) {
+      try { await chrome.scripting.insertCSS({ target: { tabId }, css, origin: 'USER' }); }
+      catch { /* ignore — tab may be gone */ }
+    }
+    insertedCssByTab.set(tabId, want);
+    void persistTabTracker();
   } catch { /* ignore */ }
 }
 
@@ -117,9 +217,8 @@ async function handleToggleCss(tabId: number | undefined, on: boolean, sendRespo
   if (tabId == null) { sendResponse({ ok: false, error: 'no tab id' }); return; }
   try {
     const tab = await chrome.tabs.get(tabId);
-    const origin = (() => { try { return new URL(tab.url || '').origin; } catch { return ''; } })();
-    if (!origin) { sendResponse({ ok: false, error: 'no origin' }); return; }
-    const key = originKey(origin);
+    const key = scopeKey(tab.url || '');
+    if (!key || key.startsWith('null')) { sendResponse({ ok: false, error: 'no origin' }); return; }
     const state = await loadJournalState(key);
     if (!state.entries?.length) { sendResponse({ ok: true, on }); return; }
 
@@ -137,6 +236,12 @@ async function handleToggleCss(tabId: number | undefined, on: boolean, sendRespo
         }
       } catch { /* ignore individual failures */ }
     }
+
+    // F4: keep the per-tab inserted-CSS tracker in sync so reinsertSavedCss's
+    // leak-fix knows what is currently on the tab (toggle off clears it). Session-
+    // persisted so a SW restart keeps it.
+    insertedCssByTab.set(tabId, on ? new Set(cssEntries.map((e) => (e.inverse as any).css as string)) : new Set<string>());
+    void persistTabTracker();
 
     // Persist the enabled flag.
     state.enabled = on;

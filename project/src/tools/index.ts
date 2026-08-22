@@ -18,6 +18,12 @@ export interface ToolResult {
   truncated?: boolean;    // REQUIRED if any budget clipped the result
   costMs?: number;
   worse?: boolean;       // for act — signal that the result is worse than before
+  /** F4: for act tools — SHA-256 of the target's structural fingerprint,
+   *  captured at act time so reload/SPA-render can re-verify the target is
+   *  the same element (wrong-target detection on replay) without persisting
+   *  cleartext page content. See core/persist/digest.ts. Undefined for
+   *  non-act tools and acts whose target could not be resolved at capture. */
+  identityDigest?: string;
 }
 
 export interface ToolDef {
@@ -27,7 +33,6 @@ export interface ToolDef {
   args: Record<string, string>;  // arg name → type hint
   execute: (args: any) => Promise<ToolResult>;
   stub?: boolean;          // true = not implemented in this stage (hidden from prompt)
-  background?: boolean;    // true = runs in the background SW, not the content script
 }
 
 // ── control tools (undo, done, giveUp — handled by the loop, not dispatched) ──

@@ -235,8 +235,26 @@ this project shipped eleven sweeps that way.
   (MVP row 3). A change made today is still there tomorrow.
 
 ### Phase 6 — F6 LOOP refinements + launch gates
-- Budget checked **before** a call, not after. Parse-retry budget guard. Error
-  messages that teach (name an alternative). `giveUp` respected.
+- Parse-retry budget guard. Error messages that teach (name an alternative).
+  `giveUp` respected.
+- **Model-call cost is NOT a correctness constraint in the core agent loop.**
+  The loop does NOT refuse to start a model call because `avgCallMs()` predicts
+  the remaining budget is too small for it. Revueon stops an agent task only
+  when: the task completes, the model/agent gives up, an unrecoverable error
+  occurs, or a HARD execution-safety limit is reached (maxSteps / maxWallMs
+  runaway, per-call timeout, MIN_TURN_MS turn-shape floor). The
+  `avgCallMs()` pre-call gate and its `recordCallDuration`/`callDurations`
+  machinery were removed for this reason. This matters because Revueon may
+  later support hosted models, BYOK, local models, and different
+  providers/plans — any per-call cost assumption baked into loop reasoning
+  would be wrong for at least one of those. Cost/budget controls for those
+  belong at the **product/account layer** (a hosted plan's quota, a BYOK
+  user's spend limit), never inside core loop reasoning.
+- Hard execution limits REMAIN as runaway/safety protection only: maxSteps,
+  maxWallMs, per-model-call timeout, bounded parse retry, circuit breaker,
+  rollback/transaction safety, and the ACT/undo reserve (which is transaction
+  integrity — reserving time to act AND to roll back safely — not model-call
+  cost).
 - **Re-enable the consent gate** (`CONSENT_REQUIRED = true`) — P0 blocker.
 - Load Cloudflare credentials into storage for dev runs (the extension reads
   storage, not `.env`).

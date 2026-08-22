@@ -113,10 +113,17 @@ export async function sendToggle(context: any, page: any): Promise<boolean | und
 }
 
 /**
- * Write a journal entry to chrome.storage.local, keyed by origin — the same
- * key format the agent loop uses (rv_<origin>). This simulates what the loop
- * does on `done`: persist the applyCss entry so reapplyPersisted() replays it
- * on the next page load.
+ * Write a journal entry to chrome.storage.local, keyed by SCOPE (origin +
+ * pathname) — the same key format the agent loop + replay path use after F4
+ * (rv_<origin><pathname>, i.e. scopeKey). This simulates what the loop does on
+ * `done`: persist the applyCss entry so reapplyPersisted()/reinsertSavedCss()
+ * replays it on the next page load.
+ *
+ * F4: includes `path` on the state and `identityDigest` on the entry (SHA-256
+ * of the primary target's fingerprint) so replay re-verifies the target. The
+ * digest is computed in the page via the real digestOfElement over the live
+ * target. A CSS act with no resolvable target passes identityDigest undefined
+ * (replay then takes the unverified path — still zero/many/twin guarded by F1).
  *
  * We persist manually because a raw toolCall (bypassing the loop) does NOT
  * trigger persistence — the loop owns persistence, not the content script.
@@ -128,18 +135,26 @@ export async function persistJournalEntry(
   const popup = await context.newPage();
   await popup.goto(`chrome-extension://${extensionId}/popup.html`);
   await page.bringToFront();
-  const origin = new URL(page.url()).origin;
-  await popup.evaluate(async ({ origin, css, goal }: { origin: string; css: string; goal: string }) => {
-    const key = 'rv_' + origin;
+  const u = new URL(page.url());
+  const origin = u.origin;
+  const path = u.pathname;
+  await popup.evaluate(async ({ origin, path, css, goal }: { origin: string; path: string; css: string; goal: string }) => {
+    const key = 'rv_' + origin + path; // F4 scopeKey (origin + pathname)
+    // identityDigest left undefined: the live act path computes it via the real
+    // fingerprint; this helper persists a CSS cycle entry, and CSS replay
+    // (reinsertSavedCss) re-inserts without a digest check, while the mismatch
+    // check skips no-digest entries. So undefined is the honest value here.
     const state = {
       enabled: true,
       origin,
+      path,
       goal,
       entries: [{
         tool: 'applyCss',
         kind: 'act',
         args: { css },
         result: { applied: css.length, chars: css.length },
+        identityDigest: undefined,
         inverse: { kind: 'removeCss', css },
         costMs: 0,
         timestamp: Date.now(),
@@ -147,7 +162,7 @@ export async function persistJournalEntry(
       createdAt: Date.now(),
     };
     await chrome.storage.local.set({ [key]: state });
-  }, { origin, css, goal });
+  }, { origin, path, css, goal });
   await popup.close();
 }
 

@@ -21,6 +21,8 @@ export class Journal {
   entries: JournalEntry[] = [];
   goal = '';
   origin = '';
+  /** F4: pathname persisted with the origin — the scope key is origin + path. */
+  path = '';
 
   append(entry: JournalEntry): void {
     this.entries.push(entry);
@@ -90,12 +92,75 @@ export class Journal {
     return { undone, failed, reason };
   }
 
+  /** F4: toState includes `path` (origin + path = the scope key). The SESSION
+   *  journal keeps everything (result, inverses with prevHtml) — the model sees
+   *  it, undo uses the clones, and the act's own guardTarget uses the result. For
+   *  PERSISTENCE use toPersistableState(), which strips cleartext page content. */
   toState(): JournalState {
     return {
       enabled: true,
       origin: this.origin,
+      path: this.path,
       goal: this.goal,
       entries: this.entries,
+      createdAt: Date.now(),
+    };
+  }
+
+  /** F4 PRIVACY (adversarial-review finding, user decision 19 Aug 2026): strip
+   *  cleartext page content from the PERSISTED state. The persisted journal must
+   *  carry only what replay needs — the act args, the identityDigest, and the
+   *  removeCss inverse's CSS (the extension's OWN output, not page content).
+   *  Stripped:
+   *    - observe/control/verify entries ENTIRELY (replay skips them; their
+   *      `result` is cleartext page text — describePage textSample, readText
+   *      text, perceivePage perception — and none is consumed by replay).
+   *    - every act entry's `result` (the act's confirmation, which carries
+   *      `before`/`after` slices of page content).
+   *    - `inverse.prevHtml` from restoreText/restoreHtml (full cleartext
+   *      innerHTML — the post-reload undo fallback). The in-session cloned-node
+   *      TransactionLog is the authoritative undo path; the innerHTML re-parse
+   *      was a documented degradation. Dropping it means a post-reload undo of
+   *      a setText/insert does nothing (no innerHTML to restore to) — accepted
+   *      by the user as the cost of the privacy-strict choice. Replay still
+   *      works (re-verify + re-execute); only the post-reload fallback-undo is
+   *      removed. The persisted op stays (the digest + selector + args are
+   *      enough to re-apply; undoAll post-reload clears storage + removes CSS).
+   *  NOT stripped: identityDigest (a SHA-256, no cleartext), removeCss.inverse.css
+   *  (our output), the act args (the CSS / text / html the MODEL authored — our
+   *  own input, not the page's content; the `text`/`html` are what we put ON the
+   *  page, not what was there before). */
+  toPersistableState(): JournalState {
+    const persistableEntries: JournalEntry[] = [];
+    for (const e of this.entries) {
+      if (e.kind !== 'act') continue; // observe/control/verify: not replayed; drop
+      const inv = e.inverse as any;
+      const cleanInv = (() => {
+        if (!inv) return undefined;
+        if (inv.kind === 'removeCss') return { kind: 'removeCss', css: inv.css }; // our output
+        if (inv.kind === 'restoreText') return { kind: 'restoreText', selector: inv.selector }; // no prevHtml
+        if (inv.kind === 'restoreHtml') return { kind: 'restoreHtml', selector: inv.selector, isInside: inv.isInside }; // no prevHtml
+        return inv;
+      })();
+      persistableEntries.push({
+        tool: e.tool,
+        kind: 'act',
+        args: e.args,
+        // result dropped (cleartext confirmation slices); the type is optional now.
+        confidence: e.confidence,
+        identityDigest: e.identityDigest,
+        inverse: cleanInv,
+        reasoning: e.reasoning,
+        costMs: e.costMs,
+        timestamp: e.timestamp,
+      } as JournalEntry);
+    }
+    return {
+      enabled: true,
+      origin: this.origin,
+      path: this.path,
+      goal: this.goal,
+      entries: persistableEntries,
       createdAt: Date.now(),
     };
   }

@@ -22,6 +22,7 @@ import { recordStructural } from '../core/ops/recorder';
 import { resolveTarget, fingerprint, type IdentityDom } from '../core/identity';
 import { liveIdentityDom } from '../core/identity-dom';
 import { getIdentity } from '../core/identity-store';
+import { digestOfElement } from '../core/persist/digest.ts';
 
 // ── F1 IDENTITY: fail-closed target guard ───────────────────────────
 // The act tools re-resolve the model's selector against the LIVE DOM at use
@@ -248,9 +249,22 @@ async function applyCss(args: any): Promise<ToolResult> {
   if (error) return { ok: false, error };
   if (!insertedCss) return { ok: false, error: 'No CSS after sanitization and parsing.' };
 
+  // F4: persisted identity digest of the primary target element (style-agnostic
+  // — a display:none / recoloured element still verifies on replay). The act
+  // verified EVERY selector above; the primary is the one replay re-verifies
+  // for wrong-target detection. null if the sheet had no single targetable
+  // selector (e.g. pure at-rules) — replay then falls back to unverified.
+  const primarySel = primaryTarget(items);
+  let identityDigest: string | undefined;
+  if (primarySel) {
+    const el = document.querySelector(primarySel.selector);
+    if (el) identityDigest = await digestOfElement(el, liveIdentityDom as IdentityDom);
+  }
+
   return {
     ok: true,
     result: { chars: insertedCss.length, css: insertedCss, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null, unverified },
+    identityDigest,
     inverse: { kind: 'removeCss', css: insertedCss },
     confidence: unverified ? 0.45 : undefined,
     costMs: 0,
@@ -322,9 +336,17 @@ async function hide(args: any): Promise<ToolResult> {
   if (error) return { ok: false, error };
   if (!insertedCss) return { ok: false, error: 'No CSS after sanitization and parsing.' };
 
+  // F4: persisted identity digest of the hidden element (style-agnostic — a
+  // display:none element still verifies on replay). guardTarget already
+  // verified `selector`; the digest lets replay re-verify the SAME element.
+  let identityDigest: string | undefined;
+  const hiddenEl = document.querySelector(selector);
+  if (hiddenEl) identityDigest = await digestOfElement(hiddenEl, liveIdentityDom as IdentityDom);
+
   return {
     ok: true,
     result: { chars: insertedCss.length, css: insertedCss, healed: healResult.steps, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null, unverified },
+    identityDigest,
     inverse: { kind: 'removeCss', css: insertedCss },
     confidence: unverified ? 0.45 : undefined,
     costMs: 0,
@@ -371,6 +393,21 @@ async function setText(args: any): Promise<ToolResult> {
   }
 
   const prevHtml = el.innerHTML;
+  // F4: capture the persisted identity digest of the PRE-mutation element so a
+  // reload/SPA-render can re-verify this is the same element before re-applying.
+  // REPLAY finds the element as reload left it — the ORIGINAL (pre-mutation)
+  // text — so the digest must describe the pre-mutation state, NOT the post-
+  // mutation one. (The undo re-verify path is separate: it uses the session
+  // `actFp` captured post-mutation below, NOT this persisted digest. The two
+  // checks have opposite timing needs and use different values — this digest is
+  // for replay, actFp is for undo.) Must digest the LIVE ATTACHED element (not
+  // the clone): the fingerprint includes depthFromRoot, which is 0 for a
+  // detached clone but correct for the live element — replay re-resolves the
+  // live element, so the digest must match the live geometry. Style-agnostic so
+  // a hidden element still verifies. Only the SHA-256 hex is persisted. See
+  // digest.ts.
+  const identityDigest = await digestOfElement(el, liveIdentityDom as IdentityDom);
+
   // F3: capture a CLONED subtree BEFORE the textContent mutation. The in-session
   // exact inverse is replaceWith(clone) (handled by the content-script
   // TransactionLog's undoAll). The serializable restoreText below is the
@@ -393,6 +430,7 @@ async function setText(args: any): Promise<ToolResult> {
   return {
     ok: true,
     result: { selector, textLength: text.length, reason, applied: true, before: prevHtml.slice(0, 50), after: text.slice(0, 50), matched: 1, unverified },
+    identityDigest,
     inverse: { kind: 'restoreText', selector, prevHtml },
     confidence: unverified ? 0.45 : undefined,
     costMs: 0,
@@ -495,6 +533,15 @@ async function insert(args: any): Promise<ToolResult> {
   const isInside = where === 'top' || where === 'bottom';
   const prevHtml = isInside ? el.innerHTML : (el.parentElement?.innerHTML ?? '');
 
+  // F4: persisted identity digest of the ANCHOR, captured BEFORE the insert —
+  // for an INSIDE insert (top/bottom) the inserted node becomes a CHILD of the
+  // anchor, changing its childCount (part of the fingerprint). Reload restores
+  // the anchor WITHOUT the inserted child, so replay must compare against the
+  // PRE-insert anchor digest (same timing rule as setText's pre-mutation
+  // digest). For OUTSIDE inserts (before/after) the anchor is unchanged, so
+  // pre/post would match — but pre is uniformly correct. Style-agnostic.
+  const identityDigest = await digestOfElement(el, liveIdentityDom as IdentityDom);
+
   // F1 fix: the old code re-found the inserted node by the GENERIC marker
   // document.querySelector('[data-revueon-inserted="true"]') — a collision
   // (two inserts in one turn, or a prior marker not cleaned) attached the
@@ -522,6 +569,7 @@ async function insert(args: any): Promise<ToolResult> {
   return {
     ok: true,
     result: { selector, where, chars: marked.length, applied, before: '', after, matched: 1, unverified },
+    identityDigest,
     inverse: { kind: 'restoreHtml', selector, prevHtml, isInside },
     confidence: unverified ? 0.45 : undefined,
     costMs: 0,
@@ -562,9 +610,19 @@ async function heal(args: any): Promise<ToolResult> {
   if (error) return { ok: false, error };
   if (!insertedCss) return { ok: false, error: 'No CSS after sanitization and parsing.' };
 
+  // F4: persisted identity digest of the (now-hidden) healed target. heal is a
+  // follow-up to a hide; the primary healed selector's element is what replay
+  // re-verifies. Style-agnostic (hidden elements still verify).
+  let identityDigest: string | undefined;
+  if (selectors[0]) {
+    const el = document.querySelector(selectors[0]);
+    if (el) identityDigest = await digestOfElement(el, liveIdentityDom as IdentityDom);
+  }
+
   return {
     ok: true,
     result: { steps: result.steps, chars: insertedCss.length, css: insertedCss, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null, unverified: anyUnverified },
+    identityDigest,
     inverse: { kind: 'removeCss', css: insertedCss },
     confidence: anyUnverified ? 0.45 : 0.7,
     costMs: 0,

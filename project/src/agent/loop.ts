@@ -18,13 +18,13 @@
  * A run must never end without either acting or stating why it could not.
  */
 
-import { callLoopModel, callVisionModel } from '../core/reason';
+import { callLoopModel } from '../core/reason';
 import { getTool } from '../tools/index';
 import { buildPrompt } from './prompt';
 import { Journal } from './journal';
 import { Budget } from './budget';
 import { AI_CONFIG } from '../core/config';
-import { saveJournalState, originKey, loadJournalState } from '../core/persist';
+import { saveJournalState, scopeKey } from '../core/persist';
 
 // D: Budget gate constants.
 // Phase 2.5 TASK2: 20s was HALF the 60s budget — it squeezed observation turns
@@ -122,6 +122,7 @@ export async function runLoop(
       origin = u.origin;
       path = u.pathname;
       journal.origin = origin;
+      journal.path = path;   // F4: scope key = origin + path
     }
   } catch { /* tab might be gone */ }
 
@@ -140,21 +141,15 @@ export async function runLoop(
     parseFailures.push({ model: model ?? '(unknown)', raw: (raw ?? '').slice(0, 4000), len: raw?.length ?? 0, turn: budget.stepsUsed, error });
   };
 
-  // Replay persisted DOM mutations for this origin (CSS is handled by webNavigation).
-  try {
-    const key = originKey(origin);
-    const stored = await loadJournalState(key);
-    if (stored.entries?.length && stored.goal === goal) {
-      for (const entry of stored.entries) {
-        if (entry.kind === 'act') {
-          const inv = entry.inverse as any;
-          if (inv?.kind === 'removeCss') continue; // CSS — background handles
-          await dispatchTool(tabId, entry.tool, entry.args);
-          journal.entries.push(entry);
-        }
-      }
-    }
-  } catch { /* ignore replay errors */ }
+  // F4 (approved Q2): persisted operations are NOT replayed by the loop. The
+  // content script owns page continuity (reapplyPersistedDom on load + SPA route
+  // change); the background owns CSS replay (webNavigation.onCommitted +
+  // onHistoryStateUpdated). The loop executing them here too was a SECOND replay
+  // path → double-application, and its `stored.goal === goal` gate broke
+  // cross-goal continuity (a "reduce clutter" run dropped a persisted "hide the
+  // sidebar"). The loop now starts with an empty journal; the model re-observes
+  // the page as it is (with persisted mods already applied). Persisted state is
+  // never converted into new journal entries merely because it was replayed.
 
   while (!budget.exhausted()) {
     const rem = budget.remaining();
@@ -186,20 +181,14 @@ export async function runLoop(
 
     budget.recordStep(0);
 
-    // E3: model tiering. Phase 2.5 TASK1 — REAL evidence (proof/transport-
-    // capture*.json, 14 calls) showed the "fast" observation model
-    // (@cf/zai-org/glm-4.7-flash) is SLOWER (8-25s, >30s sometimes → timeout)
-    // and the cause of most parse/call failures, while the strong model
-    // (@cf/zai-org/glm-5.2) is faster (1.4-3.7s) and returns valid JSON. Using
-    // the flash model for the first turns burns a turn on a timeout and is the
-    // dominant reason ACT is never reached. So: use the STRONG model for every
-    // loop turn (the cheapest *correct* call is the one that completes). This
-    // is a local change to the tier pick, not a loop redesign — the two-model
-    // config and the `useFast` heuristic stay; only the default flips so the
-    // loop stops spending its first turns on a model that times out.
-    const lastEntry = journal.entries[journal.entries.length - 1];
-    const useFast = false; // was: !hasActed && (!lastEntry || lastEntry.kind === 'observe') && !restrictToAct
-    const loopModel = useFast ? AI_CONFIG.fastModel : AI_CONFIG.strongModel;
+    // Production uses ONE model — GLM 5.2 — for every loop turn. Phase 2.5
+    // evidence showed the "fast" companion model was SLOWER (8-25s, often
+    // timing out >30s) and the cause of most parse/call failures, while GLM 5.2
+    // is faster (1.4-3.7s) and returns valid JSON. The cheapest *correct* call
+    // is the one that completes, so the second production model and its tier
+    // logic were removed in Phase 6. Vision (the former `look` tool) is
+    // test/QA-only and lives in tests/, not here.
+    const loopModel = AI_CONFIG.strongModel;
 
     // F + D: restricted tool list if consecutive no-info OR act reserve reached.
     // Phase 2.5: ALSO restrict at 1/3 budget. The prompt already SAYS "next
@@ -217,7 +206,6 @@ export async function runLoop(
     // by turnCap so observation can't breach the act reserve (TASK2).
     const callTimeout = Math.min(turnCap, AI_CONFIG.callTimeoutMs);
 
-    const callStart = Date.now();
     let modelResult = await callLoopModel({
       systemPrompt: 'You are Revueon. Respond with one JSON object only.',
       userContent: prompt,
@@ -246,7 +234,7 @@ export async function runLoop(
       if (remAfter <= retryFloor) {
         await rollbackDomIfActed(tabId, journal, origin);
         await persistJournal(journal, origin);
-        return { status: 'budgetExhausted', reason: 'budget too low for retry after parse error', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+        return { status: 'budgetExhausted', reason: 'the loop stopped because the remaining execution budget was insufficient to retry after a model parse error. Try a simpler request.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
       }
       const errorMsg = modelResult.raw
         ? `Your last response was not valid JSON: ${modelResult.raw.slice(0, 200)}. Respond with a valid JSON object.`
@@ -300,7 +288,7 @@ export async function runLoop(
     }
 
     // D: If restricted and the model called an observation tool, refuse.
-    if (restricted && tool.kind === 'observe' && toolName !== 'look') {
+    if (restricted && tool.kind === 'observe') {
       journal.append({ tool: toolName, kind: 'observe', args: toolArgs, result: { error: 'Observation not available — act reserve reached. Call an act tool (applyCss, hide, insert, setText, heal), done, or giveUp.' } as any, costMs: 0, timestamp: Date.now() });
       continue;
     }
@@ -333,28 +321,24 @@ export async function runLoop(
     // the baseline. (Matches the resize gate's newViolations approach.) The
     // baseline is cheap: one verify dispatch before the act; stored per-loop.
     let preActIssues: string[] | null = null;
-    if (tool.kind === 'act' && !tool.background) {
+    if (tool.kind === 'act') {
       try {
         const pre = await dispatchTool(tabId, 'checkLayout', {}, Math.min(budget.remaining().wallMs - ACT_RESERVE_MS, 20_000));
         preActIssues = (classifyCheckLayout(pre).allIssues) ?? [];
       } catch { preActIssues = null; } // baseline capture must never block an act
     }
     try {
-      if (tool.background) {
-        toolResult = await handleBackgroundTool(tabId, toolName, toolArgs, credentials);
-      } else {
-        // D: dispatch timeout derives from remaining budget. Phase 2.5 TASK2:
-        // an OBSERVATION dispatch (describePage/readText/findElements/perceivePage)
-        // is capped to leave the act reserve intact; an ACT dispatch owns the
-        // reserve (it IS the act). look/checkLayout are verify — they run in the
-        // reserve window once restrictToAct, or under turnCap while observing.
-        const remNow = budget.remaining().wallMs;
-        const observeDispatchCap = Math.max(MIN_TURN_MS, remNow - ACT_RESERVE_MS);
-        const dispatchTimeout = tool.kind === 'observe'
-          ? Math.min(observeDispatchCap, 30_000)
-          : Math.min(remNow, 30_000);
-        toolResult = await dispatchTool(tabId, toolName, toolArgs, dispatchTimeout);
-      }
+      // D: dispatch timeout derives from remaining budget. Phase 2.5 TASK2:
+      // an OBSERVATION dispatch (describePage/readText/findElements/perceivePage)
+      // is capped to leave the act reserve intact; an ACT dispatch owns the
+      // reserve (it IS the act). checkLayout is verify — it runs in the
+      // reserve window once restrictToAct, or under turnCap while observing.
+      const remNow = budget.remaining().wallMs;
+      const observeDispatchCap = Math.max(MIN_TURN_MS, remNow - ACT_RESERVE_MS);
+      const dispatchTimeout = tool.kind === 'observe'
+        ? Math.min(observeDispatchCap, 30_000)
+        : Math.min(remNow, 30_000);
+      toolResult = await dispatchTool(tabId, toolName, toolArgs, dispatchTimeout);
     } catch (err) {
       toolResult = { ok: false, error: (err as Error).message };
     }
@@ -367,14 +351,15 @@ export async function runLoop(
       result: toolResult.result ?? { error: toolResult.error },
       confidence: toolResult.confidence,
       inverse: toolResult.inverse,
+      // F4: persist the act's target identity digest so reload/SPA-render can
+      // re-verify the target. Only act tools set this; undefined for others.
+      identityDigest: toolResult.identityDigest,
       reasoning,
       costMs: toolResult.costMs ?? 0,
       timestamp: Date.now(),
     };
     journal.append(entry);
     onProgress?.(entry);
-
-    budget.recordCallDuration(Date.now() - callStart);
 
     // F: track consecutive observations that return no new information.
     if (tool.kind === 'observe') {
@@ -502,7 +487,7 @@ export async function runLoop(
     await persistJournal(journal, origin);
     return {
       status: 'budgetExhausted',
-      reason: 'loop exhausted budget without acting or giving up',
+      reason: 'the loop stopped because the remaining execution budget was insufficient to act. Try a simpler request, or rephrase so less observation is needed.',
       journal, budget, paidCalls, wallMs: budget.elapsedMs(),
       parseFailures,
     };
@@ -512,45 +497,10 @@ export async function runLoop(
   // cleanly succeed, so roll back every change it made. (A run that fully
   // succeeded calls `done`, which persists and returns before this point.)
   await rollbackDomIfActed(tabId, journal, origin);
-  return { status: 'budgetExhausted', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+  return { status: 'budgetExhausted', reason: 'the loop stopped because the remaining execution budget was insufficient to finish. The actions taken this run were rolled back to keep the page intact. Try a simpler request.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
 }
 
 // ── helpers ────────────────────────────────────────────────────────
-
-async function handleBackgroundTool(tabId: number, toolName: string, args: any, credentials: LoopCredentials): Promise<any> {
-  if (toolName === 'look') {
-    return handleLook(tabId, args, credentials);
-  }
-  return { ok: false, error: `unknown background tool: ${toolName}` };
-}
-
-async function handleLook(tabId: number, args: any, credentials: LoopCredentials): Promise<any> {
-  const prompt = args?.prompt as string | undefined;
-  try {
-    const dataUrl: string = await new Promise((resolve, reject) => {
-      chrome.tabs.captureVisibleTab(tabId, { format: 'png' }, (result) => {
-        if (chrome.runtime.lastError) reject(new Error(chrome.runtime.lastError.message));
-        else resolve(result);
-      });
-    });
-    const vision = await callVisionModel({
-      imageDataUrl: dataUrl,
-      prompt,
-      accountId: credentials.accountId,
-      apiKey: credentials.apiToken,
-    });
-    return {
-      ok: vision.ok,
-      result: { description: vision.description },
-      confidence: vision.ok ? 0.9 : 0.2,
-      error: vision.error,
-      costMs: 0,
-      httpRequests: vision.httpRequests,
-    };
-  } catch (err) {
-    return { ok: false, error: `look failed: ${(err as Error).message}. Try checkLayout instead for physics-based verification.`, costMs: 0 };
-  }
-}
 
 /** D: dispatch timeout derives from remaining budget. */
 function dispatchTool(tabId: number, toolName: string, args: any, timeoutMs: number = 30_000): Promise<any> {
@@ -650,23 +600,28 @@ async function rollbackDomIfActed(tabId: number, journal: Journal, origin: strin
   if (undoReply?.failed > 0) {
     console.warn(`[Revueon] F1: terminal rollback could not fully restore the DOM — ${undoReply.failed} structural undo(s) failed (stale/wrong-target). ${undoReply.undone} of ${(undoReply.undone ?? 0) + (undoReply.failed ?? 0)} restored. The page may still carry a mutation; storage has been cleared so a reload restores the original.`);
   }
-  // 3. Drop the persisted journal state for this run so a reload doesn't
+  // 3. Drop the persisted journal state for this scope so a reload doesn't
   //    re-apply a failed/partial transform. (CSS + DOM both undone above;
   //    clearing storage prevents the webNavigation re-insert path reviving it.)
+  // F4: key by origin + path (scopeKey), not origin only.
   try {
     if (origin) {
-      const key = originKey(origin);
-      await saveJournalState(key, { enabled: false, origin: '', goal: '', entries: [], createdAt: Date.now() });
+      const key = scopeKey(origin + journal.path);
+      await saveJournalState(key, { enabled: false, origin: '', path: '', goal: '', entries: [], createdAt: Date.now() });
     }
   } catch { /* ignore */ }
 }
 
-/** D: persist by origin only — not origin + path. */
+/** F4: persist by scope (origin + path). The journal holds both; scopeKey
+ *  composes the key. Uses toPersistableState() — the persisted state STRIPS
+ *  cleartext page content (observe entries, act results, inverse.prevHtml),
+ *  keeping only the replay-relevant fields + the removeCss CSS (our output) +
+ *  the SHA-256 identityDigest. See Journal.toPersistableState. */
 async function persistJournal(journal: Journal, origin: string): Promise<void> {
   try {
     if (origin) {
-      const key = originKey(origin);
-      await saveJournalState(key, journal.toState());
+      const key = scopeKey(origin + journal.path);
+      await saveJournalState(key, journal.toPersistableState());
     }
   } catch { /* ignore persistence errors */ }
 }

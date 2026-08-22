@@ -99,7 +99,8 @@ try {
   await page.bringToFront();
   await page.waitForTimeout(500);
   await popup.evaluate(async ({ accountId, apiToken }: any) => {
-    await chrome.storage.local.set({ cloudflare_account_id: accountId, cloudflare_api_token: apiToken });
+    // Consent (Phase 6): this is a dev/QA run; stand in for a consenting developer.
+    await chrome.storage.local.set({ cloudflare_account_id: accountId, cloudflare_api_token: apiToken, revueonConsentShown: true });
   }, { accountId: ACCOUNT_ID, apiToken: API_TOKEN });
   await popup.fill('#intent', 'Hide the sidebar');
   await popup.click('#transformBtn');

@@ -9,7 +9,11 @@ experiments
 .mimocode
 /tests
 project/tests/artifacts/
+project/tests/screenshots/
 project/*.log
+project/proof/parse-failures/
 .claude
 all-about_webmorph.txt
-Senior_developer_advices
+Senior_developer_advices/
+skills-lock.json
+.agents/

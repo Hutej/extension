@@ -9,7 +9,6 @@ export class Budget {
   stepsUsed = 0;
   wallStart = Date.now();
   totalCostMs = 0;
-  private callDurations: number[] = [];
 
   constructor(opts?: { maxSteps?: number; maxWallMs?: number }) {
     this.maxSteps = opts?.maxSteps ?? 12;
@@ -32,10 +31,6 @@ export class Budget {
     this.totalCostMs += costMs;
   }
 
-  recordCallDuration(ms: number): void {
-    this.callDurations.push(ms);
-  }
-
   /** D (Phase 2.5 TASK2): the maximum wall-ms an OBSERVATION call may spend
    *  from this point, so it can never breach the act reserve. The invariant:
    *  observation may only use (remaining - actReserveMs); act owns the reserve.
@@ -51,15 +46,6 @@ export class Budget {
    *  (the loop sets restrictToAct=true and refuses observation). Pure. */
   reserveIntact(actReserveMs: number): boolean {
     return this.remaining().wallMs >= actReserveMs;
-  }
-
-  /** E: use the MAX of observed call durations, not the average.
-   *  The average is too optimistic when the first call is fast and later
-   *  calls are slow. Using the max means we never start a call that would
-   *  overshoot — the worst case is the one we must plan for. */
-  avgCallMs(): number {
-    if (!this.callDurations.length) return 15_000;
-    return Math.max(...this.callDurations);
   }
 
   elapsedMs(): number {

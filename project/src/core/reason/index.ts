@@ -1,9 +1,9 @@
 /**
- * core/reason — LLM transport. The ONLY place that talks to the model.
+ * core/reason — LLM transport. The ONLY place production talks to the model.
  *
- * Two entry points:
- *   - callLoopModel  — the agent loop's single call (system + user → JSON object)
- *   - callVisionModel — screenshot description for the look tool
+ * One entry point: callLoopModel — the agent loop's single call (system + user
+ * → JSON object) to GLM 5.2. Production Revueon never sends a screenshot to a
+ * vision model — that path is TEST/QA infrastructure only, living in tests/.
  *
  * No role prompts, no DesignSpec, no vocabulary. The loop builds its own prompt.
  */
@@ -149,64 +149,3 @@ export async function callLoopModel(req: LoopModelRequest): Promise<LoopModelRes
 // an inlined copy (adversarial review wf_e3e50d92 finding). callLoopModel uses
 // it via the import at the top of this file. Re-exported here for back-compat.
 export { extractJson } from './extract';
-
-
-// ── Vision model (kimi) — the `look` tool's transport ──────────────
-//
-// Sends a screenshot (data URL) to the vision model and returns its
-// text description. This is F7 — sight. Used by the `look` tool so
-// the agent can see what it did mid-run.
-
-export interface VisionModelRequest {
-  imageDataUrl: string;     // data:image/png;base64,...
-  prompt?: string;
-  accountId: string;
-  apiKey: string;
-}
-
-export interface VisionModelResult {
-  ok: boolean;
-  description?: string;
-  error?: string;
-  httpRequests: number;
-}
-
-const VISION_MODEL = AI_CONFIG.visionModel;
-const DEFAULT_VISION_PROMPT = 'Describe what you see on this web page screenshot. Note any visible modifications: hidden sections, removed sidebars, reduced clutter, inserted content, or style overlays. Be specific and brief.';
-
-export async function callVisionModel(req: VisionModelRequest): Promise<VisionModelResult> {
-  const url = `https://api.cloudflare.com/client/v4/accounts/${req.accountId}/ai/run/${VISION_MODEL}`;
-  const prompt = req.prompt || DEFAULT_VISION_PROMPT;
-  let httpRequests = 0;
-
-  try {
-    httpRequests++;
-    const res = await fetchWithTimeout(url, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${req.apiKey}` },
-      body: JSON.stringify({
-        messages: [{ role: 'user', content: [
-          { type: 'text', text: prompt },
-          { type: 'image_url', image_url: { url: req.imageDataUrl } },
-        ]}],
-      }),
-    }, 30000);
-
-    if (!res.ok) {
-      const txt = await safeText(res);
-      return { ok: false, error: `Vision API error ${res.status}: ${txt.slice(0, 120)}`, httpRequests };
-    }
-
-    const data = await res.json();
-    const content = data?.result?.choices?.[0]?.message?.content
-      ?? data?.result?.response
-      ?? data?.choices?.[0]?.message?.content
-      ?? '';
-    if (!content) return { ok: false, error: 'Vision model returned no content.', httpRequests };
-    return { ok: true, description: content, httpRequests };
-  } catch (err) {
-    const e = err as { name?: string; message?: string };
-    if (e.name === 'AbortError') return { ok: false, error: 'Vision call timed out.', httpRequests };
-    return { ok: false, error: `Vision error: ${e.message}`, httpRequests };
-  }
-}

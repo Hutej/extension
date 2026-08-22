@@ -358,6 +358,4 @@ export const verifyTools: ToolDef[] = [
     args: { selector: 'string?' }, execute: checkContrast },
   { name: 'assertDomClean', kind: 'verify', description: 'assert no Revueon traces remain after toggle off',
     args: {}, execute: assertDomClean },
-  { name: 'look', kind: 'verify', description: 'take a screenshot and describe what is visible (vision model)',
-    args: { prompt: 'string?' }, execute: async () => ({ ok: true, result: { note: 'look runs in the background' }, costMs: 0 }), background: true },
 ];

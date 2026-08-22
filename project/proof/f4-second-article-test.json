@@ -1,0 +1,31 @@
+{
+  "pass": 5,
+  "fail": 0,
+  "checks": [
+    {
+      "name": "1 A: hide applied on /wiki/CSS (sidebar display:none)",
+      "pass": true,
+      "detail": "display=none"
+    },
+    {
+      "name": "2 A reload: sidebar stays hidden (onCommitted re-insert before paint)",
+      "pass": true,
+      "detail": "display=none"
+    },
+    {
+      "name": "3 B /wiki/HTML: sidebar is VISIBLE (strict scope — A hide does NOT propagate)",
+      "pass": true,
+      "detail": "display=block"
+    },
+    {
+      "name": "4 A-again /wiki/CSS: sidebar HIDDEN again (the hide survived the visit to B)",
+      "pass": true,
+      "detail": "display=none"
+    },
+    {
+      "name": "FAILING CASE: A-again hidden while B was visible (strict scope, not origin-only)",
+      "pass": true,
+      "detail": "A-again display=none"
+    }
+  ]
+}

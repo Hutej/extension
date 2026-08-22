@@ -3,6 +3,8 @@
  * (the brain) which runs the agent loop. Displays the result.
  */
 
+import { AI_CONFIG } from '@/core/config';
+
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
 const transformBtn = $<HTMLButtonElement>('transformBtn');
@@ -22,9 +24,11 @@ const credStatusEl = $<HTMLDivElement>('credStatus');
 const disclosureEl = $<HTMLDivElement>('disclosure');
 const disclosureOkBtn = $<HTMLButtonElement>('disclosureOk');
 
-// Consent gate — disabled for testing. MUST be re-enabled before launch.
-const CONSENT_REQUIRED = false;
-if (!CONSENT_REQUIRED) console.warn('[Revueon] CONSENT GATE DISABLED — re-enable before launch.');
+// Consent gate — required for launch. The background's runLoop handler ALSO
+// checks revueonConsentShown (the single entry point), so no caller — popup or
+// a direct chrome.runtime.sendMessage — can bypass it. One constant in
+// AI_CONFIG so the two enforcement points cannot drift.
+const CONSENT_REQUIRED = AI_CONFIG.consentRequired;
 
 // ── Cloudflare credentials ─────────────────────────────────────────
 

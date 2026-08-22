@@ -1,0 +1,148 @@
+
+═══ RUN 1: run1-summarise — "Summarise this article" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] diff: The most noticeable change is a **style/layout overlay applied to the main article area** in the second screenshot.
+
+Specifically:
+
+- **Blue vertical bar inserted:** A solid blue vertical line now run
+──────────────────────────────────────────────────────────────
+  GOAL:    Summarise this article
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  done
+  SUMMARY: Inserted a summary box at the top of the main content area summarizing the MDN article on the CSS justify-content property: it defines how the browser distributes space between and around content items along the main axis of a flex container and the inline axis of grid and multicol containers, with keyword values like start, end, flex-start, flex-end, center, left, right, space-between, space-around, space-evenly, and stretch. Layout check confirmed no issues.
+  STEPS:   5
+  CALLS:   5 model call(s)
+  TIME:    19.2s
+  TOOLS:   describePage → readText → readText → insert → checkLayout
+  CHANGED: assertApplied: 1 act(s) moved computed style
+  REFUSED: Nothing refused
+  VISION:  The most noticeable change is a **style/layout overlay applied to the main article area** in the second screenshot.
+
+Specifically:
+
+- **Blue vertical bar inserted:** A solid blue vertical line now runs down the left edge of the main content area, next to the article text.
+- **Main text compressed into a very narrow vertical strip:** The body text — starting with "The CSS justify-content property defines..." — appears squeezed into a thin column where individual letters are stacked vertically, al
+──────────────────────────────────────────────────────────────
+
+═══ RUN 2: run2-failing-case — "Hide the video player" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] WARNING: before+after screenshots are byte-identical — run is void
+  [vision] diff: [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+  GOAL:    Hide the video player
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  gaveUp
+  SUMMARY: No video player element (no <video> or <iframe> tags) was found on this MDN CSS reference page. The page appears to be a documentation article with no embedded video player to hide.
+  STEPS:   4
+  CALLS:   4 model call(s)
+  TIME:    27.2s
+  TOOLS:   describePage → findElements → findElements
+  CHANGED: No changes detected
+  REFUSED: No video player element (no <video> or <iframe> tags) was found on this MDN CSS reference page. The page appears to be a documentation article with no embedded video player to hide.
+  VISION:  [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+
+═══ RUN 3: run3-wikipedia-sidebar — "Hide the sidebar" on https://en.wikipedia.org/wiki/CSS ═══
+  [capture] drained 1 parse failure(s) for run3-wikipedia-sidebar
+  [vision] WARNING: before+after screenshots are byte-identical — run is void
+  [vision] diff: [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+  GOAL:    Hide the sidebar
+  URL:     https://en.wikipedia.org/wiki/CSS
+  STATUS:  budgetExhausted
+  SUMMARY: the loop stopped because the remaining execution budget was insufficient to retry after a model parse error. Try a simpler request.
+  STEPS:   6
+  CALLS:   6 model call(s)
+  TIME:    48.1s
+  TOOLS:   describePage → findElements → findElements → applyCss → hide → checkLayout
+  CHANGED: assertApplied: 1 act(s) moved computed style
+  REFUSED: the loop stopped because the remaining execution budget was insufficient to retry after a model parse error. Try a simpler request.
+  VISION:  [VOID: before+after screenshots are byte-identical]
+──────────────────────────────────────────────────────────────
+  [run3] F4 continuity: reload=true /wiki/HTML=true (should be false) return=true → FAIL ✗
+
+═══ RUN 4: run4-reduce-clutter — "Reduce clutter" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [capture] drained 1 parse failure(s) for run4-reduce-clutter
+  [vision] diff: The visible change is in the **left sidebar filter/list**:
+
+- **The filter input** now contains the text `"gap"` (previously empty).
+- **The property list below the filter has changed completely**. In
+──────────────────────────────────────────────────────────────
+  GOAL:    Reduce clutter
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  budgetExhausted
+  SUMMARY: the loop stopped because the remaining execution budget was insufficient to retry after a model parse error. Try a simpler request.
+  STEPS:   7
+  CALLS:   7 model call(s)
+  TIME:    48.0s
+  TOOLS:   describePage → findElements → findElements → applyCss → describePage → findElements
+  CHANGED: No changes detected
+  REFUSED: the loop stopped because the remaining execution budget was insufficient to retry after a model parse error. Try a simpler request.
+  VISION:  The visible change is in the **left sidebar filter/list**:
+
+- **The filter input** now contains the text `"gap"` (previously empty).
+- **The property list below the filter has changed completely**. Instead of showing properties around **justify-content** (`interpolate-size`, `isolation`, the expanded `justify-*` group with highlighted `justify-content`, `left`, `letter-spacing`, `lighting-color`, `line-*`, `link-parameters`, `list-*`), it now shows a different alphabetical range including:
+  - `
+──────────────────────────────────────────────────────────────
+
+═══ RUN 5: run5-hn-spacing — "Increase spacing" on https://news.ycombinator.com/ ═══
+  [vision] diff: The second screenshot is vertically cropped and no longer shows the bottom item that is visible in the first screenshot.
+
+Specifically, **item #20 — “OTel isn't going well” (matduggan.com)** is comple
+──────────────────────────────────────────────────────────────
+  GOAL:    Increase spacing
+  URL:     https://news.ycombinator.com/
+  STATUS:  done
+  SUMMARY: Applied CSS `#hnmain { border-spacing: 0 16px; }` to increase vertical spacing between rows on the Hacker News main table, which is the primary layout container for all page content. This adds 16px of vertical spacing between table rows, increasing overall spacing across the page.
+  STEPS:   5
+  CALLS:   5 model call(s)
+  TIME:    40.6s
+  TOOLS:   describePage → applyCss → applyCss → applyCss → checkLayout
+  CHANGED: assertApplied: 1 act(s) moved computed style
+  REFUSED: Nothing refused
+  VISION:  The second screenshot is vertically cropped and no longer shows the bottom item that is visible in the first screenshot.
+
+Specifically, **item #20 — “OTel isn't going well” (matduggan.com)** is completely removed/hidden in the second image, while items 1–19 remain in the same positions with identical text, spacing, header, and styling. There are no other visible changes to sidebars, layout, or overlays.
+──────────────────────────────────────────────────────────────
+  [run5] resize check: 1440 → 380 → 1440
+  [run5] overflow at 380px: NO ✓
+  [run5] overflow at 1440px: NO ✓
+
+═══ RUN 6: run6-toggle-cycle — "Summarise this article" on https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content ═══
+  [vision] diff: The second screenshot has visible visual artifacts/overlay changes not present in the first:
+
+1. **Inserted vertical text overlay**: A column of blue/purple letters appears vertically along the left e
+──────────────────────────────────────────────────────────────
+  GOAL:    Summarise this article
+  URL:     https://developer.mozilla.org/en-US/docs/Web/CSS/justify-content
+  STATUS:  done
+  SUMMARY: I read the article content from the MDN page on the CSS `justify-content` property and inserted a summary box at the top of the main content area. The summary explains that `justify-content` defines how the browser distributes space between and around content items along the main axis of a flex container and the inline axis of grid and multicol containers, listing key keyword values (start, end, flex-start, flex-end, center, left, right, space-between, space-around, space-evenly, stretch, etc.). Layout check confirmed no issues.
+  STEPS:   5
+  CALLS:   5 model call(s)
+  TIME:    28.3s
+  TOOLS:   describePage → readText → readText → insert → checkLayout
+  CHANGED: assertApplied: 1 act(s) moved computed style
+  REFUSED: Nothing refused
+  VISION:  The second screenshot has visible visual artifacts/overlay changes not present in the first:
+
+1. **Inserted vertical text overlay**: A column of blue/purple letters appears vertically along the left edge of the main content area, partially obscuring the page text. Visible fragments include letters like "r", "T", "t", "a", "T", "t", "e", "S", "u", "m", "m" running down the left side of the article content.
+
+2. **Inserted icon near heading**: A small icon (resembling a pencil/edit icon) appears ne
+──────────────────────────────────────────────────────────────
+  [run6] off/on/off toggle cycle starting
+FAILED: run6-toggle-cycle — [run6-toggle-cycle toggle-off-1] DOM NOT CLEAN — fingerprint differs from baseline.
+  baseline[0..600]: body[class=page-layout](ul[class=a11y-menu](li(a[data-glean-id=a11y_menu: click #content,href=#content]:Skip to main content),li(a[data-glean-id=a11y_menu: click #search,href=#search]:Skip to search)),div[class=page-layout__banner,data-scheme=](mdn-placement-top),header[class=page-layout__header](nav[class=navigation,data-open=false,data-scheme=](div[class=navigation__logo](a[class=logo,href=/en-US/](svg[class=logo__image,height=24,role=img,viewBox=0 0 83 24,width=83](title:MDN,path[class=logo__letter,d=M9.4 0 2.81 21.17H.12L6.69 0H9.4Zm2.38 0v21.17H9.4V0h2.4Zm9.27 0-6.56 21.17H11.8L18.36 0h2.
+  current[0..600]:  body[class=page-layout](ul[class=a11y-menu](li(a[data-glean-id=a11y_menu: click #content,href=#content]:Skip to main content),li(a[data-glean-id=a11y_menu: click #search,href=#search]:Skip to search)),div[class=page-layout__banner,data-scheme=](mdn-placement-top),header[class=page-layout__header](nav[class=navigation,data-open=false,data-scheme=](div[class=navigation__logo](a[class=logo,href=/en-US/](svg[class=logo__image,height=24,role=img,viewBox=0 0 83 24,width=83](title:MDN,path[class=logo__letter,d=M9.4 0 2.81 21.17H.12L6.69 0H9.4Zm2.38 0v21.17H9.4V0h2.4Zm9.27 0-6.56 21.17H11.8L18.36 0h2.
+
+═══ CONTROL PAIR — identical screenshots ═══
+  control pair: PASS ✓ (vision correctly reported no change)
+  vision: nothing changed
+
+
+═══ SUMMARY ═══
+  Summarise this article: done (5 steps, 5 calls, 19.2s)
+  Hide the video player: gaveUp (4 steps, 4 calls, 27.2s)
+  Hide the sidebar: partial (6 steps, 6 calls, 48.1s)
+  Reduce clutter: budgetExhausted (7 steps, 7 calls, 48.0s)
+  Increase spacing: done (5 steps, 5 calls, 40.6s)
+  Summarise this article: done (5 steps, 5 calls, 28.3s)
+  Summarise this article: error (0 steps, 0 calls, 0.0s)
