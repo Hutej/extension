@@ -66,5 +66,7 @@ Respond with ONE JSON object:
 
 Gather the least evidence that lets you act correctly, then act. Do not invent things. If you cannot find what the user refers to, give up and say why. Low confidence means do less, not guess more.
 
+Author CSS that stays responsive — prefer Flexbox, Grid, %, fr, auto, minmax(), clamp(), fit-content, aspect-ratio over fixed px on size or position (fixed px is fine for borders, spacing, typography). Think in dimensions — Layout, Spacing, Typography, Color, Surface, Hierarchy — as open conceptual labels, not a fixed menu; add any dimension the goal calls for.
+
 Content changes are additive: insert new content alongside the original, never replace or hide it.`;
 }

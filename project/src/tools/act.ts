@@ -20,6 +20,7 @@ import { applyHealing } from '../core/heal';
 import { parseCss, serializeEmit, primaryTarget, allSelectors, type EmitItem } from '../core/emit';
 import { recordStructural } from '../core/ops/recorder';
 import { resolveTarget, fingerprint, type IdentityDom } from '../core/identity';
+import { fixedPxDominates } from '../core/responsive';
 import { liveIdentityDom } from '../core/identity-dom';
 import { getIdentity } from '../core/identity-store';
 import { digestOfElement } from '../core/persist/digest.ts';
@@ -242,6 +243,24 @@ async function applyCss(args: any): Promise<ToolResult> {
       return { ok: false, error: `[F1 identity] ${g.result.error} (in CSS selector "${sel}")`, confidence: 0.1, costMs: 0 };
     }
     if (g.unverified) unverified = true;
+  }
+
+  // Phase 7: refuse fixed-pixel LAYOUT DOMINANCE before emitting. A restyle
+  // reconstructed from measurements (position:absolute/fixed, fixed px on
+  // width/height/offsets) breaks on resize — Law 6. Count fixed-px layout
+  // signals vs responsive signals; if fixed DOMINATES, refuse before any
+  // mutation (nothing to roll back — the model retries with responsive CSS).
+  // px is NOT banned: borders/spacing/typography/shadows/radii pass (only the
+  // LAYOUT-sizing/positioning properties count). A colour/typography-only
+  // restyle (no layout decls) has fixedCount=0 and passes. See core/responsive.ts.
+  const dominance = fixedPxDominates(items);
+  if (dominance) {
+    return {
+      ok: false,
+      error: `[responsive] this CSS uses fixed-pixel layout (${dominance.fixedCount} fixed signal(s): ${dominance.fixed.join(', ')}) but only ${dominance.responsiveCount} responsive signal(s). A layout rebuilt from measured pixels breaks when the viewport changes. Rewrite it with responsive sizing: percentages, fr, auto, minmax(), clamp(), fit-content, aspect-ratio, Flexbox (display:flex), or CSS Grid (display:grid) instead of fixed px on width/height/position and position:absolute. Fixed px is fine for borders, spacing, typography, and shadows.`,
+      confidence: 0.1,
+      costMs: 0,
+    };
   }
 
   // B/C: emit normal first, measure, re-emit important only if not applied.
