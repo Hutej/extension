@@ -17,3 +17,7 @@ all-about_webmorph.txt
 Senior_developer_advices/
 skills-lock.json
 .agents/
+graphify-out/
+.opencode/
+project/proof/
+project/tests/
