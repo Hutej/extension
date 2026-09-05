@@ -42,6 +42,11 @@ export interface CandidateRegion {
    *  element is caught (fail-closed), not silently mutated. Style-agnostic, so
    *  it survives the transform we apply. Present only when targetable. */
   fingerprint?: Fingerprint;
+  /** TRANSIENT — observe-time only, never serialized or persisted. The live
+   *  element behind the region. The T1 design snapshot reads its computed
+   *  style (design evidence must not depend on targetability); describePage's
+   *  regions.map() picks plain fields, so this never reaches the model. */
+  el?: Element;
 }
 
 const IGNORED = new Set(['SCRIPT', 'STYLE', 'NOSCRIPT', 'BR', 'HR', 'WBR', 'LINK', 'META', 'TEMPLATE', 'SLOT', 'PATH', 'DEFS']);
@@ -123,7 +128,7 @@ function buildRegion(el: Element, rid: number, rect: DOMRect, vpH: number): Cand
   // (excludes `style` + our stamps), so it survives the transform we apply.
   const fp = targetable ? fingerprint(el as Element, liveIdentityDom as IdentityDom) : undefined;
 
-  return { id: `r${rid}`, tag, role, componentType: compType, textSample, position, width, repeatCount, selector, targetable, untargetableReason, fingerprint: fp };
+  return { id: `r${rid}`, tag, role, componentType: compType, textSample, position, width, repeatCount, selector, targetable, untargetableReason, fingerprint: fp, el };
 }
 
 function inferRole(el: Element): string {

@@ -64,6 +64,8 @@ export interface LoopModelRequest {
   model?: string;
   timeoutMs?: number;
   maxTokens?: number;
+  /** R0 benchmark: reasoning-effort override ('low' is the production default). */
+  reasoningEffort?: 'low' | 'medium' | 'high';
   /** E1: temperature for determinism. 0 on tool-selection turns. */
   temperature?: number;
 }
@@ -72,7 +74,10 @@ export async function callLoopModel(req: LoopModelRequest): Promise<LoopModelRes
   const model = req.model ?? AI_CONFIG.strongModel;
   const reasoning = isReasoningModel(model);
   const timeout = req.timeoutMs ?? AI_CONFIG.callTimeoutMs;
-  const maxTokens = req.maxTokens ?? AI_CONFIG.maxCompletionTokens;
+  // An explicit maxTokens overrides (benchmark harness); null/undefined = NO
+  // artificial cap — the provider default applies and the model is never
+  // truncated mid-thought.
+  const maxTokens = req.maxTokens ?? AI_CONFIG.maxCompletionTokens ?? undefined;
   let useResponseFormat = true;
   let useReasoningEffort = true;
   let useTemperature = req.temperature !== undefined;
@@ -82,14 +87,16 @@ export async function callLoopModel(req: LoopModelRequest): Promise<LoopModelRes
   while (true) {
     const bodyObj: Record<string, unknown> = {
       model,
-      max_completion_tokens: maxTokens,
       messages: [
         { role: 'system', content: req.systemPrompt },
         { role: 'user', content: req.userContent },
       ],
     };
+    // Only set a completion cap when one is explicitly configured — an unset
+    // field means "let the provider decide", not "truncate the agent".
+    if (maxTokens !== undefined) bodyObj.max_completion_tokens = maxTokens;
     if (useResponseFormat) bodyObj.response_format = { type: 'json_object' };
-    if (reasoning && useReasoningEffort) bodyObj.reasoning_effort = 'low';
+    if (reasoning && useReasoningEffort) bodyObj.reasoning_effort = req.reasoningEffort ?? 'low';
     // E1: temperature 0 for determinism on tool-selection turns.
     if (useTemperature && req.temperature !== undefined) bodyObj.temperature = req.temperature;
 

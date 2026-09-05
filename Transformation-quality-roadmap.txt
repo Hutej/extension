@@ -1,0 +1,2060 @@
+# Revueon — Transformation-quality-roadmap.txt
+#
+# FINAL COMBINED ROADMAP
+#
+# Built by combining:
+# - Transformation-quality-roadmap1.txt: primary strategy — design intelligence first
+# - Transformation-quality-roadmap(2).txt: selected hard verification and safety improvements
+#
+# This roadmap deliberately keeps the strongest ideas from both while avoiding
+# their weaknesses. It does NOT restart Revueon's architecture.
+
+Authored after the seven foundation phases were completed and proven.
+
+The foundation work is not the current bottleneck. The loop runs, actions are
+reversible, integrity is enforced, identity is guarded, continuity survives
+reload, and the responsive gate exists. The remaining problem is the product
+itself: transformation quality.
+
+The goal now is to make Revueon's transformations:
+- visually convincing
+- faithful to user intent
+- coherent across multiple design dimensions
+- responsive and readable
+- safe and reversible
+- fast enough for real use
+- reliable across different websites
+
+This roadmap is primarily about improving transformation quality, not building
+another architecture. The loop, deterministic runtime, reversal, identity,
+integrity and persistence remain the foundation.
+
+======================================================================
+0. IMPORTANT: WHICH OLD ROADMAP WAS WHICH?
+======================================================================
+
+The four files originally provided were:
+
+1. roadmap(5).txt
+   = the earlier FOUNDATION roadmap.
+   Its phases are the work that established the current Revueon foundation.
+
+2. all-about_revueon.txt
+   = the PRODUCT definition and philosophy.
+   It explains what Revueon is and what the product must eventually do.
+
+3. Transformation-quality-roadmap1.txt
+   = ROADMAP 1 in the comparison.
+   Its core thesis:
+       "The model is design-blind. Give it compact design context and better
+        design intelligence before trying to police every output."
+
+   This is the PRIMARY strategy used in this final roadmap.
+
+4. Transformation-quality-roadmap(2).txt
+   = ROADMAP 2 in the comparison.
+   Its core thesis:
+       "The current gates prove that the page did not break, but they do not
+        prove that the transformation is high quality."
+
+   This roadmap contributes SELECTED verification and safety improvements:
+   - proper contrast protection
+   - reduced-motion handling
+   - real resize-invariance proof
+   - baseline-diff verification
+   - distinction between hard failures and advisory quality feedback
+   - documentation truthing
+   - explicit evidence for things that passed mechanically but still look bad
+
+FINAL DECISION:
+
+Transformation-quality-roadmap1.txt is the main backbone.
+
+Transformation-quality-roadmap(2).txt contributes the verification layer and
+specific correctness improvements.
+
+This file replaces both as the roadmap to follow.
+
+======================================================================
+1. PRODUCT CONTEXT — WHAT REVUEON IS ACTUALLY BUILDING
+======================================================================
+
+Revueon is an AI-powered browser extension that lets users transform websites
+using natural language.
+
+Examples include:
+
+- Hide YouTube Shorts permanently.
+- Remove distracting content.
+- Increase spacing.
+- Reduce clutter.
+- Convert a site to glassmorphism.
+- Convert a site to neobrutalism.
+- Make a page feel like Notion.
+- Turn Wikipedia into a magazine.
+- Turn YouTube into something more like Spotify.
+- Turn Amazon into something more like Apple.
+- Replace layouts.
+- Add shortcuts.
+- Modify interaction behaviour.
+- Rewrite workflows.
+
+The product goal is NOT merely:
+- CSS generation
+- theming
+- dark mode
+- reader mode
+- userscripts
+- another browser
+
+The actual goal is to allow the user to reshape a website's:
+- layout
+- appearance
+- density
+- navigation
+- workflow
+- interaction
+- keyboard shortcuts
+- behaviour
+
+while preserving original website functionality.
+
+The browser already knows how to render.
+The runtime already knows how to mutate safely.
+The AI should understand intent and reason about what should change.
+
+This roadmap therefore must improve the AI's ability to produce transformations,
+not replace the AI with another deterministic design engine.
+
+======================================================================
+2. THE CORE DIAGNOSIS
+======================================================================
+
+The main transformation-quality problem is:
+
+THE MODEL IS PARTIALLY DESIGN-BLIND.
+
+Today the model can:
+- find semantic regions through describePage
+- understand some structure
+- call actions such as applyCss
+- modify the live page
+
+But it does not consistently receive enough information about what the page
+currently looks like as a visual system.
+
+The model can be asked:
+
+    "Make this more premium."
+
+but may not know:
+- the current palette
+- dominant backgrounds
+- text colors
+- accent relationships
+- typography scale
+- font families
+- spacing rhythm
+- density
+- border vocabulary
+- radius vocabulary
+- shadow/elevation system
+- surface language
+- current layout characteristics
+
+Therefore it often invents CSS from scratch.
+
+This is the root intelligence bottleneck.
+
+At the same time, the current system has another real problem:
+
+A transformation can pass safety checks while still looking bad.
+
+The existing system is strong at asking:
+
+    "Did the page break?"
+
+but weaker at asking:
+
+    "Did the result actually look intentional and good?"
+
+Both problems must be solved.
+
+The correct order is:
+
+1. Give the model better design evidence.
+2. Improve how the model reasons about design.
+3. Improve individual transformation dimensions.
+4. Add objective safety and correctness gates.
+5. Add advisory quality feedback.
+6. Test coordinated transformations.
+7. Optimize speed and reliability.
+
+The wrong approach would be:
+
+1. Build a huge rule engine.
+2. Add dozens of design gates.
+3. Rebuild the deleted architecture.
+4. Accidentally recreate the old DSL/solver/pipeline.
+
+We will not do that.
+
+======================================================================
+3. THE FINAL PRINCIPLE
+======================================================================
+
+INTELLIGENCE FIRST -> QUALITY DIMENSIONS -> VERIFICATION -> OPTIMIZATION
+
+The AI remains the author.
+
+The runtime:
+- executes
+- protects
+- verifies
+- reverses when objectively necessary
+
+The runtime should NOT become another system that tries to creatively design the
+website itself.
+
+======================================================================
+4. CURRENT FOUNDATION — DO NOT REINVENT
+======================================================================
+
+The existing foundation is considered the starting point.
+
+The roadmap assumes the following foundation work remains in place:
+
+- F1 IDENTITY:
+  structural descriptors are re-resolved at use time and fail closed.
+
+- F3 REVERSAL:
+  changes are reversible, including verified repeated on/off behaviour.
+
+- F4 CONTINUITY:
+  customization survives the defined persistence/replay scope.
+
+- F5 INTEGRITY:
+  layout and page integrity checks run around changes and broken changes can
+  be undone.
+
+- F6 LOOP:
+  the agent loop, budget, parsing recovery and related execution controls exist.
+
+- PHASE 7 RESPONSIVE PROTECTION:
+  the current gate refuses dangerous fixed-pixel layout dominance.
+
+The exact current implementation must be verified against the phase reports and
+current source code before each implementation phase.
+
+Do not treat an old documentation file as the truth.
+
+The current code and proven phase reports are the truth.
+
+======================================================================
+5. THE HONEST QUALITY GAPS
+======================================================================
+
+GAP 1 — DESIGN CONTEXT GAP
+
+describePage primarily exposes semantic regions.
+
+The model needs design information alongside semantic information.
+
+Without this, it is asked to redesign a page it cannot adequately see as a
+design system.
+
+Fix:
+Create a compact design snapshot available during ordinary observation.
+
+----------------------------------------------------------------------
+GAP 2 — PROMPT INTELLIGENCE GAP
+----------------------------------------------------------------------
+
+The prompt currently needs stronger, compact design reasoning principles.
+
+The model needs to understand:
+- hierarchy
+- proportional typography
+- spacing rhythm
+- palette coordination
+- surface consistency
+- theme transformation as coordinated multi-dimension work
+- motion principles
+
+This must fit within the existing prompt philosophy and hard size constraints.
+
+Do NOT turn the prompt into a 7,000-character rulebook again.
+
+----------------------------------------------------------------------
+GAP 3 — COLOR QUALITY GAP
+----------------------------------------------------------------------
+
+The model may write raw colors without understanding:
+- existing palette
+- hue relationships
+- dominant backgrounds
+- accent roles
+- readable text
+- dark mode relationships
+- gradients
+
+Existing color primitives should be reused.
+
+----------------------------------------------------------------------
+GAP 4 — TYPOGRAPHY QUALITY GAP
+----------------------------------------------------------------------
+
+The model needs awareness of:
+- current body size
+- heading hierarchy
+- font families
+- scale ratios
+- consistency
+- reading measure
+- line height
+
+"Increase font size" should not mean arbitrary isolated pixel changes.
+
+----------------------------------------------------------------------
+GAP 5 — SPACING AND DENSITY GAP
+----------------------------------------------------------------------
+
+The model needs awareness of:
+- current spacing scale
+- rhythm
+- compact/comfortable/spacious density
+- grouping
+- proportional changes
+
+"Increase spacing" must change the visual system consistently rather than adding
+one random margin.
+
+----------------------------------------------------------------------
+GAP 6 — SURFACE AND DEPTH GAP
+----------------------------------------------------------------------
+
+The model needs awareness of:
+- surface language
+- borders
+- radii
+- shadows
+- elevation
+- gradients
+- transparency
+- backdrop effects
+
+A page transformation should not add one generic box-shadow everywhere.
+
+----------------------------------------------------------------------
+GAP 7 — THEME / STYLE TRANSFORMATION GAP
+----------------------------------------------------------------------
+
+This is a major product feature.
+
+Requests such as:
+- glassmorphism
+- neobrutalism
+- magazine/editorial
+- 90s old-school
+- minimal
+- "make this feel like Notion"
+
+are coordinated transformations across multiple dimensions.
+
+They must remain OPEN natural-language concepts.
+
+Do not create a closed enum of allowed themes.
+
+The model interprets the request and maps the style onto the current page.
+
+----------------------------------------------------------------------
+GAP 8 — OBJECTIVE VERIFICATION GAP
+----------------------------------------------------------------------
+
+Some failures are objectively unacceptable even if the design is creative.
+
+Examples:
+- unreadable text
+- new overflow
+- overlap after resize
+- inaccessible motion
+- invisible content
+- broken layout
+
+These need hard verification.
+
+----------------------------------------------------------------------
+GAP 9 — SUBJECTIVE QUALITY GAP
+----------------------------------------------------------------------
+
+Not every design-quality problem should automatically block a transformation.
+
+For example:
+- unusual spacing
+- intentionally unconventional typography
+- a creative color palette
+
+may be acceptable.
+
+Therefore:
+
+HARD FAILURES:
+objectively broken or unsafe results -> reject/undo
+
+ADVISORY QUALITY FEEDBACK:
+subjective inconsistency -> report to the model -> let the model improve
+
+This distinction is critical.
+
+----------------------------------------------------------------------
+GAP 10 — SPEED GAP
+----------------------------------------------------------------------
+
+The model should not need multiple expensive observations merely to understand
+the current design.
+
+A good compact design snapshot can reduce:
+
+describePage
+    ->
+perceivePage
+    ->
+more observation
+    ->
+finally act
+
+into:
+
+describePage with semantic regions + design snapshot
+    ->
+act
+
+This can improve both quality and speed.
+
+----------------------------------------------------------------------
+GAP 11 — INSERT QUALITY GAP
+----------------------------------------------------------------------
+
+Inserted UI should match the page's design language.
+
+A summary panel should not always look like the same generic flat rectangle.
+
+An insertion on:
+- a glass site
+- a material site
+- a neobrutalist site
+
+should inherit or intentionally coordinate with the relevant visual language.
+
+======================================================================
+6. WHAT ALREADY EXISTS AND SHOULD BE REUSED
+======================================================================
+
+Do not rewrite working perception code merely because it was previously connected
+to an architecture that was deleted.
+
+The useful part is the data.
+
+Potentially reusable existing work includes:
+
+- extractDesignTokens
+  Provides useful design-token information such as type scale, palette and
+  spacing scale.
+
+- buildColorModel
+  Provides palette and color-system information.
+
+- buildTypeRamp
+  Provides distinct sizes, weights, families, ratios and scale consistency.
+
+- classifySurfaceLanguage
+  Provides surface/depth vocabulary such as flat/material/glass/soft and
+  related visual characteristics.
+
+- measureDensityV2
+  Provides rhythm and density information.
+
+- buildSpatialModel
+  Provides layout-related information such as columns, gutters, symmetry,
+  focal characteristics and reading order.
+
+- buildElevationModel
+  Provides shadow/elevation/floating-region information.
+
+- shared/color.ts
+  Existing color math and readability primitives should be reused rather than
+  duplicated.
+
+The correct action is:
+
+REUSE THE USEFUL DATA
+NOT
+RESURRECT THE DELETED PIPELINE
+
+Explicitly do NOT bring back:
+- the closed relation vocabulary
+- design packs
+- deterministic theme menus
+- the old solver/compiler architecture
+- transform/expand machinery merely because it existed
+
+The AI authors the transformation.
+The system gives it evidence and verifies results.
+
+======================================================================
+7. NON-NEGOTIABLE ROADMAP RULES
+======================================================================
+
+1. NO BIG ARCHITECTURE REWRITE
+
+The foundation remains.
+This roadmap improves intelligence and quality.
+
+2. EVERY USER REQUEST GOES TO THE MODEL
+
+No keyword table that bypasses reasoning.
+No fixed action lookup replacing the agent.
+
+3. NO CLOSED DESIGN VOCABULARY
+
+Design dimensions are conceptual labels, not an enum.
+
+Theme names are descriptions, not preset buttons.
+
+4. PROMPT SIZE REMAINS CONTROLLED
+
+The existing prompt size ceiling remains a ceiling.
+
+Every added line must justify itself through measurable output improvement.
+
+5. GREEN IS NOT DONE
+
+Passing unit or structural tests does not prove that the result looks good.
+
+Each relevant phase requires:
+- automated evidence
+- deliberate failure cases where appropriate
+- real-site testing
+- by-eye quality review
+- a report
+
+6. LET THE BROWSER DO BROWSER WORK
+
+CSS remains the default transformation mechanism.
+
+DOM mutation remains deliberate and rare.
+
+7. EVERY ACT REMAINS REVERSIBLE
+
+Do not weaken:
+- identity
+- reversal
+- integrity
+- continuity
+- responsive protection
+
+8. NO NEW PERCEPTION DATA WITHOUT A CONSUMER
+
+Do not build another orphaned perception subsystem.
+
+Every field must answer:
+- Which model decision uses it?
+or
+- Which verification uses it?
+
+9. HARD FAILURE IS NOT THE SAME AS BAD TASTE
+
+Objectively broken output can block.
+
+Subjective quality problems should normally be advisory.
+
+10. BUILD ONE PHASE AT A TIME
+
+For every phase:
+
+BUILD
+->
+TEST
+->
+DELIBERATE FAILURE CASE
+->
+REAL SITE
+->
+BY-EYE REVIEW
+->
+REPORT
+->
+WAIT FOR APPROVAL
+->
+NEXT PHASE
+
+======================================================================
+8. FINAL PHASE ORDER
+======================================================================
+
+PHASE T0
+Documentation and current-state truthing
+
+PHASE T1
+Design Context Bridge
+
+PHASE T2
+Prompt and Design Intelligence
+
+PHASE T3
+Objective visual correctness: contrast + responsive proof + motion safety
+
+PHASE T4
+Color and Theme Foundations
+
+PHASE T5
+Typography Quality
+
+PHASE T6
+Spacing and Density Quality
+
+PHASE T7
+Surface, Borders and Depth
+
+PHASE T8
+Coordinated Theme / Style Transformations
+
+PHASE T9
+Motion and Interaction Quality
+
+PHASE T10
+Design Quality Feedback System
+
+PHASE T11
+Insert Quality
+
+PHASE T12
+Speed, Reliability and Real-World Benchmarking
+
+This ordering deliberately differs from both original roadmaps.
+
+The reason is:
+
+Roadmap 1 was correct:
+    DESIGN INTELLIGENCE IS THE MAIN ROOT CAUSE.
+
+Roadmap 2 was correct:
+    SOME OBJECTIVE QUALITY FAILURES MUST BE PREVENTED EARLY.
+
+Therefore:
+T1 and T2 improve intelligence first.
+T3 installs essential objective protection.
+Then the design dimensions are improved.
+Then coordinated transformations are tested.
+Then advisory quality feedback is consolidated.
+Then speed and benchmarking prove product improvement.
+
+======================================================================
+PHASE T0 — DOCUMENTATION AND CURRENT-STATE TRUTHING
+======================================================================
+
+GOAL
+
+Ensure that future quality work is based on the real current architecture rather
+than stale documentation.
+
+WHY FIRST
+
+The documentation was explicitly identified as old.
+
+However, this must remain a small truthing phase, not a week-long documentation
+project.
+
+WHAT TO DO
+
+1. Read the current source and the completed phase reports.
+
+2. Rewrite docs/ARCHITECTURE.md so it describes the actual system.
+
+3. Remove references to deleted architecture.
+
+4. Correct outdated claims about:
+   - models
+   - production vision
+   - observation/verification tools
+   - stubs versus live capabilities
+   - CSS emission path
+   - USER-origin insertion if that is the current implementation
+   - current loop behaviour
+   - identity
+   - reversal
+   - integrity
+   - continuity
+   - responsive protection
+
+5. Correct other documentation that contradicts current code.
+
+6. Clearly mark stubs as stubs.
+
+IMPORTANT
+
+Do not assume an old roadmap's claim is still correct.
+
+Verify against:
+- current code
+- proof reports
+- actual exports
+- actual tool registry
+
+DONE MEANS
+
+A new developer can read the architecture documentation and accurately understand
+what is live today.
+
+No implementation phase should rely on documentation that contradicts code.
+
+======================================================================
+PHASE T1 — DESIGN CONTEXT BRIDGE
+======================================================================
+
+PRIORITY: HIGHEST
+
+GOAL
+
+The model sees the current page's design system every time it performs ordinary
+observation.
+
+WHY THIS IS FIRST
+
+This is the largest leverage point in the entire roadmap.
+
+The AI currently has semantic understanding but insufficient compact visual
+design context.
+
+Before trying to teach it more rules, first give it better evidence.
+
+THE CHANGE
+
+describePage should return:
+
+A. Existing semantic regions
+
+PLUS
+
+B. A compact DESIGN SNAPSHOT
+
+The snapshot must be additive.
+
+Do not remove useful existing region data.
+
+TARGET CHARACTERISTICS
+
+Compact enough to be cheap.
+Rich enough to influence decisions.
+Not a huge perception dump.
+
+An illustrative format:
+
+DESIGN:
+palette[
+  bg=#...
+  accents=#...,#...
+  text=#...,#...
+  relationship=analogous
+]
+type[
+  body=16px
+  heading=24px
+  display=32px
+  ratio=...
+  consistent=true
+]
+spacing[
+  8,16,24
+  density=comfortable
+]
+surface[
+  language=flat
+  radii=0,4
+  border=...
+  shadow=...
+]
+layout[
+  columns=...
+  contentWidth=...
+  focal=...
+]
+
+The exact representation should be decided experimentally.
+
+THE SNAPSHOT SHOULD PROVIDE WHERE AVAILABLE
+
+COLOR
+- dominant backgrounds
+- accents
+- text colors
+- hue relationships
+- saturation/lightness characteristics
+- gradients where useful
+
+TYPOGRAPHY
+- body size
+- heading/display sizes
+- families
+- weights
+- scale ratios
+- consistency
+
+SPACING
+- common spacing scale
+- rhythm baseline
+- density class
+
+SURFACE
+- visual surface language
+- radius vocabulary
+- border vocabulary
+- shadow/elevation characteristics
+
+LAYOUT
+- high-level columns
+- content width
+- focal information where useful
+
+IMPLEMENTATION APPROACH
+
+Do not automatically run the most expensive perception pipeline blindly.
+
+Experiment with:
+
+OPTION A
+Use the existing perception result.
+
+OPTION B
+Create a fast path that extracts only the required compact information.
+
+OPTION C
+Cache the design snapshot for the appropriate page/session lifetime.
+
+Measure before deciding.
+
+TEST THE COST ON REAL SITES
+
+At minimum:
+- MDN
+- Wikipedia
+- Hacker News
+
+Potential later stress sites:
+- YouTube
+- Reddit
+- GitHub
+
+IMPORTANT
+
+The model should normally receive enough design context from describePage that
+it does not need a second expensive observation for ordinary visual requests.
+
+perceivePage can remain available for genuine deep dives.
+
+PRIVACY
+
+The snapshot should focus on design properties, not unnecessary page content.
+
+DELIVERABLE
+
+The model can answer:
+
+"What is this page's current visual system?"
+
+using ordinary observation.
+
+DONE MEANS
+
+On multiple real sites:
+- the snapshot accurately describes the main palette
+- type scale is reasonably correct
+- spacing/density is meaningful
+- surface language is meaningful
+
+The snapshot is judged both by structured evidence and by-eye/vision-assisted QA.
+
+======================================================================
+PHASE T2 — PROMPT AND DESIGN INTELLIGENCE
+======================================================================
+
+GOAL
+
+Improve what the model does with the design context.
+
+WHY SECOND
+
+Seeing the page is not enough.
+
+The model also needs compact principles for making good design decisions.
+
+DO NOT DO THIS
+
+Do not create:
+- a giant rulebook
+- a closed theme list
+- a deterministic design DSL
+- another architecture hidden inside the prompt
+
+The prompt should contain high-leverage principles.
+
+DESIGN PRINCIPLES TO ADD OR CALIBRATE
+
+COLOR
+
+- preserve readable contrast
+- coordinate palette changes rather than changing one random color
+- shift hue/saturation/lightness consistently
+- preserve useful accent roles
+
+TYPOGRAPHY
+
+- prefer proportional changes
+- preserve meaningful hierarchy
+- avoid arbitrary isolated pixel changes
+- maintain readable line-height and measure where appropriate
+
+SPACING
+
+- use the page's existing scale as evidence
+- modify density coherently
+- avoid isolated random margins
+- use whitespace to express grouping and hierarchy
+
+SURFACE
+
+- coordinate radius, borders and shadows
+- match existing surface language unless the user explicitly asks to transform it
+- use depth consistently
+
+HIERARCHY
+
+- establish visual priority through multiple signals:
+  size
+  weight
+  contrast
+  spacing
+  placement
+
+- avoid using random color alone as the only hierarchy mechanism
+
+THEME / STYLE REASONING
+
+The prompt should teach examples as descriptions, not as a closed menu.
+
+Examples may include:
+
+GLASSMORPHISM
+- translucent surfaces
+- blur/backdrop effects where appropriate
+- subtle borders
+- soft shadows
+- coordinated spacing and depth
+
+NEOBRUTALISM
+- hard borders
+- bold/raw colors
+- offset shadows
+- reduced softness
+- minimal blur/gradient dependence
+
+MATERIAL-LIKE DESIGN
+- consistent elevation
+- coherent radii
+- neutral surfaces
+- controlled accents
+
+EDITORIAL / MAGAZINE
+- stronger typography hierarchy
+- readable measure
+- deliberate whitespace
+- content-focused structure
+
+MINIMAL
+- remove visual noise
+- reduce competing accents
+- increase hierarchy clarity
+
+OLD-SCHOOL / 90s
+- interpret the request in CSS terms without relying on a preset engine
+
+IMPORTANT
+
+If the user requests an unfamiliar style, the model must reason about it.
+
+It is the designer.
+
+The examples are grounding, not a fixed menu.
+
+MOTION GUIDANCE
+
+Teach basic principles:
+- motion should support state changes
+- transitions should be purposeful
+- focus/hover states should be visible
+- reduced-motion preferences must be respected
+
+DONE MEANS
+
+Compare before and after on multiple requests and sites.
+
+Examples:
+- increase spacing
+- reduce clutter
+- make colors warmer
+- increase font size
+- add rounded corners
+
+The improvement must be visually noticeable, not merely safer.
+
+======================================================================
+PHASE T3 — OBJECTIVE VISUAL CORRECTNESS
+======================================================================
+
+GOAL
+
+Install the most important objective protections before increasingly ambitious
+transformations are allowed to rely on them.
+
+This phase borrows heavily from the strongest parts of roadmap 2.
+
+This is NOT a giant quality-policing system.
+
+Only objectively bad outcomes become hard failures.
+
+----------------------------------------------------------------------
+T3.1 — CONTRAST CORRECTNESS
+----------------------------------------------------------------------
+
+CURRENT PROBLEM
+
+A page can avoid "invisible text" while still having difficult-to-read text.
+
+The existing distinction between:
+- not invisible
+and
+- genuinely readable
+
+must be made explicit.
+
+IMPLEMENTATION DIRECTION
+
+1. Reuse existing color primitives.
+
+2. Add page-level contrast verification rather than relying only on a model
+   occasionally checking one element.
+
+3. Use baseline-diff thinking:
+   distinguish pre-existing accessibility problems from problems introduced by
+   the transformation.
+
+4. When a transformation changes a background significantly, investigate a
+   contrast-coupling safeguard so that newly introduced backgrounds do not leave
+   associated text unreadable.
+
+5. Handle gradients using appropriate worst-case reasoning where technically
+   justified.
+
+IMPORTANT
+
+Do not blindly rewrite every model-authored color choice unless necessary.
+
+The system should prevent objectively unreadable output.
+
+DELIBERATE FAILURE CASE
+
+Create a transformation that introduces poor contrast.
+
+Show:
+- failure before the fix
+- detection after the fix
+- readable result after correction
+
+DONE MEANS
+
+A transformation cannot introduce hard-to-read text and silently pass.
+
+----------------------------------------------------------------------
+T3.2 — REAL RESIZE-INVARIANCE PROOF
+----------------------------------------------------------------------
+
+CURRENT PROBLEM
+
+A static heuristic can say:
+
+"This CSS does not appear dominated by fixed pixels."
+
+That is not equivalent to:
+
+"The actual transformed page survives resizing."
+
+IMPLEMENTATION
+
+After a transformation, verify across representative widths.
+
+The exact set should be calibrated, but the principle includes:
+- narrow mobile
+- wider mobile
+- tablet
+- desktop
+- wide desktop
+
+Detect newly introduced:
+- horizontal overflow
+- overlap
+- squeeze/collapse
+- inaccessible content
+- invisible/blank regions
+
+Again, baseline-diff where possible.
+
+IMPORTANT
+
+Do not flag unrelated pre-existing website defects as transformation failures.
+
+DELIBERATE FAILURE CASE
+
+Create a transformation that passes the old count-based heuristic but breaks at
+a narrow width.
+
+The new resize proof must catch it.
+
+DONE MEANS
+
+A transformation survives a meaningful:
+wide -> narrow -> wide
+resize sequence without newly introduced layout failure.
+
+----------------------------------------------------------------------
+T3.3 — MOTION SAFETY AND REDUCED MOTION
+----------------------------------------------------------------------
+
+CURRENT PROBLEM
+
+Motion can be visually attractive but technically poor or inaccessible.
+
+IMPLEMENTATION PRINCIPLES
+
+- respect prefers-reduced-motion
+- avoid transitions that unnecessarily animate layout/reflow properties
+- prefer compositor-friendly properties where appropriate
+- distinguish useful state transitions from gratuitous motion
+
+Examples of properties requiring scrutiny:
+- width
+- height
+- top
+- left
+- right
+- bottom
+- inset
+- margin
+- padding
+
+Common safer candidates include:
+- transform
+- opacity
+- carefully used visual effects
+
+Do not make the allowed-property list an artificial creativity prison.
+Use it as a safety rule for harmful defaults.
+
+DELIBERATE FAILURE CASE
+
+A transition on a layout property should be caught.
+
+A reduced-motion preference should suppress or appropriately reduce motion.
+
+DONE MEANS
+
+Motion transformations are:
+- purposeful
+- visually smooth
+- reduced-motion aware
+- not creating obvious layout reflow problems
+
+======================================================================
+PHASE T4 — COLOR AND THEME FOUNDATIONS
+======================================================================
+
+GOAL
+
+Make color transformations coherent rather than arbitrary.
+
+THE MODEL SHOULD USE
+
+- current palette from T1
+- prompt principles from T2
+- contrast protection from T3
+
+CAPABILITIES TO TEST
+
+- make colors warmer
+- make colors cooler
+- increase saturation
+- reduce saturation
+- make more minimal
+- dark mode
+- preserve accents
+- coordinated palette shifts
+
+OPTIONAL STRUCTURED TOOL POLICY
+
+Do NOT immediately build a color transformation tool.
+
+First test whether:
+T1 design context
++
+T2 intelligence
++
+T3 verification
+
+allow the model to produce good raw CSS.
+
+Only build a structured helper if evidence shows a repeated capability gap.
+
+If added, it must remain general rather than a closed operation menu.
+
+DONE MEANS
+
+Examples:
+
+MAKE COLORS WARMER
+Changes the visual system coherently.
+
+DARK MODE
+Creates a readable dark variant while preserving useful accents and contrast.
+
+The result must not be:
+"one background became orange."
+
+======================================================================
+PHASE T5 — TYPOGRAPHY QUALITY
+======================================================================
+
+GOAL
+
+Make typography transformations proportional, readable and intentional.
+
+THE MODEL SHOULD USE
+
+- type scale
+- body size
+- hierarchy
+- family information
+- ratios
+- current consistency
+
+REQUESTS TO TEST
+
+- increase font size
+- make easier to read
+- make more editorial
+- make headings stronger
+- make more premium
+
+QUALITY QUESTIONS
+
+- Did the hierarchy remain meaningful?
+- Did related sizes change proportionally?
+- Is body text readable?
+- Is line-height adequate?
+- Is the reading measure reasonable where relevant?
+
+OBJECTIVE VS ADVISORY
+
+Hard failures should remain conservative.
+
+For example:
+- obviously unreadable output can be flagged strongly
+
+But unusual typography should not automatically be rejected merely because it
+does not match one universal formula.
+
+DONE MEANS
+
+"Increase font size" changes the system coherently rather than increasing one
+body selector by an arbitrary number of pixels.
+
+======================================================================
+PHASE T6 — SPACING AND DENSITY QUALITY
+======================================================================
+
+GOAL
+
+Make density transformations consistent.
+
+REQUESTS TO TEST
+
+- increase spacing
+- make more spacious
+- make more compact
+- reduce clutter
+- add breathing room
+
+THE MODEL SHOULD USE
+
+- existing spacing scale
+- rhythm baseline
+- density classification
+- grouping information where available
+
+PRINCIPLE
+
+A density transformation should affect the visual system.
+
+It should not be:
+
+margin-top: 23px
+
+on one arbitrary element.
+
+QUALITY FEEDBACK
+
+Detect possible:
+- inconsistent new spacing values
+- excessive unrelated gaps
+- cramped transformed containers
+- extreme empty regions
+
+But do not automatically reject every unconventional composition.
+
+The advisory system later consolidates these judgments.
+
+DONE MEANS
+
+The same request across multiple pages produces a coherent density change.
+
+======================================================================
+PHASE T7 — SURFACE, BORDERS AND DEPTH
+======================================================================
+
+GOAL
+
+Improve the visual character of surfaces.
+
+DIMENSIONS
+
+- backgrounds
+- cards
+- borders
+- radii
+- shadows
+- elevation
+- gradients
+- transparency
+- blur/backdrop effects
+
+THE MODEL SHOULD USE
+
+- surface language
+- current radius vocabulary
+- border vocabulary
+- shadow tiers
+- elevation information
+
+REQUESTS TO TEST
+
+- add rounded corners
+- soften borders
+- add depth
+- make cards feel premium
+- make surfaces flatter
+- add glass effects
+
+PRINCIPLE
+
+Do not apply one generic:
+border-radius: 8px
+box-shadow: ...
+
+to everything.
+
+The transformation should either:
+- respect the existing visual system
+or
+- intentionally transform the whole system toward the requested style
+
+DONE MEANS
+
+Surface changes look coordinated rather than like random decorative CSS.
+
+======================================================================
+PHASE T8 — COORDINATED THEME / STYLE TRANSFORMATIONS
+======================================================================
+
+THIS IS A MAJOR PRODUCT PROOF PHASE.
+
+GOAL
+
+Prove that Revueon can coordinate multiple design dimensions to produce
+recognizable transformations.
+
+WHY NOW
+
+Color, typography, spacing and surface quality should already have improved.
+
+A theme transformation can now coordinate them.
+
+THE MODEL PROCESS SHOULD BE CONCEPTUALLY
+
+USER INTENT
+    ->
+READ CURRENT DESIGN SNAPSHOT
+    ->
+INTERPRET TARGET STYLE
+    ->
+DECIDE WHICH DIMENSIONS CHANGE
+    ->
+AUTHOR COORDINATED TRANSFORMATION
+    ->
+APPLY IN MEANINGFUL ACTS
+    ->
+RUN HARD SAFETY CHECKS
+    ->
+REVIEW QUALITY FEEDBACK
+
+Do NOT create:
+
+Theme = enum value
+    ->
+fixed preset CSS
+
+That would undermine Revueon's generality.
+
+TEST REQUESTS
+
+At minimum:
+
+1. Glassmorphism
+2. Neobrutalism
+3. Magazine/editorial
+4. "Make this feel like Notion"
+
+Potential additional styles:
+- old-school/90s
+- minimal
+- dense professional dashboard
+- premium
+- playful
+
+OPTIONAL describeTheme POLICY
+
+Do not build a theme-description tool immediately.
+
+First test whether the model can reason from:
+- prompt guidance
+- its own knowledge
+- current design snapshot
+
+If repeated evidence shows poor style interpretation, a helper may provide a
+STYLE DESCRIPTION.
+
+It must return a description, not a page-specific execution plan.
+
+The AI must still decide how to map the style onto the actual website.
+
+MULTI-ACT COORDINATION
+
+Do not force the entire transformation into one CSS action.
+
+The model may transform major regions incrementally.
+
+Verify:
+- budget
+- integrity
+- final coordination
+
+DONE MEANS
+
+At least several transformations are visually recognizable and convincing.
+
+This phase should be treated as a major product benchmark.
+
+======================================================================
+PHASE T9 — MOTION AND INTERACTION QUALITY
+======================================================================
+
+GOAL
+
+Make visual transformations feel responsive and intentional.
+
+IMPORTANT BOUNDARY
+
+This roadmap is primarily about transformation quality.
+
+It does NOT automatically expand into the entire future capability roadmap for:
+- persistent interaction state
+- keyboard bindings
+- complex workflow automation
+- behaviour systems requiring new runtime capabilities
+
+Those may be future product tracks.
+
+This phase focuses on quality of currently supported visual/interactivity changes.
+
+TEST REQUESTS
+
+- add smooth transitions
+- make interactions feel responsive
+- improve hover states
+- improve focus states
+- add subtle entrance motion
+
+PRINCIPLES
+
+- motion should communicate change
+- hover/focus feedback should be visible
+- transitions should be proportionate
+- reduced-motion preferences remain respected
+- avoid gratuitous animation
+
+DONE MEANS
+
+Motion improves perceived quality without breaking accessibility or layout.
+
+======================================================================
+PHASE T10 — DESIGN QUALITY FEEDBACK SYSTEM
+======================================================================
+
+GOAL
+
+Consolidate quality evidence into a useful feedback mechanism.
+
+IMPORTANT
+
+Do NOT turn this into a universal automatic taste judge.
+
+The system must distinguish:
+
+HARD GATES
+from
+ADVISORY FEEDBACK
+
+----------------------------------------------------------------------
+HARD GATES
+----------------------------------------------------------------------
+
+Examples of hard concerns:
+
+- introduced unreadable contrast
+- newly introduced resize failure
+- overflow
+- inaccessible content
+- invisible content
+- objectively harmful motion behaviour
+- structural integrity failure
+
+These can block or trigger repair/undo according to the established foundation.
+
+----------------------------------------------------------------------
+ADVISORY QUALITY FEEDBACK
+----------------------------------------------------------------------
+
+Examples:
+
+- spacing appears inconsistent
+- type hierarchy became weak
+- too many unrelated radii
+- surface vocabulary clashes
+- excessive accent usage
+- density became uneven
+- visual hierarchy is weak
+
+These should be reported to the model.
+
+They should normally NOT immediately undo a creative transformation.
+
+THE MODEL CAN THEN
+
+1. accept the result if intentional
+2. refine the transformation
+3. make another act
+4. stop if the goal is satisfied
+
+DESIGN QUALITY REPORT
+
+A consolidated quality report may cover:
+
+COLOR
+- contrast
+- palette consistency
+
+TYPOGRAPHY
+- hierarchy
+- legibility
+- scale consistency
+
+SPACING
+- rhythm
+- density consistency
+
+SURFACE
+- radii
+- borders
+- shadows
+- depth consistency
+
+MOTION
+- reduced motion
+- excessive duration
+- problematic layout animation
+
+HIERARCHY
+- focal competition
+- visual priority
+
+IMPORTANT
+
+Not every category needs a hard universal threshold.
+
+Use:
+- objective checks for objective failure
+- advisory evidence for subjective quality
+
+DELIBERATE FAILURE CASE
+
+Create intentionally inconsistent transformations.
+
+Verify:
+- the system reports the inconsistency
+- the transformation is not falsely destroyed merely because it is unusual
+- the model can improve when feedback is useful
+
+DONE MEANS
+
+The system can say:
+
+"This transformation is structurally safe, but these visual consistency issues
+were observed."
+
+That is much more useful than either:
+"everything passed"
+or
+"automatic rules rejected creativity."
+
+======================================================================
+PHASE T11 — INSERT QUALITY
+======================================================================
+
+GOAL
+
+Generated or inserted UI should look native to the transformed page.
+
+CURRENT PROBLEM
+
+A generated summary or panel can otherwise become a generic flat box.
+
+IMPLEMENTATION DIRECTION
+
+Use design context when styling inserted containers.
+
+Consider:
+- palette
+- typography
+- surface language
+- borders
+- radius
+- shadows
+- density
+
+If the user has transformed the site into a new style, inserted UI should match
+the resulting style.
+
+IMPORTANT
+
+Fix duplicated primitive logic where existing shared utilities already solve the
+problem.
+
+Avoid fixed-pixel assumptions when relative or responsive sizing is more
+appropriate.
+
+TEST CASES
+
+Insert the same conceptual component into pages with different visual systems.
+
+The result should adapt.
+
+DONE MEANS
+
+The inserted UI feels intentionally integrated rather than bolted on.
+
+======================================================================
+PHASE T12 — SPEED, RELIABILITY AND REAL-WORLD BENCHMARKING
+======================================================================
+
+GOAL
+
+Prove that the improvements work in the actual product.
+
+This phase is not just optimization.
+
+It is where Revueon stops measuring "phases completed" and measures actual
+transformation quality.
+
+----------------------------------------------------------------------
+T12.1 — OBSERVATION EFFICIENCY
+----------------------------------------------------------------------
+
+Measure how often the model needs:
+
+describePage
++
+additional expensive observation
+
+The desired normal path is:
+
+describePage with enough context
+    ->
+act
+
+If the model repeatedly calls deeper perception after ordinary observation,
+investigate:
+- missing snapshot data
+- unclear prompt
+- poor serialization
+- genuine request complexity
+
+Do not blindly remove useful observation.
+
+----------------------------------------------------------------------
+T12.2 — STEP EFFICIENCY
+----------------------------------------------------------------------
+
+Measure:
+- time to first action
+- total steps
+- model calls
+- retries
+- failures
+- wall-clock latency
+
+Do not optimize purely for the smallest number.
+
+The goal is:
+GOOD RESULT WITH REASONABLE COST
+
+not:
+FAST BUT BAD
+
+----------------------------------------------------------------------
+T12.3 — RELIABILITY
+----------------------------------------------------------------------
+
+Run the same request repeatedly on the same page.
+
+Measure:
+- target consistency
+- transformation consistency
+- output quality consistency
+
+If behaviour is inconsistent, identify the source:
+- observation nondeterminism
+- settle timing
+- dynamic DOM
+- prompt ambiguity
+- model variance
+- execution bug
+
+Do not hide behind "intermittent."
+
+----------------------------------------------------------------------
+T12.4 — REAL-WORLD BENCHMARK CORPUS
+----------------------------------------------------------------------
+
+Create a permanent benchmark of real transformations.
+
+The benchmark should contain:
+
+SITE
++
+USER REQUEST
++
+EXPECTED INTENT
++
+BEFORE STATE
++
+AFTER RESULT
++
+SAFETY RESULT
++
+RESPONSIVE RESULT
++
+QUALITY REVIEW
++
+STEPS
++
+LATENCY
++
+FAILURES
+
+EXAMPLE SITES
+
+YouTube
+- make less distracting
+- hide Shorts
+- simplify homepage
+
+Wikipedia
+- turn into magazine
+- make easier to read
+- increase spacing
+
+GitHub
+- reduce clutter
+- make more like Linear
+
+Reddit
+- make comments easier to scan
+- reduce noise
+
+Generic content sites
+- warmer colors
+- dark mode
+- more premium
+- more spacious
+- glassmorphism
+- neobrutalism
+
+Stress sites should include dynamic/SPAs where relevant.
+
+----------------------------------------------------------------------
+T12.5 — QUALITY SCORING
+----------------------------------------------------------------------
+
+Do not rely on one single automatic score.
+
+Evaluate at least:
+
+1. INTENT SATISFACTION
+Did it do what the user asked?
+
+2. VISUAL QUALITY
+Does it look intentional?
+
+3. CONSISTENCY
+Does the transformation form a coherent system?
+
+4. SAFETY
+Did the page remain functional?
+
+5. RESPONSIVENESS
+Did it survive resize?
+
+6. EFFICIENCY
+Was the number of calls/steps reasonable?
+
+7. REPEATABILITY
+Does the result remain reasonably consistent across repeated runs?
+
+----------------------------------------------------------------------
+T12.6 — BY-EYE REVIEW
+----------------------------------------------------------------------
+
+A green automated test does not prove good design.
+
+A real quality review asks:
+
+1. Does it look intentional?
+2. Is the transformation consistent?
+3. Does it preserve page functionality?
+4. Does it match user intent?
+5. Would a reasonable user actually prefer this result?
+
+Test-only vision assistance may be used for QA where already supported.
+
+Production Revueon should not silently depend on a separate vision pipeline unless
+a future explicit product decision changes that.
+
+DONE MEANS
+
+The benchmark demonstrates measurable improvement over the starting point.
+
+======================================================================
+9. WHAT THIS ROADMAP WILL NOT BUILD
+======================================================================
+
+NO NEW GIANT ARCHITECTURE
+
+The foundation remains.
+
+NO CLOSED DSL
+
+Do not resurrect:
+- closed design relations
+- fixed design packs
+- solver/compiler pipeline
+- deterministic transformation menus
+
+NO PRESET THEME ENGINE AS THE DEFAULT
+
+Themes remain interpreted descriptions.
+
+NO LOOP REWRITE WITHOUT EVIDENCE
+
+Do not touch the core loop merely because a possible architecture sounds nicer.
+
+A loop change requires measured evidence that the current loop is the bottleneck.
+
+NO NEW PERCEPTION FARM
+
+Every new perception field needs an immediate consumer.
+
+NO BEHAVIOUR/STATE CAPABILITY EXPANSION DISGUISED AS QUALITY WORK
+
+Examples such as:
+- persistent toggle state
+- advanced keyboard systems
+- complex workflow state
+
+may require genuine new capabilities and belong to a later capability roadmap.
+
+NO AUTOMATIC "TASTE POLICE"
+
+Do not automatically undo creative transformations because they fail a subjective
+formula.
+
+NO SPEED OPTIMIZATION BEFORE QUALITY EVIDENCE
+
+Do not make mediocre transformations faster.
+
+======================================================================
+10. THINGS THAT MAY PASS TODAY BUT ARE NOT GOOD ENOUGH
+======================================================================
+
+The following principle from roadmap 2 must remain active:
+
+MECHANICAL PASS != PRODUCT QUALITY
+
+Examples include:
+
+- responsive heuristic passes but a real narrow viewport still breaks
+- text contrast is above invisibility but still hard to read
+- "increase spacing" technically changes spacing but looks inconsistent
+- inserted content appears but looks ugly
+- a theme transformation executes but is not recognizable
+- documentation claims a capability is live when it is a stub
+- a structural test passes without running the real behaviour
+
+Whenever a phase claims success, ask:
+
+WHAT WOULD MAKE THIS LOOK BAD EVEN IF THE TESTS ARE GREEN?
+
+Then deliberately test that case.
+
+======================================================================
+11. PRIORITY IF WE EVER NEED TO REORDER
+======================================================================
+
+NON-NEGOTIABLE ORDER
+
+T1 Design Context
+T2 Design Intelligence
+
+These are the foundation of transformation quality.
+
+After that:
+
+T3 objective correctness is strongly recommended before ambitious transformation
+work expands.
+
+T4 through T7 improve individual visual dimensions.
+
+T8 proves coordinated style transformation.
+
+T9 improves motion/interactions within current capabilities.
+
+T10 consolidates advisory quality feedback.
+
+T11 improves inserted/generated UI.
+
+T12 proves speed and real-world quality.
+
+======================================================================
+12. HOW EVERY PHASE MUST BE REPORTED
+======================================================================
+
+Each phase report should include:
+
+1. GOAL
+What bottleneck was being solved?
+
+2. CURRENT PROBLEM
+What evidence showed the problem existed?
+
+3. ARCHIVE CHECK
+Before implementing anything, search archive/ for relevant prior art as required
+by the project's original working rules.
+
+Use prior work only if it fits the current architecture.
+Do not resurrect obsolete architecture merely because code exists.
+
+4. CHANGES
+Exactly what changed.
+
+5. WHAT WAS DELIBERATELY NOT CHANGED
+Prevent scope creep.
+
+6. TESTS
+- unit
+- integration
+- browser
+- real site where relevant
+
+7. DELIBERATE FAILURE CASE
+Show a case that should fail and prove it does.
+
+8. BEFORE/AFTER QUALITY
+Use by-eye or approved QA methodology.
+
+9. PERFORMANCE
+Where relevant:
+- wall-clock
+- model calls
+- steps
+- retries
+
+10. LIMITATIONS
+State what remains unproven.
+
+11. FINAL VERDICT
+PASS / PARTIAL / FAIL
+
+12. NEXT PHASE
+Do not start until approved.
+
+======================================================================
+13. THE SINGLE MOST IMPORTANT RULE FOR THE WHOLE ROADMAP
+======================================================================
+
+DO NOT CONFUSE MORE CODE WITH BETTER TRANSFORMATION QUALITY.
+
+The product does not win because it has:
+- more gates
+- more abstractions
+- more tools
+- more perception fields
+- more architecture
+
+The product wins if the user says:
+
+    "I asked Revueon to transform this website, and the result actually looks
+     like what I wanted."
+
+The core strategy is therefore:
+
+GIVE THE AI BETTER EYES
+    ->
+GIVE IT BETTER DESIGN REASONING
+    ->
+LET IT AUTHOR THE TRANSFORMATION
+    ->
+BLOCK OBJECTIVE BREAKAGE
+    ->
+REPORT SUBJECTIVE QUALITY PROBLEMS
+    ->
+TEST ON REAL WEBSITES
+    ->
+OPTIMIZE ONLY AFTER QUALITY IMPROVES
+
+END OF ROADMAP

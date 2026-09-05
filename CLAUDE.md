@@ -1,8 +1,5 @@
 # Revueon — AGENTS.md
 
-*(Keep this file SMALL — it is auto-loaded into every prompt. Details live in the numbered files;
-read them on demand.)*
-
 Revueon is **an AI agent that lives in the browser**. A user states a goal in plain English and
 Revueon investigates the page, gathers only the evidence it needs, chooses the cheapest correct way
 to act, does it, looks at the result, and stops. Locally — never the site's backend.
@@ -37,13 +34,6 @@ longer exists.
 | File | Read it when |
 |---|---|
 | `all_about_revueon.txt` | Revueon details, what is our product what it should be all the details contains in this file. 
-| `01_DIRECTION.md` | **Always, first.** The thesis the whole product rests on. |
-| `02_PRINCIPLES.md` | **Always.** Twelve binding principles, each with a test. |
-| `03_ROADMAP.md` | Before starting any task — which stage we are in and what "done" means. |
-| `04_CAPABILITIES.md` | **Before adding or changing any tool.** The permanent tool contract. |
-| `05_BROWSER_CRAFT.md` | **Before emitting any CSS or touching the DOM.** Browser physics — formatting contexts, intrinsic sizing, cascade layers, container queries, healing, selector stability. This is the knowledge recovered from 12,000 deleted lines. |
-| `06_FOUNDATION.md` | Before planning work. The seven foundations, their state, and the MVP. |
-| `07_ANTIPATTERNS.md` | Before claiming anything works. Thirteen ways this project has already failed. |
 | `senior_developer_advices\` | Senior developer advice for this project
 | `roadmap.txt` | Optinal to read 
 
@@ -222,56 +212,18 @@ Never add vision-model screenshot calls to production code.
 Never claim the production system "uses vision" because the test harness does.
 
 ---
-ASK-QUESTION RULE
 
-Do not ask the user about ordinary implementation details.
+## Image Input Capability Rule
 
-Make normal engineering decisions yourself using:
+The currently configured Claude Code model does NOT support image inputs.
 
-- roadmap
-- current code
-- tests
-- architecture
-- existing conventions
+Do not send screenshots, PNGs, JPEGs, WebP files, or any other images as input to the current coding model.
 
-Ask the user ONLY when the decision is genuinely architectural or cannot be
-safely inferred.
-
-Examples:
-
-- two materially different architectures
-- privacy/product decision
-- conflicting authoritative documents
-- changing an approved foundation invariant
-- unclear product behavior
-- uncertainty about the intended roadmap
-
-When asking:
-
-1. State the exact decision.
-2. Give the realistic options.
-3. Recommend one.
-4. Explain the important trade-off.
-5. Stop and wait.
-
-Do not guess through genuine ambiguity.
----
-ARCHIVE RULE
-
-Before implementing something that has historical precedent, inspect archive/.
-
-Use archive/ to:
-
-- recover useful ideas
-- understand previous failures
-- avoid repeating mistakes
-- identify reusable browser techniques
-
-Do NOT treat archive/ as current production architecture.
-
-Do NOT resurrect the old pipeline.
-
-When reusing archive material, adapt the principle to the current architecture.
+If an image-related verification task appears:
+1. Prefer DOM assertions, source inspection, browser state, accessibility data, text output, and test assertions.
+2. Do not retry image input after an image-input API error.
+3. If visual verification is genuinely required and no supported vision-capable tool is explicitly configured, report the limitation rather than getting stuck.
+4. Never block unrelated coding or reporting work because image analysis is unavailable.
 
 ---
 
@@ -293,7 +245,6 @@ But current roadmap + explicit current user decisions win over historical
 advice.
 
 Do not blindly implement old advice if it belongs to an obsolete architecture.
-
 
 ## Reporting
 

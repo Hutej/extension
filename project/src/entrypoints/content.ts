@@ -49,6 +49,26 @@ export default defineContentScript({
     };
 
     chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+      // ── Work overlay (the agent's "I'm working" layer) ──────────────
+      // Shown while the agent loop runs: a translucent full-viewport layer
+      // with the current phase, pointer-events:all so the user cannot click
+      // the page mid-run (their click would race the transformation). Lives
+      // in a CLOSED SHADOW ROOT so no page CSS can touch it and it can touch
+      // no page style. Not part of any reversible transformation set — it is
+      // Revueon's own UI, added and removed around the run.
+      if (message.action === 'revueonWorkStart') {
+        showWorkOverlay(String(message.goal ?? ''));
+        return; // no response needed
+      }
+      if (message.action === 'revueonWorkStep') {
+        updateWorkOverlay(message.entry as { tool?: string; kind?: string });
+        return;
+      }
+      if (message.action === 'revueonWorkEnd') {
+        hideWorkOverlay();
+        return;
+      }
+
       // Tool call from the background loop.
       if (message.action === 'toolCall') {
         const tool = getTool(message.tool);
@@ -113,6 +133,80 @@ export default defineContentScript({
 // ── on/off toggle ──────────────────────────────────────────────────
 
 let toggleState = true; // on by default after re-apply
+
+// ── work overlay ───────────────────────────────────────────────────
+
+const OVERLAY_ID = 'revueon-work-overlay';
+let overlayStepEl: HTMLElement | null = null;
+
+const PHASE_TEXT: Record<string, string> = {
+  observe: 'Reading the page…',
+  act: 'Applying changes…',
+  verify: 'Verifying the result…',
+  control: 'Working…',
+};
+
+function showWorkOverlay(goal: string): void {
+  hideWorkOverlay();
+  const host = document.createElement('div');
+  host.id = OVERLAY_ID;
+  // Closed shadow root: the page cannot restyle our UI, our UI cannot leak
+  // styles into the page. All presentation inline — one element, no CSS file.
+  const shadow = host.attachShadow({ mode: 'closed' });
+  const style = document.createElement('style');
+  style.textContent = `
+    :host { all: initial; position: fixed !important; inset: 0 !important; z-index: 2147483647 !important; }
+    .layer { position: fixed; inset: 0; background: rgba(15, 17, 23, 0.45); backdrop-filter: blur(1px);
+      display: flex; flex-direction: column; align-items: center; justify-content: center; gap: 14px;
+      font: 14px/1.5 system-ui, -apple-system, sans-serif; color: #f4f4f5; cursor: progress;
+      -webkit-user-select: none; user-select: none; }
+    .card { background: rgba(26, 29, 39, 0.95); border: 1px solid #2a2d3a; border-radius: 12px;
+      padding: 18px 22px; display: flex; align-items: center; gap: 12px; box-shadow: 0 8px 30px rgba(0,0,0,.35); }
+    .spin { width: 16px; height: 16px; border: 2px solid #2a2d3a; border-top-color: #6366f1; border-radius: 50%;
+      animation: rvspin 0.8s linear infinite; flex-shrink: 0; }
+    @keyframes rvspin { to { transform: rotate(360deg); } }
+    .goal { max-width: 320px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-weight: 600; font-size: 13px; }
+    .step { font-size: 11px; color: #a1a1aa; }
+    @media (prefers-reduced-motion: reduce) { .spin { animation: none; } }
+  `;
+  const layer = document.createElement('div');
+  layer.className = 'layer';
+  const card = document.createElement('div');
+  card.className = 'card';
+  const spin = document.createElement('div');
+  spin.className = 'spin';
+  const goalEl = document.createElement('div');
+  goalEl.className = 'goal';
+  goalEl.textContent = `Revueon is working — ${goal || 'transforming this page'}`;
+  card.appendChild(spin);
+  card.appendChild(goalEl);
+  const stepEl = document.createElement('div');
+  stepEl.className = 'step';
+  stepEl.textContent = 'Analyzing…';
+  overlayStepEl = stepEl;
+  layer.appendChild(card);
+  layer.appendChild(stepEl);
+  shadow.appendChild(style);
+  shadow.appendChild(layer);
+  (document.documentElement || document.body).appendChild(host);
+}
+
+function updateWorkOverlay(entry: { tool?: string; kind?: string; reasoning?: string }): void {
+  if (!overlayStepEl) return;
+  if (entry.kind === 'reply' && entry.reasoning) {
+    // The model's own first words — the genuine acknowledgment, on the page.
+    overlayStepEl.textContent = entry.reasoning.length > 120 ? `${entry.reasoning.slice(0, 117)}…` : entry.reasoning;
+    return;
+  }
+  const phase = PHASE_TEXT[entry.kind ?? ''] ?? 'Working…';
+  overlayStepEl.textContent = entry.tool ? `${phase} (${entry.tool})` : phase;
+}
+
+function hideWorkOverlay(): void {
+  overlayStepEl = null;
+  document.getElementById(OVERLAY_ID)?.remove();
+}
 
 async function toggleModifications(): Promise<boolean> {
   toggleState = !toggleState;

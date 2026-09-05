@@ -19,6 +19,8 @@ import { redactSensitiveData } from '../core/sanitize/redact';
 import { perceive, serializePerception } from '../core/perceive';
 import { registerIdentity, getIdentity } from '../core/identity-store';
 import { liveIdentityDom } from '../core/identity-dom';
+import { buildDesignSnapshot } from '../core/design';
+import { parseColor } from '../shared/color';
 
 /** D: verify a selector resolves. Accept 1..N, return the count.
  *  Refuse only on a clearly wrong match count (>200). */
@@ -33,7 +35,13 @@ function verifySelectorResult(selector: string): { count: number; first: Element
 // ── describePage ───────────────────────────────────────────────────
 
 async function describePage(_args: any): Promise<ToolResult> {
+  const t0 = performance.now();
   const regions = buildInventory();
+  // T1 Design Context Bridge: a compact page design snapshot from live
+  // computed styles, so ordinary observation carries the page's visual
+  // system (palette, type, spacing, surface) — not just semantic regions.
+  const design = buildDesignSnapshot(regions);
+  const elapsed = performance.now() - t0;
   const MAX_REGIONS = 60;
   const truncated = regions.length >= MAX_REGIONS;
   // F1: register every targetable region's identity (selector -> fingerprint)
@@ -52,6 +60,7 @@ async function describePage(_args: any): Promise<ToolResult> {
     result: {
       regionCount: regions.length,
       truncated,
+      design: design || undefined,
       // The model sees role/type/tag/textSample/position/width/repeat/selector/
       // targetable/untargetableReason — everything it needs to CHOOSE a target.
       // It does NOT see the fingerprint: that is internal identity evidence the
@@ -67,7 +76,7 @@ async function describePage(_args: any): Promise<ToolResult> {
       })),
     },
     confidence: regions.length > 0 ? 0.7 : 0.2,
-    costMs: 0,
+    costMs: Math.round(elapsed),
   };
 }
 
@@ -192,6 +201,104 @@ async function readText(args: any): Promise<ToolResult> {
   };
 }
 
+// ── inspect — element-level computed state read (the cheap deterministic one) ──
+// The model's `stat`: current computed properties, box, visibility, and the
+// painted surface of ONE element. Evidence only — it decides nothing and
+// returns nothing applicable (rule 3). Read this instead of acting-and-asserting
+// when information is missing, and instead of guessing which rules currently
+// paint a target (the shadowing question applyCss's effect lines can only
+// answer AFTER the fact).
+
+/** The compact default read set — the same language describePage's DESIGN
+ *  snapshot speaks (paint + typography + layout), so per-element values can be
+ *  compared against the page-level aggregates without a second vocabulary. */
+const INSPECT_DEFAULT_PROPERTIES = [
+  'display', 'visibility', 'position', 'opacity',
+  'font-family', 'font-size', 'font-weight', 'line-height', 'letter-spacing',
+  'color', 'background-color',
+  'margin', 'padding', 'border-radius', 'box-shadow',
+];
+const INSPECT_MAX_PROPERTIES = 24;
+const INSPECT_MAX_TEXT = 80;
+
+async function inspect(args: any): Promise<ToolResult> {
+  const selector = args?.selector as string;
+  if (!selector) return { ok: false, error: 'missing "selector" argument. Call describePage to see the page\'s regions with their selectors, then inspect one of them.' };
+
+  let props = Array.isArray(args?.properties) ? args.properties.map(String).filter(Boolean) : [];
+  const truncated = props.length > INSPECT_MAX_PROPERTIES;
+  if (truncated) props = props.slice(0, INSPECT_MAX_PROPERTIES);
+  if (!props.length) props = INSPECT_DEFAULT_PROPERTIES;
+
+  // 1..N resolution — the readText/findElements discipline (refuse on
+  // measurement: zero matches / over-broad are refused with the alternative
+  // named; anything ≤200 measures the FIRST match and reports the count).
+  const { count, first: el } = verifySelectorResult(selector);
+  if (count === 0) return { ok: false, error: `selector "${selector}" matched nothing. The element may have been removed or re-rendered. Call describePage to find the current region, then retry.`, confidence: 0.1 };
+  if (count > 200) return { ok: false, error: `selector "${selector}" matched ${count} elements — too broad. Refine your selector to target fewer elements. Call describePage to see the regions.`, confidence: 0.1 };
+
+  // F1 identity: is this the element describePage described (store-known)? The
+  // act guard uses the same store at use time; inspect surfaces the same fact
+  // so the model knows which selectors are observe-verified before authoring.
+  const verified = getIdentity(selector) !== null;
+
+  const target = el as HTMLElement;
+  const cs = getComputedStyle(target);
+
+  // Orientation: which element is this? Tag + role + a short redacted text
+  // sample — never a large HTML dump.
+  const tag = target.tagName.toLowerCase();
+  const role = target.getAttribute('role') ?? undefined;
+  const textSample = redactSensitiveData((target.textContent || '').replace(/\s+/g, ' ').trim().slice(0, INSPECT_MAX_TEXT));
+
+  // Geometry + visibility — the same predicate as applyCss's visualSignature,
+  // so inspect's visibility and the post-act effect buckets agree by construction.
+  const r = target.getBoundingClientRect();
+  const visible = r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none';
+
+  // Requested computed properties — verbatim current state.
+  const properties: Record<string, string> = {};
+  for (const p of props) properties[p] = cs.getPropertyValue(p).trim();
+
+  // The surface the element's content actually paints against — the same walk
+  // checkContrast uses for its background resolution (transparent is "no paint
+  // here", keep walking to the painted ancestor; nothing painted = canvas
+  // default). This answers "will my color/background change be visible" BEFORE
+  // authoring, instead of after an effect: NO VISIBLE CHANGE report.
+  let bgEl: Element | null = target;
+  let paintedBg = '';
+  let paintedBgImage = '';
+  let hops = 0;
+  while (bgEl && hops++ < 16) {
+    const s = getComputedStyle(bgEl);
+    const c = parseColor(s.backgroundColor);
+    if (c && c[3] > 0) {
+      paintedBg = s.backgroundColor;
+      paintedBgImage = s.backgroundImage.length > 120 ? s.backgroundImage.slice(0, 117) + '...' : s.backgroundImage;
+      break;
+    }
+    bgEl = bgEl.parentElement;
+  }
+
+  return {
+    ok: true,
+    truncated,
+    result: {
+      selector, count, verified, tag, role, textSample,
+      rect: { x: Math.round(r.x), y: Math.round(r.y), width: Math.round(r.width), height: Math.round(r.height) },
+      visible,
+      properties,
+      paintedBackground: {
+        color: paintedBg || '(no painted background — canvas default: white)',
+        onAncestor: !!paintedBg && bgEl !== target,
+        backgroundImage: paintedBgImage || undefined,
+      },
+    },
+    confidence: count === 1 && verified ? 0.85 : count === 1 ? 0.45 : 0.2,
+    costMs: 0,
+  };
+}
+
 // ── perceivePage — level 4 full page perception (expensive) ────────
 
 async function perceivePage(_args: any): Promise<ToolResult> {
@@ -214,20 +321,20 @@ async function perceivePage(_args: any): Promise<ToolResult> {
 // ── stubs ─────────────────────────────────────────────────────────
 
 function notImplemented(name: string): Promise<ToolResult> {
-  return Promise.resolve({ ok: false, error: `${name} is not implemented in Stage 0.5. Available observe tools: describePage, findElements, readText, perceivePage.` });
+  return Promise.resolve({ ok: false, error: `${name} is not implemented in this stage. Available observe tools: describePage, findElements, readText, inspect, perceivePage.` });
 }
 
 // ── exports ────────────────────────────────────────────────────────
 
 export const observeTools: ToolDef[] = [
-  { name: 'describePage', kind: 'observe', description: 'list page regions (roles, types, positions)',
+  { name: 'describePage', kind: 'observe', description: 'list page regions (roles, types, positions) + design snapshot (palette, type, spacing, surface)',
     args: {}, execute: describePage },
   { name: 'findElements', kind: 'observe', description: 'resolve a selector the model named (count + region metadata; no concept matching)',
     args: { selector: 'string' }, execute: findElements },
   { name: 'readText', kind: 'observe', description: 'read text content of an element',
     args: { selector: 'string' }, execute: readText },
-  { name: 'inspect', kind: 'observe', description: 'computed style, box, children of one element',
-    args: { selector: 'string' }, execute: () => notImplemented('inspect'), stub: true },
+  { name: 'inspect', kind: 'observe', description: 'current computed state of one element (properties, box, visibility, painted background) — read this instead of guessing before authoring',
+    args: { selector: 'string', properties: 'string[]?' }, execute: inspect },
   { name: 'measure', kind: 'observe', description: 'geometry only (rect, position, size)',
     args: { selector: 'string' }, execute: () => notImplemented('measure'), stub: true },
   { name: 'perceivePage', kind: 'observe', description: 'full page perception — level 4, expensive, call rarely',

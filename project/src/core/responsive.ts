@@ -41,13 +41,33 @@ const SIZING_PROPS = new Set([
   'inset-inline-start', 'inset-inline-end', 'inset-block-start', 'inset-block-end',
 ]);
 
+/** Intrinsic component dimensions — icons, badges, small controls, fixed-height
+ *  toolbars — live below this; measured page geometry (content regions,
+ *  columns, reconstructed layout) starts far above it. */
+const INTRINSIC_COMPONENT_LIMIT_PX = 100;
+
 /** A bare px length token: `900px`, `-12.5px` (CSSOM strips !important into the
  *  priority, so the value is just the length). A bare px length is a measured
  *  size written back — the surviving hard-law bug. calc()/min()/max() with a
  *  bare px inside are still fixed; calc(100% - 20px) is responsive (counted
- *  separately by isResponsiveValue). */
+ *  separately by isResponsiveValue).
+ *
+ *  R3a/R3b: a px length on a layout property is only a fixed-geometry signal
+ *  when it is page-scale. Zero (`width: 0px`) is a hide/collapse pattern, and
+ *  sub-100px values are intrinsic COMPONENT dimensions — an icon (`width: 16px;
+ *  height: 16px`), a badge (`width: 10px`), a toolbar height — design decisions
+ *  that survive resize at every viewport, so they cannot be Law-6 violations.
+ *  Measured-layout reconstruction sizes content REGIONS, which start far above
+ *  any component (the genuine-refusal fixture is width:500px/height:900px).
+ *  Both proven false-positive classes killed one-shot sheets in the protocol
+ *  experiment (R3a: 3/3 sheets over a single `width: 0px`; R3b rerun: the only
+ *  two remaining refusals, 16px icons / 10px badges). The real risk of a
+ *  wrongly-sized critical container is checkLayout's zero-size/narrow-content
+ *  checks — post-act, baseline-diffed, auto-undo — the correct layer for it. */
 function isFixedPxValue(v: string): boolean {
-  return /^-?\d*\.?\d+px$/.test(v.trim());
+  const s = v.trim();
+  if (!/^-?\d*\.?\d+px$/.test(s)) return false;
+  return Math.abs(parseFloat(s)) >= INTRINSIC_COMPONENT_LIMIT_PX;
 }
 
 /** A responsive signal: relative/fluid sizing the browser re-solves on resize. */
@@ -139,4 +159,59 @@ export function fixedPxDominates(items: EmitItem[]): ResponsiveCount | null {
   const c = countResponsiveSignals(items);
   if (c.fixedCount > c.responsiveCount && c.fixedCount >= 1) return c;
   return null;
+}
+
+// ── T3 motion guard ─────────────────────────────────────────────────
+// Transitions/animations on LAYOUT properties reflow the page on every
+// animation frame — a transformation that makes the site lag is objectively
+// broken, not stylistically bold. Same refuse-before-mutation position as the
+// dominance gate. `transition: all` is refused too: it silently includes the
+// layout properties. This is a safety rule for harmful defaults, not a
+// creativity prison — transform/opacity/color transitions pass untouched.
+
+const MOTION_PROPS = new Set(['transition', 'transition-property', 'animation', 'animation-name']);
+
+/** Layout property tokens that must not be transitioned (exact token match —
+ *  `border-width` is NOT `width`; margin/padding/inset families counted by prefix). */
+function isLayoutMotionToken(t: string): boolean {
+  if (/^(margin|padding|inset)(-|$)/.test(t)) return true;
+  return ['width', 'height', 'top', 'left', 'right', 'bottom', 'all'].includes(t);
+}
+
+/** Scan parsed EmitItems for motion declarations that animate layout/reflow
+ *  properties. Returns offending "property: value" strings (capped), empty when
+ *  the sheet's motion is safe or absent. Pure. */
+export function findLayoutMotion(items: EmitItem[]): string[] {
+  const offending: string[] = [];
+  const walk = (xs: EmitItem[]) => {
+    for (const item of xs) {
+      if (item.kind !== 'style') { if (item.kind === 'at' && !item.prelude.startsWith('@keyframes')) walk(item.items); continue; }
+      for (const d of item.declarations) {
+        const prop = d.property.toLowerCase();
+        if (!MOTION_PROPS.has(prop)) continue;
+        const tokens = d.value.toLowerCase().split(/[\s,()]+/).filter(Boolean);
+        if (tokens.some(isLayoutMotionToken)) {
+          if (offending.length < 4) offending.push(`${prop}: ${d.value.trim()}`);
+        }
+      }
+    }
+  };
+  walk(items);
+  return offending;
+}
+
+/**
+ * Mechanical reduced-motion wrap for a sheet that declares motion: the SAME
+ * selectors, transition/animation neutralised under prefers-reduced-motion.
+ * No design decision is made here — this is the box-sizing:border-box of
+ * motion (a mechanical correctness wrap, applied in applyCss when the sheet
+ * declares motion). Selectors come from CSSOM selectorText (allSelectors), so
+ * re-embedding them in a string is safe.
+ */
+export function buildReducedMotionCss(motionSelectors: string[]): string {
+  if (motionSelectors.length === 0) return '';
+  const rules = motionSelectors
+    .map((s) => `  ${s} { transition: none !important; animation: none !important; }`)
+    .join('\n');
+  return `@media (prefers-reduced-motion: reduce) {\n${rules}\n}`;
 }

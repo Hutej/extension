@@ -47,7 +47,9 @@ export function rgbToHsl(r: number, g: number, b: number, a = 1): [number, numbe
   return [Math.round(h), Math.round(s * 100), Math.round(l * 100), a];
 }
 
-function rgbToHex(hsl: [number, number, number, number]): string {
+/** RGB[HSL tuple] → #rrggbb. Exported for the T1 design snapshot (level 3)
+ *  so both levels render colors identically. */
+export function rgbToHex(hsl: [number, number, number, number]): string {
   const [h, s, l] = hsl;
   const sat = s / 100, light = l / 100;
   const c = (1 - Math.abs(2 * light - 1)) * sat;

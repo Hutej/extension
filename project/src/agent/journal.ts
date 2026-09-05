@@ -12,6 +12,27 @@
 import type { JournalEntry, JournalState } from '../core/persist';
 export type { JournalEntry, JournalState };
 
+/**
+ * R2 stop discipline — does the run carry ANY visible CSS effect?
+ * An applyCss act that reported visualEffect.visibleChange === false changed
+ * nothing visible (T5 hn-body / T6 wiki-content-area: applied ✓, page
+ * pixel-identical). Pure — the loop's done-gate consumes it.
+ */
+export function runHasVisibleEffect(entries: Array<{ tool?: string; kind?: string; result?: any }>): boolean {
+  return entries.some((e) => e.tool === 'applyCss' && e.result?.visualEffect?.visibleChange === true);
+}
+
+/**
+ * R2 done-gate: refuse `done` when applyCss acts were authored and NONE of
+ * them visibly changed the page — that run is a no-op shipped as success
+ * (the exact class T5/T6 demonstrated). A run with no applyCss acts (pure
+ * hide/insert/setText) is not gated — those acts carry their own truth.
+ */
+export function shouldRefuseDone(entries: Array<{ tool?: string; kind?: string; result?: any }>): boolean {
+  const cssActs = entries.filter((e) => e.tool === 'applyCss' && e.kind === 'act' && !e.result?.error);
+  return cssActs.length > 0 && !runHasVisibleEffect(entries);
+}
+
 // D: the journal serialization cap. Named constant, flagged when exceeded.
 const MAX_JOURNAL_CHARS = 8_000;
 const MAX_REGIONS_IN_PROMPT = 15;
@@ -170,14 +191,15 @@ function serializeResult(entry: JournalEntry): string {
   const r = entry.result as any;
   if (!r) return (entry as any).error ? `error: ${(entry as any).error}` : 'ok';
 
-  // describePage — surface the region list, capped.
+  // describePage — the design snapshot (T1) first, then the region list, capped.
   if (r.regions != null && entry.tool === 'describePage') {
+    const design = typeof r.design === 'string' && r.design ? `${r.design}\n` : '';
     const regions = (r.regions as any[]).slice(0, MAX_REGIONS_IN_PROMPT);
     const lines = regions.map((reg) =>
       `  ${reg.id}: ${reg.role}/${reg.type} sel=${reg.selector ?? '(none)'}${reg.targetable ? '' : ` [${reg.untargetableReason ?? 'untargetable'}]`} text="${reg.textSample ?? ''}"`
     ).join('\n');
     const more = r.regionCount > MAX_REGIONS_IN_PROMPT ? ` (${r.regionCount - MAX_REGIONS_IN_PROMPT} more, see full result)` : '';
-    return `${r.regionCount} regions${r.truncated ? ' [TRUNCATED]' : ''}${more}:\n${lines}`;
+    return `${design}${r.regionCount} regions${r.truncated ? ' [TRUNCATED]' : ''}${more}:\n${lines}`;
   }
 
   // findElements — surface matches with selectors.
@@ -197,7 +219,7 @@ function serializeResult(entry: JournalEntry): string {
     return `text (${r.text.length} chars${r.truncated ? `, was truncated` : ''}):\n${text}`;
   }
 
-  // Act results — surface applied status (C).
+  // Act results — surface applied status (C) + the effect truth (R1).
   if (r.applied !== undefined) {
     const parts: string[] = [];
     if (r.applied === true) parts.push('applied ✓');
@@ -206,10 +228,44 @@ function serializeResult(entry: JournalEntry): string {
     if (r.before != null && r.after != null) parts.push(`${r.before} → ${r.after}`);
     if (r.chars != null) parts.push(`${r.chars} chars`);
     if (r.healed) parts.push(`healed: ${r.healed.length} steps`);
+    // R1: the visual-effect line. Without this the model never learned
+    // whether its act changed anything visible — the T5/T6 churn + no-op
+    // root cause (the harness recorded textEffect but the journal dropped
+    // it). The no-op summary names the alternative per rule 13.
+    if (r.visualEffect) parts.push(`effect: ${r.visualEffect.summary}`);
+    else if (r.textEffect) {
+      // Pre-R1 builds / non-visual acts: the T5 text-only truth.
+      parts.push(r.textEffect.changed > 0
+        ? `effect: text changed on ${r.textEffect.changed}/${r.textEffect.sampled} sampled elements`
+        : `effect: text unchanged on ${r.textEffect.sampled} sampled elements (stock: ${r.textEffect.unchanged.slice(0, 2).join(' ; ') || 'n/a'})`);
+    }
+    // T4 whole-sheet delivery: which rules landed vs were defeated. Capped —
+    // a sheet is typically <10 rules; the first 6 carry the diagnosis.
+    if (Array.isArray(r.perSelector)) {
+      const failed = (r.perSelector as any[]).filter((p) => !p.applied);
+      if (failed.length > 0) {
+        const sels = failed.slice(0, 6).map((p) => p.selector).join(', ');
+        parts.push(`rules defeated by page styles: ${sels}${failed.length > 6 ? ` (+${failed.length - 6} more)` : ''}`);
+      }
+    }
+    // R3a selector verification report: what matched, what is dormant, what
+    // was dropped and why. The model must be able to distinguish APPLIED from
+    // UNMATCHED-yet from DROPPED — silent filtering would make it confidently
+    // wrong about what its sheet is doing (rule 12).
+    if (r.selectorReport) {
+      const sr = r.selectorReport;
+      const bits: string[] = [`${sr.applied} selectors verified`];
+      if (sr.unmatchedNow?.length) bits.push(`${sr.unmatchedNow.length}${sr.unmatchedNow.length >= 12 ? '+' : ''} matched nothing yet (kept dormant — they apply if/when those elements appear: ${sr.unmatchedNow.slice(0, 4).join(', ')})`);
+      if (sr.broad?.length) bits.push(`broad selectors kept: ${sr.broad.slice(0, 3).map((b: any) => `${b.selector} (${b.count} elements)`).join(', ')}`);
+      if (sr.dropped?.length) bits.push(`DROPPED: ${sr.dropped.slice(0, 4).map((d: any) => `${d.selector} — ${d.reason}`).join('; ')}`);
+      parts.push(`selectors: ${bits.join(' — ')}`);
+    }
     if (r.unverified) parts.push('UNVERIFIED target (selector describePage never returned — act on a single live match, not an observed identity)');
     return parts.join(', ');
   }
   if (r.issues) return r.issues.length ? `${r.issues.length} issues: ${r.issues.join('; ')}` : 'clean';
+  // askUser — the human's answer is evidence the model reasons over.
+  if (r.answer !== undefined) return `user answered: "${String(r.answer).slice(0, 300)}"`;
   if (r.changed !== undefined) return r.changed ? 'changed' : 'unchanged';
   if (r.textLength != null) return `ok (${r.textLength} chars)${r.unverified ? ' [UNVERIFIED target]' : ''}`;
   if (r.error) return `error: ${r.error}`;

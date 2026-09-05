@@ -74,10 +74,14 @@
       <div class="elapsed" id="elapsedEl"></div>
       <div class="metrics" id="metricsEl"></div>
       <div class="site-status" id="siteStatus"></div>
-      <div id="disclosure" style="display:none; padding: 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-top: 10px; font-size: 11px; line-height: 1.6; color: var(--muted);">
-        <strong style="color: var(--text);">What Revueon sends to the AI:</strong><br>
-        When you transform a page, Revueon reads the page's structure (text content, layout, colors, fonts) and sends it to your configured AI model (Cloudflare Workers AI). Form input values, passwords, and credential-shaped strings are redacted before sending. The AI returns a redesigned style that Revueon applies locally. No page content is stored on any server.<br><br>
-        <button id="disclosureOk" class="btn-sm" style="width: 100%;">I understand</button>
+      <div id="askUserArea" style="display:none; margin-top: 10px; padding: 10px; background: var(--surface); border: 1px solid var(--accent); border-radius: 8px; font-size: 12px; line-height: 1.5;">
+        <div id="askUserQuestion" style="color: var(--text); margin-bottom: 8px;"></div>
+        <div id="askUserOptions" style="display: flex; flex-direction: column; gap: 6px;"></div>
+        <input type="text" id="askUserInput" placeholder="Or type your own answer…" style="width: 100%; background: var(--bg); border: 1px solid var(--border); border-radius: 6px; padding: 6px 8px; color: var(--text); font: inherit; outline: none; margin-top: 8px;" />
+        <button id="askUserSend" class="btn-sm" style="margin-top: 6px; width: 100%;">Send answer</button>
+      </div>
+      <div id="disclosure" style="padding: 8px 10px; background: var(--surface); border: 1px solid var(--border); border-radius: 8px; margin-top: 10px; font-size: 10px; line-height: 1.5; color: var(--muted);">
+        Revueon reads page structure (layout, colors, fonts, text) and sends it to your configured AI model to generate the transformation locally. Input values and credentials are redacted. No page content is stored on any server.
       </div>
       <div id="revueon-result" style="display:none"></div>
     </div>

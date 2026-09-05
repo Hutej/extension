@@ -20,11 +20,14 @@
 
 import { callLoopModel } from '../core/reason';
 import { getTool } from '../tools/index';
-import { buildPrompt } from './prompt';
+import { buildPrompt, SYSTEM_PROMPT } from './prompt';
 import { Journal } from './journal';
-import { Budget } from './budget';
+import { Budget, disposeTerminalRun, diffNewIssues, classifyResizeProof } from './budget';
+import { attemptContrastRecovery, newContrastFailures, isContrastOnlyIssues, type ContrastFailure } from './recover';
+export { disposeTerminalRun }; // back-compat re-export
 import { AI_CONFIG } from '../core/config';
-import { saveJournalState, scopeKey } from '../core/persist';
+import { saveJournalState, loadJournalState, scopeKey, mergeLiveScopeEntries, trimScopeEntries, actIdentity } from '../core/persist';
+import { shouldRefuseDone } from './journal';
 
 // D: Budget gate constants.
 // Phase 2.5 TASK2: 20s was HALF the 60s budget — it squeezed observation turns
@@ -45,6 +48,15 @@ const MIN_TURN_MS = 5_000;     // below this, no turn can complete — break
 // trying" — mirrors consecutiveNoInfo (which restricts at 2). The counter
 // resets on a CLEAN checkLayout, so a transient break does not poison the run.
 const MAX_CHECKLAYOUT_UNDOS = 2;
+
+// T3 resize proof: the narrow width the proof tests (CSS px). 480 sits below
+// every desktop layout's comfort zone but above the tiny-phone range — wide
+// enough that OS window clamping usually permits it, narrow enough to break
+// fixed-px layouts built for 1000px+ canvases. The CURRENT viewport is already
+// covered by the forced per-act checkLayout, so narrow is the missing case.
+const NARROW_WIDTH = 480;
+
+
 
 export interface ParseFailure {
   model: string;
@@ -74,15 +86,21 @@ export interface ParseFailure {
  *   - 'clean'  : no issues → accept the act; the caller resets the breaker.
  */
 export type CheckLayoutOutcome = 'error' | 'issues' | 'clean';
-export function classifyCheckLayout(cl: any): { outcome: CheckLayoutOutcome; issues: string[]; allIssues: string[] } {
+export function classifyCheckLayout(cl: any): { outcome: CheckLayoutOutcome; issues: string[]; allIssues: string[]; warnings: string[]; allWarnings: string[]; innerWidth?: number } {
   const dispatchFailed = !cl || !!cl?.error || !cl?.result;
-  if (dispatchFailed) return { outcome: 'error', issues: [], allIssues: [] };
+  if (dispatchFailed) return { outcome: 'error', issues: [], allIssues: [], warnings: [], allWarnings: [] };
   const issues = (cl?.result?.issues as string[] | undefined) ?? [];
   // allIssues is the UNCAPPED issue list (for baseline-diff). Falls back to the
   // capped `issues` if a checkLayout build predates the field.
   const allIssues = (cl?.result?.allIssues as string[] | undefined) ?? issues;
-  if (issues.length > 0) return { outcome: 'issues', issues, allIssues };
-  return { outcome: 'clean', issues: [], allIssues: [] };
+  // T3: the WARNING tier (low contrast that is not invisible). Same fallback
+  // shape for older builds; allWarnings feeds its own baseline diff and is
+  // NEVER auto-undone.
+  const warnings = (cl?.result?.warnings as string[] | undefined) ?? [];
+  const allWarnings = (cl?.result?.allWarnings as string[] | undefined) ?? warnings;
+  const innerWidth = typeof cl?.result?.innerWidth === 'number' ? cl.result.innerWidth as number : undefined;
+  if (issues.length > 0) return { outcome: 'issues', issues, allIssues, warnings, allWarnings, innerWidth };
+  return { outcome: 'clean', issues: [], allIssues, warnings, allWarnings, innerWidth };
 }
 
 export interface LoopResult {
@@ -102,6 +120,14 @@ export interface LoopResult {
 export interface LoopCredentials {
   accountId: string;
   apiToken: string;
+  /**
+   * R0 benchmark overrides — set from chrome.storage.local by the background
+   * (`revueon_model_override` etc.) so model variants can be A/B'd WITHOUT
+   * rebuilding the bundle. Undefined/empty in production → AI_CONFIG defaults.
+   */
+  modelOverride?: string;
+  reasoningEffort?: 'low' | 'medium' | 'high';
+  maxTokens?: number;
 }
 
 export async function runLoop(
@@ -109,6 +135,10 @@ export async function runLoop(
   tabId: number,
   credentials: LoopCredentials,
   onProgress?: (entry: any) => void,
+  /** askUser — ask the human a clarifying question (options + free text).
+   *  Provided by the background (popup round-trip). When absent the tool
+   *  refuses with guidance (a model without a UI must reason, not ask). */
+  askUser?: (question: string, options: string[]) => Promise<string>,
 ): Promise<LoopResult> {
   const journal = new Journal();
   journal.goal = goal;
@@ -131,6 +161,28 @@ export async function runLoop(
   let consecutiveNoInfo = 0;
   let consecutiveCheckLayoutUndos = 0; // F5 circuit-breaker — consecutive forced-checkLayout undos
   let hasActed = false;
+  // T2 reliability: is the page's current act-state verified clean by the
+  // forced post-act checkLayout? Set true on a CLEAN check; unchanged on a
+  // check error (unknown) or after a successful auto-undo (restores the prior
+  // verified state); set FALSE when an auto-undo FAILS (possibly-broken page).
+  let verifiedClean = false;
+  // T3 resize proof: the page's issues at the NARROW width WITHOUT our
+  // transformation (the site's own narrow-width behavior), captured once
+  // before the first layout-affecting act. null = not captured yet (or the
+  // window could not be resized — the proof then skips honestly).
+  let narrowBaseline: { allIssues: string[]; innerWidth: number } | null = null;
+  let narrowAttempted = false; // one capture attempt per run — a skipped proof is journalled once, not per act
+  let wideInnerWidth = 0;
+  // R2 convergence guard: consecutive applyCss acts with visibleChange === false.
+  let noVisibleStreak = 0;
+  // R3d: bounded contrast recovery — used AT MOST ONCE per run. The flag is
+  // the mechanical hard bound (never reset, checked before the attempt): the
+  // run can never chain primary → repair → repair, no matter what the model
+  // or the page does. Proven flow: R3c (harness), graduated in R3d.
+  let contrastRecoveryUsed = false;
+  // Genuine first reply: forwarded once via onProgress when the model's first
+  // response arrives (its reasoning IS the ack — no hardcoded claim).
+  let firstReplyDelivered = false;
   // Phase 2.5 TASK1 — collect REAL malformed model outputs for root-cause
   // classification. Deterministic: surfaced via LoopResult.parseFailures.
   const parseFailures: ParseFailure[] = [];
@@ -158,26 +210,14 @@ export async function runLoop(
     if (rem.wallMs <= MIN_TURN_MS) break;
 
     // D: If remaining is below ACT_RESERVE + MIN_TURN, restrict to act/verify
-    // only. Observation turns may never spend the act reserve. Phase 2.5
-    // adversarial review (wf_e3e50d92) found a breach in the window
-    // rem ∈ (ACT_RESERVE, ACT_RESERVE + MIN_TURN): turnCap's MIN_TURN_MS floor
-    // could force a 5s observation call that dips below the 12s reserve. Fix:
-    // refuse observation a full MIN_TURN earlier — observation needs room for
-    // a complete turn AND the reserve. (Act/verify turns own the reserve, so
-    // the restrictToAct cap below is the full rem — no floor conflict there.)
+    // only. Observation turns may never SPEND the act reserve via tool
+    // RESTRICTION (restrictToAct refuses observation tools here). T2
+    // reliability: the reserve no longer shrinks TIMEouts — the old
+    // turnCap derivation (`max(MIN_TURN, rem − RESERVE)`) manufactured the
+    // late-run timeouts that rolled back verified transformations
+    // (proof/T2R_DECISION.md §C). Timeouts are now bounded only by the
+    // per-call constant and the remaining wall clock.
     const restrictToAct = rem.wallMs <= ACT_RESERVE_MS + MIN_TURN_MS;
-
-    // D (Phase 2.5 TASK2 — the budget-reserve invariant): an OBSERVATION turn
-    // may spend at most (remaining - ACT_RESERVE_MS) so it can NEVER dip into
-    // the act reserve. The old code used Math.min(rem, callTimeoutMs): at
-    // rem=25s a single model call could run 25s and eat the whole 20s reserve,
-    // leaving ACT with nothing — the exact failure 5/6 baseline goals hit
-    // ("budget too low for retry after parse error"). The retry and the tool
-    // dispatch timeout are capped the same way. Once restrictToAct is true
-    // the reserve IS the acting budget, so the cap is the full remaining.
-    const turnCap = restrictToAct
-      ? rem.wallMs
-      : Math.max(MIN_TURN_MS, rem.wallMs - ACT_RESERVE_MS);
 
     budget.recordStep(0);
 
@@ -188,7 +228,7 @@ export async function runLoop(
     // is the one that completes, so the second production model and its tier
     // logic were removed in Phase 6. Vision (the former `look` tool) is
     // test/QA-only and lives in tests/, not here.
-    const loopModel = AI_CONFIG.strongModel;
+    const loopModel = credentials.modelOverride || AI_CONFIG.strongModel;
 
     // F + D: restricted tool list if consecutive no-info OR act reserve reached.
     // Phase 2.5: ALSO restrict at 1/3 budget. The prompt already SAYS "next
@@ -202,71 +242,125 @@ export async function runLoop(
     const restricted = restrictToAct || consecutiveNoInfo >= 2 || lowBudget;
     const prompt = buildPrompt(goal, origin, path, journal, budget, restricted);
 
-    // D: timeouts derive from remaining budget, not a constant — and are capped
-    // by turnCap so observation can't breach the act reserve (TASK2).
-    const callTimeout = Math.min(turnCap, AI_CONFIG.callTimeoutMs);
+    // T2 RELIABILITY: the per-call timeout is the constant cap bounded only by
+    // what is actually left — NOT by (remaining − act reserve). The old
+    // derivation manufactured late-run timeouts: at rem=15s a model needing
+    // 8-20s got a 3-5s cap, timed out, and the parse path rolled back VERIFIED
+    // work (proof/T2R_DECISION.md §C). The act reserve keeps its BEHAVIORAL
+    // role (restrictToAct gates which tools observation turns may call); it no
+    // longer shrinks timeouts.
+    const callTimeout = Math.min(rem.wallMs, AI_CONFIG.callTimeoutMs);
 
     let modelResult = await callLoopModel({
-      systemPrompt: 'You are Revueon. Respond with one JSON object only.',
+      systemPrompt: SYSTEM_PROMPT,
       userContent: prompt,
       accountId: credentials.accountId,
       apiKey: credentials.apiToken,
       model: loopModel,
       temperature: 0,
       timeoutMs: callTimeout,
+      reasoningEffort: credentials.reasoningEffort,
+      maxTokens: credentials.maxTokens,
     });
     paidCalls++;
 
-    // Retry on parse error — only if enough budget remains FOR THE RETRY AND
-    // the act reserve. The old gate checked `remaining <= MIN_TURN_MS` (5s),
-    // so a parse error at rem=25s passed, the retry ran up to 25s, and landed
-    // at 0 — eating the entire 20s act reserve. That is the exact cause of
-    // "budget too low for retry after parse error" in the baseline. Now the
-    // retry only proceeds if remaining leaves room for both the retry and the
-    // reserve, and the retry timeout is capped to (remaining - reserve).
+    // Retry on parse error — one retry, gated by remaining wall time (no
+    // unlimited retries; a retry is only worth attempting while the failure
+    // could be transient). T2 RELIABILITY: when the loop cannot retry, the
+    // terminal disposition policy decides keep-vs-rollback — verified work is
+    // no longer destroyed because the model became unreachable.
     if (!modelResult.ok || !modelResult.json) {
       recordParseFailure(modelResult.model, modelResult.raw, modelResult.error);
       const remAfter = budget.remaining().wallMs;
-      // Phase 2.5 TASK2: an observation turn's retry must preserve the act
-      // reserve; an act turn (restrictToAct) owns the reserve, so only MIN_TURN
-      // guards it. This is the fix that lets the loop REACH act after a retry.
-      const retryFloor = restrictToAct ? MIN_TURN_MS : ACT_RESERVE_MS + MIN_TURN_MS;
+      // Below this, no retry can complete — go to the terminal disposition.
+      const retryFloor = MIN_TURN_MS;
       if (remAfter <= retryFloor) {
-        await rollbackDomIfActed(tabId, journal, origin);
-        await persistJournal(journal, origin);
-        return { status: 'budgetExhausted', reason: 'the loop stopped because the remaining execution budget was insufficient to retry after a model parse error. Try a simpler request.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+        if (disposeTerminalRun(hasActed, verifiedClean) === 'rollback') {
+          // REFINE MERGE: rollback already wrote the trimmed scope state —
+          // persisting the session journal afterwards would re-save the acts
+          // the rollback just removed from the page (they would resurrect on
+          // reload). The keep branch persists; the rollback branch does not.
+          await rollbackDomIfActed(tabId, journal, origin);
+        } else {
+          await persistJournal(journal, origin);
+        }
+        const kept = hasActed && verifiedClean;
+        return { status: 'budgetExhausted', reason: kept
+          ? `the model became unreachable (${modelResult.error ?? 'invalid output'}) after the transformation was applied and verified (layout check clean). The verified work was kept; refinement stopped early.`
+          : `the model became unreachable (${modelResult.error ?? 'invalid output'}) before any change was applied. Nothing was modified — try again.`,
+          journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
       }
       const errorMsg = modelResult.raw
         ? `Your last response was not valid JSON: ${modelResult.raw.slice(0, 200)}. Respond with a valid JSON object.`
         : `The previous model call ${modelResult.error ?? 'failed'}. Respond with one valid JSON object only.`;
-      // TASK2: retry timeout capped to leave the act reserve intact when observing.
-      // Phase 2.5 TASK1: cap the retry at min(retryCap, 12s) so a retry can NEVER
-      // take the full 30s — if the first call timed out, the retry must fail fast
-      // (affordable) instead of eating another 30s. Real evidence
-      // (proof/transport-capture*.json): the slow observation model times out
-      // at >30s; a second 30s retry would burn the budget. 12s is enough for a
-      // normal 1-25s response, and short enough to preserve the act reserve.
-      const retryCap = restrictToAct
-        ? remAfter
-        : Math.max(MIN_TURN_MS, remAfter - ACT_RESERVE_MS);
+      // T2 RELIABILITY: the retry timeout is the per-call constant bounded by
+      // what is left — the old min(retryCap, 12s) assumed a 60s budget and
+      // guaranteed the retry of a slow call would also die.
       modelResult = await callLoopModel({
-        systemPrompt: 'You are Revueon. Respond with one JSON object only.',
+        systemPrompt: SYSTEM_PROMPT,
         userContent: prompt + `\n\nERROR: ${errorMsg}`,
         accountId: credentials.accountId,
         apiKey: credentials.apiToken,
-        timeoutMs: Math.min(retryCap, 12_000),
+        model: loopModel,
+        timeoutMs: Math.min(remAfter, AI_CONFIG.callTimeoutMs),
+        reasoningEffort: credentials.reasoningEffort,
+        maxTokens: credentials.maxTokens,
       });
       paidCalls++;
       if (!modelResult.ok || !modelResult.json) {
         recordParseFailure(modelResult.model, modelResult.raw, modelResult.error);
-        await rollbackDomIfActed(tabId, journal, origin);
-        return { status: 'error', reason: 'model returned invalid JSON twice', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+        if (disposeTerminalRun(hasActed, verifiedClean) === 'rollback') {
+          await rollbackDomIfActed(tabId, journal, origin);
+          return { status: 'error', reason: 'model returned invalid JSON twice', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+        }
+        // Verified work exists — keep it (honest status: the budget/run ended,
+        // not a clean done; the reason carries the transport failure).
+        // T4 honesty fix (evidence: mdn-minimal died with 0 acts yet the old
+        // message claimed a transformation was applied): the message must
+        // match what actually happened.
+        await persistJournal(journal, origin);
+        return { status: 'budgetExhausted', reason: (hasActed && verifiedClean)
+          ? `the model became unreachable (${modelResult.error ?? 'invalid output'}) after the transformation was applied and verified (layout check clean). The verified work was kept; refinement stopped early.`
+          : `the model became unreachable (${modelResult.error ?? 'invalid output'}) before any change was applied. Nothing was modified — try again.`, journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
       }
     }
 
     const response = modelResult.json as any;
 
+    // First agent reply to the user. The model's own opening reasoning IS the
+    // acknowledgment the user reads (popup: "Revueon: …", page overlay) — the
+    // product deliberately ships no canned acknowledgment. Delivered exactly
+    // once, on the first parsed model response; subsequent turns' reasoning
+    // already reaches the user through their journal entries.
+    if (!firstReplyDelivered) {
+      const replyText = typeof response.reasoning === 'string' && response.reasoning.trim()
+        ? response.reasoning.trim()
+        : typeof response.summary === 'string' && response.summary.trim() ? response.summary.trim() : '';
+      if (replyText) {
+        firstReplyDelivered = true;
+        onProgress?.({ tool: 'reply', kind: 'reply', reasoning: replyText });
+      }
+    }
+
     if (response.done) {
+      // R2 done-gate: an all-no-op CSS run cannot ship as done — every
+      // applyCss act reported visibleChange:false, so the delivered
+      // transformation IS the original page (T5/T6 class). Refuse, name the
+      // recovery path (rule 13), let the model re-scope or giveUp.
+      if (shouldRefuseDone(journal.entries as any)) {
+        journal.append({ tool: 'note', kind: 'observe' as const, args: {}, result: { error: 'done refused: every applyCss act reported NO VISIBLE CHANGE — the page as delivered is pixel-identical to the original. The rules are being shadowed by the elements that actually paint this content. Call findElements on the region the goal names, re-scope the CSS to those elements, or giveUp.' } as any, reasoning: 'done-gate: no visible effect in the run', costMs: 0, timestamp: Date.now() });
+        continue;
+      }
+      // T3 resize proof at done: verified work must survive a narrower
+      // viewport (Law 6). NEW narrow-width issues → undo the last act, tell
+      // the model, keep going (the breaker caps the retry loop). The proof
+      // never destroys on 'error' (unmeasurable ≠ broken).
+      const proofGate = await runResizeProofGate();
+      if (proofGate === 'fatal') {
+        await rollbackDomIfActed(tabId, journal, origin);
+        return { status: 'gaveUp', reason: 'giving up: repeated actions each broke the page at a narrow viewport (resize proof). The page has been rolled back to its original state.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+      }
+      if (proofGate === 'issues') continue; // journal entry appended; the model refines
       const result: LoopResult = { status: 'done', summary: response.summary ?? 'Done.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
       await persistJournal(journal, origin);
       return result;
@@ -300,7 +394,38 @@ export async function runLoop(
         onProgress?.({ tool: 'undo', undone: r.undone, failed: r.failed, reason: r.reason });
         continue;
       }
+      // askUser — the agent asks the human when the request is genuinely
+      // ambiguous. The answer is evidence (observe-kind journal entry);
+      // the loop does not interpret it — the model does, next turn.
+      if (toolName === 'askUser') {
+        const question = String(toolArgs.question ?? '').trim();
+        const options = Array.isArray(toolArgs.options) ? toolArgs.options.map(String).slice(0, 4) : [];
+        if (!question) {
+          journal.append({ tool: 'askUser', kind: 'observe', args: toolArgs, result: { error: 'missing "question" argument. Ask one clear question, e.g. {"tool":"askUser","args":{"question":"Hide the sidebar completely, or collapse it?","options":["Hide completely","Collapse"]}}' } as any, costMs: 0, timestamp: Date.now() });
+          continue;
+        }
+        if (!askUser) {
+          journal.append({ tool: 'askUser', kind: 'observe', args: toolArgs, result: { error: 'No user available to ask (running headless). Interpret the request yourself using the page evidence, or giveUp if it cannot be safely interpreted.' } as any, costMs: 0, timestamp: Date.now() });
+          continue;
+        }
+        const answer = await askUser(question, options);
+        const entry = { tool: 'askUser', kind: 'observe' as const, args: { question, options }, result: { answer }, costMs: 0, timestamp: Date.now() };
+        journal.append(entry);
+        onProgress?.(entry);
+        continue;
+      }
       if (toolName === 'done') {
+        // R2 done-gate — identical to the response.done path above.
+        if (shouldRefuseDone(journal.entries as any)) {
+          journal.append({ tool: 'note', kind: 'observe' as const, args: {}, result: { error: 'done refused: every applyCss act reported NO VISIBLE CHANGE — the page as delivered is pixel-identical to the original. The rules are being shadowed by the elements that actually paint this content. Call findElements on the region the goal names, re-scope the CSS to those elements, or giveUp.' } as any, reasoning: 'done-gate: no visible effect in the run', costMs: 0, timestamp: Date.now() });
+          continue;
+        }
+        const proofGate = await runResizeProofGate();
+        if (proofGate === 'fatal') {
+          await rollbackDomIfActed(tabId, journal, origin);
+          return { status: 'gaveUp', reason: 'giving up: repeated actions each broke the page at a narrow viewport (resize proof). The page has been rolled back to its original state.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+        }
+        if (proofGate === 'issues') continue;
         const result: LoopResult = { status: 'done', summary: toolArgs.summary ?? 'Done.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
         await persistJournal(journal, origin);
         return result;
@@ -321,23 +446,50 @@ export async function runLoop(
     // the baseline. (Matches the resize gate's newViolations approach.) The
     // baseline is cheap: one verify dispatch before the act; stored per-loop.
     let preActIssues: string[] | null = null;
+    let preActWarnings: string[] | null = null;
+    // R3d: the structured contrast baseline — elements already invisible
+    // BEFORE the act must never trigger (or count against) a recovery.
+    let preActContrast: ContrastFailure[] | null = null;
     if (tool.kind === 'act') {
       try {
-        const pre = await dispatchTool(tabId, 'checkLayout', {}, Math.min(budget.remaining().wallMs - ACT_RESERVE_MS, 20_000));
-        preActIssues = (classifyCheckLayout(pre).allIssues) ?? [];
-      } catch { preActIssues = null; } // baseline capture must never block an act
+        const pre = await dispatchTool(tabId, 'checkLayout', {}, Math.min(budget.remaining().wallMs, 20_000));
+        const preCl = classifyCheckLayout(pre);
+        preActIssues = preCl.allIssues ?? [];
+        preActWarnings = preCl.allWarnings ?? [];
+        preActContrast = (pre?.result?.contrastFailures as ContrastFailure[] | undefined) ?? [];
+        if (preCl.innerWidth) wideInnerWidth = preCl.innerWidth;
+      } catch { preActIssues = null; preActWarnings = null; preActContrast = null; } // baseline capture must never block an act
+      // T3: capture the NARROW baseline once, before the first layout-affecting
+      // act (applyCss/hide — the acts that can introduce narrow-viewport
+      // breakage; a color-only sheet still counts: it may pair with later
+      // layout acts, and one baseline per run keeps the cost fixed). The
+      // narrow baseline is the SITE's own behavior at 480px — the proof later
+      // diffs against it so the site's native narrow overflow is never blamed
+      // on the transformation. Any window-API failure → null → the proof
+      // skips honestly (reported, never silently passed).
+      if (!narrowAttempted && (toolName === 'applyCss' || toolName === 'hide')) {
+        narrowAttempted = true;
+        narrowBaseline = await captureNarrowBaseline(tabId);
+        // Honest telemetry: a proof that could not run is journalled as
+        // skipped — never silently unmeasured (rule 12).
+        if (!narrowBaseline) {
+          const skipEntry = {
+            tool: 'checkLayout', kind: 'verify' as const, args: {},
+            result: { resizeProof: true, outcome: 'skipped', reason: 'the window could not be narrowed for a trustworthy narrow-width measurement on this display' },
+            reasoning: 'resize proof baseline capture skipped',
+            costMs: 0, timestamp: Date.now(),
+          };
+          journal.append(skipEntry);
+        }
+      }
     }
     try {
-      // D: dispatch timeout derives from remaining budget. Phase 2.5 TASK2:
-      // an OBSERVATION dispatch (describePage/readText/findElements/perceivePage)
-      // is capped to leave the act reserve intact; an ACT dispatch owns the
-      // reserve (it IS the act). checkLayout is verify — it runs in the
-      // reserve window once restrictToAct, or under turnCap while observing.
+      // T2 RELIABILITY: dispatch timeouts are the constant cap bounded by what
+      // is left — the observe-specific reserve subtraction (another
+      // manufactured-timeout path) is gone. Tool dispatches are ms-fast except
+      // perceivePage (seconds); 30s is generous headroom either way.
       const remNow = budget.remaining().wallMs;
-      const observeDispatchCap = Math.max(MIN_TURN_MS, remNow - ACT_RESERVE_MS);
-      const dispatchTimeout = tool.kind === 'observe'
-        ? Math.min(observeDispatchCap, 30_000)
-        : Math.min(remNow, 30_000);
+      const dispatchTimeout = Math.min(remNow, 30_000);
       toolResult = await dispatchTool(tabId, toolName, toolArgs, dispatchTimeout);
     } catch (err) {
       toolResult = { ok: false, error: (err as Error).message };
@@ -369,8 +521,23 @@ export async function runLoop(
       if (noInfo) consecutiveNoInfo++;
       else consecutiveNoInfo = 0;
     } else if (tool.kind === 'act') {
-      hasActed = true;
+      // T2 reliability: hasActed means an act actually SUCCEEDED (ok:true) —
+      // a refused act (F1/responsive/identity) changed nothing and must not
+      // drive the terminal disposition ("acted but unverified → rollback")
+      // when there is literally nothing on the page to roll back.
+      if (toolResult.ok) hasActed = true;
       consecutiveNoInfo = 0;
+      // R2 convergence guard: consecutive successful applyCss acts that
+      // changed NOTHING visible. Streak 2 = the model is retrying the same
+      // shadowed target — escalate BEFORE it burns the budget (the T5 churn
+      // class: 96/166 calls re-refining blind).
+      if (toolResult.ok && toolName === 'applyCss') {
+        const ve = (toolResult.result as any)?.visualEffect;
+        noVisibleStreak = ve && ve.visibleChange === false ? noVisibleStreak + 1 : 0;
+        if (noVisibleStreak >= 2) {
+          journal.append({ tool: 'note', kind: 'observe' as const, args: {}, result: { error: `[convergence] ${noVisibleStreak} consecutive applyCss acts with NO VISIBLE CHANGE. Retrying the same selector/properties will not help — the elements that paint this content are targeted by other rules. Call findElements on the region, scope to what it returns, or giveUp.` } as any, reasoning: 'convergence guard: no-visible-change streak', costMs: 0, timestamp: Date.now() });
+        }
+      }
     }
 
     budget.totalCostMs += entry.costMs;
@@ -414,9 +581,13 @@ export async function runLoop(
       // MIN_TURN_MS — a forced check that runs at the reserve edge can exhaust
       // the wall budget and the act gets rolled back for the wrong reason.
       const rem = budget.remaining();
-      const clTimeout = Math.max(MIN_TURN_MS, Math.min(rem.wallMs - ACT_RESERVE_MS, 30_000));
+      // T2 RELIABILITY: bounded by remaining + the per-call constant — the
+      // reserve subtraction (another manufactured-timeout path) is gone. The
+      // MIN_TURN floor keeps the verification runnable even at the wall edge:
+      // the disposition policy needs to know the state before deciding.
+      const clTimeout = Math.min(Math.max(rem.wallMs, MIN_TURN_MS), 30_000);
       const cl = await dispatchTool(tabId, 'checkLayout', {}, clTimeout);
-      const { outcome, issues: rawIssues, allIssues: rawAll } = classifyCheckLayout(cl);
+      const { outcome, issues: rawIssues, allIssues: rawAll, allWarnings: rawWarn } = classifyCheckLayout(cl);
       // F5.8 baseline-diff: keep only issues the ACT INTRODUCED — after-act
       // allIssues NOT in the pre-act baseline allIssues. checkLayout now returns
       // an UNCAPPED allIssues (the display `issues` is capped for the model) so
@@ -425,13 +596,17 @@ export async function runLoop(
       // unchanged elements. A normalized-key fallback covers a label that
       // shifts a few chars. If the baseline capture failed (null), flag all
       // (conservative — better a false-undo than a false-pass with no baseline).
-      const normKey = (s: string) => {
-        const m = s.match(/^([^:]+: <[a-z0-9]+> )"([^"]{0,12})/);
-        return m ? m[1] + m[2] : s.slice(0, 40);
-      };
+      // T3: the shared diffNewIssues is also used by the resize proof — one
+      // diff, two consumers.
       const clIssues = preActIssues
-        ? rawAll.filter((iss) => !preActIssues.includes(iss) && !preActIssues.some((b) => normKey(b) === normKey(iss)))
+        ? diffNewIssues(rawAll, preActIssues)
         : rawIssues;
+      // T3 WARNING tier: new low-contrast warnings are surfaced to the model
+      // but NEVER auto-undone (uncertain ≠ destroy; a borderline link color is
+      // a judgment call that belongs to the model, not the breaker).
+      const newWarnings = preActWarnings
+        ? diffNewIssues(rawWarn, preActWarnings)
+        : rawWarn;
       const diffedOutcome: 'issues' | 'clean' = outcome === 'error' ? 'clean' : (clIssues.length > 0 ? 'issues' : 'clean');
       const clEntry = {
         tool: 'checkLayout', kind: 'verify' as const, args: {},
@@ -443,32 +618,100 @@ export async function runLoop(
       onProgress?.(clEntry);
       if (outcome === 'error') {
         // Verifier error — surface it, don't assume clean, don't undo. We don't
-        // KNOW the act is broken, only that we couldn't check it.
+        // KNOW the act is broken, only that we couldn't check it. verifiedClean
+        // is left unchanged (unknown — the terminal disposition is conservative).
         (clEntry.result as any).message = 'checkLayout itself failed — could not verify the page is not broken. Re-run checkLayout, or give up if you cannot verify.';
       } else if (diffedOutcome === 'issues') {
-        const u = await journal.undo(1, (inverse) => dispatchInverse(tabId, inverse));
-        if (u.undone > 0) {
-          consecutiveCheckLayoutUndos++;
-          (clEntry.result as any).autoUndone = true;
-          (clEntry.result as any).message = `checkLayout found ${clIssues.length} NEW issue(s) (pre-existing baseline issues excluded): ${clIssues.join('; ')}. The last action was automatically undone — the page's layout would have been broken. Try a different approach or give up.`;
-        } else if (u.failed > 0) {
-          // F1: the undo did NOT restore the DOM (stale/wrong-target — the page
-          // re-rendered so the selector now resolves to a different element).
-          // Do NOT count this as a clean undo or bump the circuit breaker — the
-          // act is still live on the page (journal kept the entry). Surface the
-          // failure so the model knows the break is still there and must undo
-          // it itself (the `undo` control tool) or give up. Rule 13: a swallowed
-          // failure here would have the loop report success on a still-broken page.
-          (clEntry.result as any).autoUndone = false;
-          (clEntry.result as any).undoFailed = true;
-          (clEntry.result as any).message = `checkLayout found ${clIssues.length} NEW issue(s) but the automatic undo FAILED to restore the DOM (${u.reason ?? 'stale/wrong-target'}). The action is still on the page. Call the undo tool (steps: 1) to retry, or give up.`;
+        // R3d: BOUNDED CONTRAST RECOVERY. When the ONLY new issues are
+        // invisible-text failures on a CSS sheet, the R3c-proven flow runs
+        // BEFORE any undo: one targeted model call carrying the structured
+        // evidence (element, measured ratio, fg, bg) → repair through the
+        // SAME applyCss → verify. Repaired → both sheets stay live and the
+        // act counts as clean. Not repaired → the repair entry is popped by
+        // undo(1) (it is the most recent act) and the existing undo path for
+        // the primary follows unchanged. The flag above is the hard bound:
+        // one attempt per run, never reset, no iteration anywhere.
+        let repairedByRecovery = false;
+        let recoveryAttempted = false;
+        const newFailures = newContrastFailures(cl?.result?.contrastFailures, preActContrast);
+        if (toolName === 'applyCss' && !contrastRecoveryUsed && isContrastOnlyIssues(clIssues)
+          && newFailures.length > 0 && budget.remaining().wallMs > MIN_TURN_MS) {
+          contrastRecoveryUsed = true;
+          recoveryAttempted = true;
+          const rec = await attemptContrastRecovery({
+            goal, failures: newFailures,
+            baselineFailures: preActContrast, baselineAllIssues: preActIssues,
+            callModel: (userContent) => callLoopModel({
+              systemPrompt: SYSTEM_PROMPT, userContent,
+              accountId: credentials.accountId, apiKey: credentials.apiToken,
+              model: loopModel, temperature: 0,
+              timeoutMs: Math.min(budget.remaining().wallMs, AI_CONFIG.callTimeoutMs),
+              reasoningEffort: credentials.reasoningEffort, maxTokens: credentials.maxTokens,
+            }),
+            applyCss: (css) => dispatchTool(tabId, 'applyCss', { css }, 30_000),
+            checkLayout: () => dispatchTool(tabId, 'checkLayout', {}, 30_000),
+          });
+          paidCalls++; // the single recovery model call — the flag guarantees there is never another
+          // The repair entry mirrors the normal act construction: it is live
+          // on the page, so undo/toggle/persistence must all know about it.
+          const repairEntry = rec.css && rec.applyResult ? {
+            tool: 'applyCss', kind: 'act' as const, args: { css: rec.css },
+            result: rec.applyResult.result ?? { error: rec.applyResult.error },
+            confidence: rec.applyResult.confidence, inverse: rec.applyResult.inverse,
+            identityDigest: rec.applyResult.identityDigest,
+            reasoning: 'bounded contrast recovery: one targeted repair of the named invisible-text failures',
+            costMs: rec.applyResult.costMs ?? 0, timestamp: Date.now(),
+          } : null;
+          if (rec.repaired && repairEntry) {
+            repairedByRecovery = true;
+            journal.append(repairEntry);
+            onProgress?.(repairEntry);
+            (clEntry.result as any).recovery = 'repaired';
+            (clEntry.result as any).message = `checkLayout found ${clIssues.length} NEW invisible-text issue(s) — the bounded recovery repaired them in ONE targeted pass (evidence: ${newFailures.map((f) => `<${f.tag}>`).join(', ')}). The transformation and its repair are both live and verified; continue or call done.`;
+            consecutiveCheckLayoutUndos = 0; // a repaired state is a clean state
+            verifiedClean = true; // the post-repair checkLayout verified it against the pre-act baseline
+          } else if (repairEntry) {
+            // Not repaired: remove the failed repair FIRST — journal.undo(1)
+            // pops it (the most recent act entry; verify entries are skipped),
+            // dispatching its removeCss inverse. The primary then follows the
+            // standard undo path below.
+            journal.append(repairEntry);
+            const uRepair = await journal.undo(1, (inverse) => dispatchInverse(tabId, inverse));
+            (clEntry.result as any).recovery = uRepair.undone > 0 ? 'attempted-and-removed' : 'attempted-remove-failed';
+            if (uRepair.undone === 0) {
+              (clEntry.result as any).message = `the failed recovery repair could NOT be removed (undo failed) — it may still be on the page.`;
+            }
+          }
         }
-        if (consecutiveCheckLayoutUndos >= MAX_CHECKLAYOUT_UNDOS) {
-          await rollbackDomIfActed(tabId, journal, origin);
-          return {
-            status: 'gaveUp', reason: `giving up: ${consecutiveCheckLayoutUndos} consecutive actions each broke the page layout (checkLayout failed). The page has been rolled back to its original state.`,
-            journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures,
-          };
+        if (!repairedByRecovery) {
+          const u = await journal.undo(1, (inverse) => dispatchInverse(tabId, inverse));
+          if (u.undone > 0) {
+            consecutiveCheckLayoutUndos++;
+            // The undo restored the previously verified act-state — the flag's
+            // meaning ("current page state verified") is preserved, not cleared.
+            (clEntry.result as any).autoUndone = true;
+            (clEntry.result as any).message = `checkLayout found ${clIssues.length} NEW issue(s) (pre-existing baseline issues excluded): ${clIssues.join('; ')}. The last action was automatically undone — the page's layout would have been broken. Try a different approach or give up.`;
+          } else if (u.failed > 0) {
+            // F1: the undo did NOT restore the DOM (stale/wrong-target — the page
+            // re-rendered so the selector now resolves to a different element).
+            // Do NOT count this as a clean undo or bump the circuit breaker — the
+            // act is still live on the page (journal kept the entry). The page is
+            // possibly broken → the terminal disposition must roll back.
+            verifiedClean = false;
+            (clEntry.result as any).autoUndone = false;
+            (clEntry.result as any).undoFailed = true;
+            (clEntry.result as any).message = `checkLayout found ${clIssues.length} NEW issue(s) but the automatic undo FAILED to restore the DOM (${u.reason ?? 'stale/wrong-target'}). The action is still on the page. Call the undo tool (steps: 1) to retry, or give up.`;
+          }
+          if (recoveryAttempted) {
+            (clEntry.result as any).message = `A bounded contrast recovery was attempted first and did not repair the failure (it was removed). ${(clEntry.result as any).message ?? ''}`;
+          }
+          if (consecutiveCheckLayoutUndos >= MAX_CHECKLAYOUT_UNDOS) {
+            await rollbackDomIfActed(tabId, journal, origin);
+            return {
+              status: 'gaveUp', reason: `giving up: ${consecutiveCheckLayoutUndos} consecutive actions each broke the page layout (checkLayout failed). The page has been rolled back to its original state.`,
+              journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures,
+            };
+          }
         }
       } else {
         // CLEAN — reset the circuit-breaker. The streak counts BACK-TO-BACK
@@ -477,6 +720,15 @@ export async function runLoop(
         // streak. (A clean after an undo = the undo restored the page → not a
         // streak; a clean after a fresh act = the act worked. Both reset.)
         consecutiveCheckLayoutUndos = 0;
+        // T2 reliability: the page's act-state is now verified clean — the
+        // terminal disposition may KEEP this work if the run ends early.
+        verifiedClean = true;
+        // T3: surface new low-contrast warnings on the CLEAN path too — the
+        // act is accepted, but the model should see what it made hard to read.
+        if (newWarnings.length > 0) {
+          (clEntry.result as any).warnings = newWarnings;
+          (clEntry.result as any).message = `The action was applied and the layout check is clean. ${newWarnings.length} low-contrast warning(s) (NOT auto-undone — your call): ${newWarnings.join('; ')}. If the goal did not ask for hard-to-read text, refine the colors; otherwise continue.`;
+        }
       }
     }
   }
@@ -493,14 +745,158 @@ export async function runLoop(
     };
   }
 
-  // F3 (RC3): the loop exhausted budget WITHOUT calling done — the run did not
-  // cleanly succeed, so roll back every change it made. (A run that fully
-  // succeeded calls `done`, which persists and returns before this point.)
-  await rollbackDomIfActed(tabId, journal, origin);
-  return { status: 'budgetExhausted', reason: 'the loop stopped because the remaining execution budget was insufficient to finish. The actions taken this run were rolled back to keep the page intact. Try a simpler request.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+  // F3 (RC3), T2 RELIABILITY REVISION: the loop ended without done — the
+  // disposition policy decides. Verified work (acts applied, forced checkLayout
+  // clean) is KEPT and persisted: the transformation the user asked for is on
+  // the page and verified; destroying it because the model never got to say
+  // "done" is the exact failure this amendment removes. Unverified or
+  // broken-undo states still roll back (RC3's real purpose).
+  if (disposeTerminalRun(hasActed, verifiedClean) === 'rollback') {
+    await rollbackDomIfActed(tabId, journal, origin);
+    return { status: 'budgetExhausted', reason: 'the loop stopped because the remaining execution budget was insufficient to finish, and the changes were not verified as intact. The actions taken this run were rolled back to keep the page intact. Try a simpler request.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+  }
+  // T3 resize proof gate for the two done-sites. Returns 'clean' (done may
+  // proceed / no proof needed), 'issues' (journal entry appended, undo done,
+  // the loop continues so the model can refine), or 'fatal' (breaker tripped).
+  // A proof that RAN clean also appends an entry — a silent pass is
+  // indistinguishable from a skip, and the run record should show the proof
+  // happened (rule 12's spirit: never silently unmeasured).
+  async function runResizeProofGate(): Promise<'clean' | 'issues' | 'fatal'> {
+    if (!(hasActed && verifiedClean && narrowBaseline)) return 'clean';
+    const check = await resizeAndCheck(tabId);
+    const proof = classifyResizeProof(check, narrowBaseline);
+    const ran = !!check && !check.error && !!check.result;
+    if (proof.outcome === 'clean') {
+      if (ran) {
+        journal.append({
+          tool: 'checkLayout', kind: 'verify' as const, args: {},
+          result: { resizeProof: true, outcome: 'clean', narrowInnerWidth: check?.result?.innerWidth ?? null },
+          reasoning: 'resize proof at done — the transformation survives a narrower viewport',
+          costMs: 0, timestamp: Date.now(),
+        });
+      }
+      return 'clean';
+    }
+    const u = await journal.undo(1, (inverse) => dispatchInverse(tabId, inverse));
+    if (u.undone > 0) {
+      consecutiveCheckLayoutUndos++;
+    } else {
+      // The undo failed — the breaking sheet may still be on the page.
+      verifiedClean = false;
+    }
+    journal.append({
+      tool: 'checkLayout', kind: 'verify' as const, args: {},
+      result: { resizeProof: true, outcome: 'issues', narrowInnerWidth: check?.result?.innerWidth ?? null, newIssues: proof.newIssues, autoUndone: u.undone > 0, undoFailed: u.failed > 0 },
+      reasoning: 'resize proof at done — the transformation must survive a narrower viewport',
+      costMs: 0, timestamp: Date.now(),
+    });
+    if (consecutiveCheckLayoutUndos >= MAX_CHECKLAYOUT_UNDOS) return 'fatal';
+    return 'issues';
+  }
+
+  /** T3: resize the window to NARROW_WIDTH, run checkLayout, restore the
+   *  exact prior geometry. The window is resized for ~300ms — real resize,
+   *  so media queries and viewport units re-solve (a root-constraint
+   *  simulation, the archive's approach, cannot do that). Returns the
+   *  checkLayout response (with innerWidth read-back) or { ok:false } on any
+   *  window-API failure. The restore ALWAYS runs.
+   *  Window managers vary in what they honor: Chrome on Linux ignores width-
+   *  only updates (size+state+position must go in ONE update) and some
+   *  position-preserving resizes are silently dropped on bare X. Hence the
+   *  attempt ladder below — polite position first, then (0,0), then a known-
+   *  good geometry — with a read-back after each. If NOTHING narrows the
+   *  window, checkLayout still runs but its innerWidth betrays the clamp and
+   *  the caller skips the proof honestly. */
+  async function resizeAndCheck(tabId: number): Promise<any> {
+    let saved: { width?: number; height?: number; left?: number; top?: number; state?: string; id?: number } | null = null;
+    try {
+      const win = await chrome.windows.get((await chrome.tabs.get(tabId)).windowId!);
+      saved = { width: win.width, height: win.height, left: win.left, top: win.top, state: win.state, id: win.id };
+      if (saved.state === 'fullscreen' || saved.state === undefined) return { ok: false, error: 'window is fullscreen — resize proof skipped' };
+      // BACKGROUND TABS DO NOT REFLOW — a background tab keeps its stale
+      // innerWidth and skips the relayout, so the narrow check would measure
+      // the old viewport. The proof must observe the live page: activate the
+      // tab (the one the user invoked Revueon on) for the ~1s measurement.
+      await chrome.tabs.update(tabId, { active: true });
+      const attempts = [
+        { width: NARROW_WIDTH, height: saved.height, left: saved.left, top: saved.top },
+        { width: NARROW_WIDTH, height: saved.height, left: 0, top: 0 },
+        { width: NARROW_WIDTH, height: 800, left: 0, top: 0 },
+      ];
+      for (const a of attempts) {
+        await chrome.windows.update(win.id!, { state: 'normal' as chrome.windows.WindowState, ...a });
+        await new Promise((r) => setTimeout(r, 280));
+        const mid = await chrome.windows.get(win.id!);
+        if ((mid.width ?? 0) <= NARROW_WIDTH + 100) break;
+      }
+      const check = await dispatchTool(tabId, 'checkLayout', {}, 30_000);
+      return check;
+    } catch (err) {
+      return { ok: false, error: (err as Error).message || 'resize proof failed' };
+    } finally {
+      if (saved) {
+        try {
+          const winId = saved.id ?? (await chrome.tabs.get(tabId)).windowId!;
+          if (saved.state === 'maximized') {
+            await chrome.windows.update(winId, { state: 'maximized' as chrome.windows.WindowState });
+          } else {
+            // Restore with read-back + one retry — the same WM flakiness
+            // applies to the restore, and a stuck-narrow window is a worse
+            // artifact than anything the proof measures.
+            await chrome.windows.update(winId, { state: 'normal' as chrome.windows.WindowState, width: saved.width, height: saved.height, left: saved.left, top: saved.top });
+            await new Promise((r) => setTimeout(r, 250));
+            const end = await chrome.windows.get(winId);
+            if (saved.width && (end.width ?? 0) < saved.width - 100) {
+              await chrome.windows.update(winId, { state: 'normal' as chrome.windows.WindowState, width: saved.width, height: saved.height, left: 0, top: 0 });
+              await new Promise((r) => setTimeout(r, 250));
+            }
+          }
+        } catch { /* tab/window may be gone */ }
+      }
+    }
+  }
+
+  /** T3: capture the narrow baseline (the site's OWN narrow-width issues,
+   *  before any transformation). null when the window cannot be narrowed
+   *  enough for the measurement to mean anything (OS clamping) — the caller
+   *  then skips the proof honestly. */
+  async function captureNarrowBaseline(tabId: number): Promise<{ allIssues: string[]; innerWidth: number } | null> {
+    const check = await resizeAndCheck(tabId);
+    const cl = classifyCheckLayout(check);
+    if (!cl.innerWidth) return null; // dispatch failed / checkLayout errored — no trustworthy baseline
+    // Clamping guard: if the OS refused to narrow the window (innerWidth
+    // stayed within ~120px of the original), the "narrow" reading tests the
+    // wrong viewport and would false-flag. Skip honestly.
+    if (wideInnerWidth > 0 && wideInnerWidth - cl.innerWidth < 120) return null;
+    return { allIssues: cl.allIssues, innerWidth: cl.innerWidth };
+  }
+
+  // T3: the work is verified at the current viewport and will be KEPT — but
+  // the hard law says a transformation must survive a resize. Run the proof;
+  // a transformation that breaks a narrow viewport must not be kept forever
+  // just because the model became unreachable before refining it. A proof
+  // that could not MEASURE (error/clamped) keeps the work (uncertain ≠ destroy).
+  if (narrowBaseline) {
+    const check = await resizeAndCheck(tabId);
+    const proof = classifyResizeProof(check, narrowBaseline);
+    const ran = !!check && !check.error && !!check.result;
+    if (proof.outcome === 'issues') {
+      await rollbackDomIfActed(tabId, journal, origin);
+      return { status: 'budgetExhausted', reason: `the transformation was applied and verified at the current window size, but the resize proof found it breaks at a narrow viewport (${proof.newIssues[0]}). The run ended before the model could fix this, so the changes were rolled back. Try a responsive approach (percentages, fr, clamp).`, journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+    }
+    if (ran) {
+      journal.append({
+        tool: 'checkLayout', kind: 'verify' as const, args: {},
+        result: { resizeProof: true, outcome: 'clean', narrowInnerWidth: check?.result?.innerWidth ?? null },
+        reasoning: 'resize proof on terminal keep — the transformation survives a narrower viewport',
+        costMs: 0, timestamp: Date.now(),
+      });
+    }
+  }
+  await persistJournal(journal, origin);
+  return { status: 'budgetExhausted', reason: 'the transformation was applied and verified (layout check clean) before the run ended; the work was kept. Refinement stopped early — the model did not reach its final done.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
 }
 
-// ── helpers ────────────────────────────────────────────────────────
 
 /** D: dispatch timeout derives from remaining budget. */
 function dispatchTool(tabId: number, toolName: string, args: any, timeoutMs: number = 30_000): Promise<any> {
@@ -600,14 +996,21 @@ async function rollbackDomIfActed(tabId: number, journal: Journal, origin: strin
   if (undoReply?.failed > 0) {
     console.warn(`[Revueon] F1: terminal rollback could not fully restore the DOM — ${undoReply.failed} structural undo(s) failed (stale/wrong-target). ${undoReply.undone} of ${(undoReply.undone ?? 0) + (undoReply.failed ?? 0)} restored. The page may still carry a mutation; storage has been cleared so a reload restores the original.`);
   }
-  // 3. Drop the persisted journal state for this scope so a reload doesn't
-  //    re-apply a failed/partial transform. (CSS + DOM both undone above;
-  //    clearing storage prevents the webNavigation re-insert path reviving it.)
-  // F4: key by origin + path (scopeKey), not origin only.
+  // 3. Trim THIS run's delivered acts (those with inverses — a refused act
+  //    never reached the page) from the persisted scope state: the rollback
+  //    removed exactly those from the page. Earlier runs' still-live work on
+  //    the same scope must SURVIVE a failed refinement run — the old full
+  //    clear destroyed the transformation the user already kept, losing it
+  //    on the next reload while its CSS was still on the page. An emptied
+  //    state disables the scope (reload restores nothing).
   try {
     if (origin) {
       const key = scopeKey(origin + journal.path);
-      await saveJournalState(key, { enabled: false, origin: '', path: '', goal: '', entries: [], createdAt: Date.now() });
+      const prior = await loadJournalState(key);
+      const rolledBack = journal.entries.filter((e) => e.kind === 'act' && (e as any).inverse);
+      prior.entries = trimScopeEntries(prior.entries, rolledBack);
+      prior.enabled = prior.enabled && prior.entries.length > 0;
+      await saveJournalState(key, prior);
     }
   } catch { /* ignore */ }
 }
@@ -616,12 +1019,24 @@ async function rollbackDomIfActed(tabId: number, journal: Journal, origin: strin
  *  composes the key. Uses toPersistableState() — the persisted state STRIPS
  *  cleartext page content (observe entries, act results, inverse.prevHtml),
  *  keeping only the replay-relevant fields + the removeCss CSS (our output) +
- *  the SHA-256 identityDigest. See Journal.toPersistableState. */
+ *  the SHA-256 identityDigest. See Journal.toPersistableState.
+ *
+ *  REFINE MERGE: the persisted scope state is the accumulated LIVE acts of
+ *  every run on this scope. Earlier runs' still-live entries stay on the page
+ *  through this run (no path below removes them), so they must survive this
+ *  persist — replacing the state (the old behavior) lost them on reload. A
+ *  prior state the user explicitly toggled OFF (enabled: false) is not live
+ *  and is not merged — the new run starts a fresh live set for the scope. */
 async function persistJournal(journal: Journal, origin: string): Promise<void> {
   try {
     if (origin) {
       const key = scopeKey(origin + journal.path);
-      await saveJournalState(key, journal.toPersistableState());
+      const state = journal.toPersistableState();
+      const prior = await loadJournalState(key);
+      if (prior.enabled && prior.entries.length) {
+        state.entries = mergeLiveScopeEntries(prior.entries, state.entries);
+      }
+      await saveJournalState(key, state);
     }
   } catch { /* ignore persistence errors */ }
 }

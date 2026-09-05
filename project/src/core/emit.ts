@@ -123,6 +123,29 @@ export function primaryTarget(items: EmitItem[]): { selector: string; properties
   return null;
 }
 
+/** T4: every MEASURABLE rule target in the sheet — (first comma-part selector,
+ *  declared longhands) per style rule, recursing into @media/@supports.
+ *  @keyframes is excluded (its keyText is not a DOM selector). This is the
+ *  assert surface for coordinated sheets: the cascade (user origin loses to
+ *  author normal) can silently defeat SOME rules of a sheet while others land
+ *  — measuring only the primary (primaryTarget) let partial themes ship as
+ *  "applied". Pure. */
+export function allRuleTargets(items: EmitItem[]): Array<{ selector: string; properties: string[] }> {
+  const out: Array<{ selector: string; properties: string[] }> = [];
+  const walk = (xs: EmitItem[]) => {
+    for (const item of xs) {
+      if (item.kind === 'style' && item.declarations.length > 0) {
+        const selector = item.selector.split(',')[0].trim();
+        if (selector) out.push({ selector, properties: item.declarations.map((d) => d.property) });
+      } else if (item.kind === 'at' && !item.prelude.startsWith('@keyframes')) {
+        walk(item.items);
+      }
+    }
+  };
+  walk(items);
+  return out;
+}
+
 /** Collect EVERY distinct selector the emitted CSS will match — every style
  *  rule's selector split on its comma-parts, recursing into @media/@supports
  *  (their inner rules apply to real DOM elements). @keyframes is EXCLUDED: its

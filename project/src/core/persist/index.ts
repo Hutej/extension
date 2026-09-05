@@ -76,6 +76,49 @@ export async function loadJournalState(key: string): Promise<JournalState> {
 export async function saveJournalState(key: string, state: JournalState): Promise<void> {
   await browser.storage.local.set({ [PREFIX + key]: state });
 }
+
+/** Stable identity of a persisted act: tool + args (the authored CSS string;
+ *  the html+target+position; the selector+text). Two runs authoring the
+ *  byte-identical act are ONE act — re-applying it is idempotent (insertCSS
+ *  dedupes identical strings; replay re-executes to the same state). */
+export function actIdentity(e: JournalEntry): string {
+  return JSON.stringify({ tool: e.tool, args: e.args });
+}
+
+/** The persisted scope state is the accumulated LIVE acts of every run on
+ *  that scope — not a snapshot of the latest run. A refinement run merges
+ *  its still-live entries into the previously persisted ones instead of
+ *  replacing them (the refine→reload data-loss bug: run 2's persist
+ *  overwrote run 1's saved state while run 1's work stayed live on the
+ *  page, so a reload restored only the last run). Deduped by act identity —
+ *  repeated persistence of unchanged live state never duplicates. Entries
+ *  for acts that were undone never arrive here: journal.undo() splices them
+ *  from the session journal before persist, and an explicit Remove wipes the
+ *  saved state entirely — so undone work cannot resurrect via the merge. */
+export function mergeLiveScopeEntries(persisted: JournalEntry[], live: JournalEntry[]): JournalEntry[] {
+  const seen = new Set(persisted.map(actIdentity));
+  const merged = [...persisted];
+  for (const e of live) {
+    const id = actIdentity(e);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    merged.push(e);
+  }
+  return merged;
+}
+
+/** Remove the given acts from a persisted scope state — the rollback path's
+ *  trim. A run that ends in rollback removed exactly its own delivered acts
+ *  (those WITH inverses — a refused act never reached the page) from the
+ *  page; the persisted state must drop precisely those and KEEP earlier
+ *  runs' still-live work on the same scope. Filtering is by act identity, so
+ *  a rolled-back act byte-identical to an earlier run's act is removed too
+ *  — correct, because the page carries one physical instance of it and the
+ *  rollback just removed that instance. */
+export function trimScopeEntries(persisted: JournalEntry[], removed: JournalEntry[]): JournalEntry[] {
+  const gone = new Set(removed.map(actIdentity));
+  return persisted.filter((e) => !gone.has(actIdentity(e)));
+}
 // (Phase 2.5: removed dead `clearJournalState` — exported but never imported.
 // Journal clearing uses saveJournalState with an empty entry, not a remove.
 // Caught by the widened audit-wiring; do not reintroduce without a consumer.)

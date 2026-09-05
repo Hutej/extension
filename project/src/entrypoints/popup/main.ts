@@ -22,7 +22,11 @@ const apiTokenEl = $<HTMLInputElement>('apiToken');
 const saveKeyBtn = $<HTMLButtonElement>('saveKeyBtn');
 const credStatusEl = $<HTMLDivElement>('credStatus');
 const disclosureEl = $<HTMLDivElement>('disclosure');
-const disclosureOkBtn = $<HTMLButtonElement>('disclosureOk');
+const askUserArea = $<HTMLDivElement>('askUserArea');
+const askUserQuestion = $<HTMLDivElement>('askUserQuestion');
+const askUserOptions = $<HTMLDivElement>('askUserOptions');
+const askUserInput = $<HTMLInputElement>('askUserInput');
+const askUserSend = $<HTMLButtonElement>('askUserSend');
 
 // Consent gate — required for launch. The background's runLoop handler ALSO
 // checks revueonConsentShown (the single entry point), so no caller — popup or
@@ -32,11 +36,17 @@ const CONSENT_REQUIRED = AI_CONFIG.consentRequired;
 
 // ── Cloudflare credentials ─────────────────────────────────────────
 
-void browser.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token', 'revueonConsentShown']).then((res: Record<string, unknown>) => {
+void browser.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token']).then((res: Record<string, unknown>) => {
   if (res.cloudflare_account_id) accountIdEl.value = res.cloudflare_account_id as string;
   if (res.cloudflare_api_token) apiTokenEl.value = res.cloudflare_api_token as string;
-  if (CONSENT_REQUIRED && !res.revueonConsentShown) disclosureEl.style.display = 'block';
 });
+
+// Consent without a button (product decision): opening the popup after
+// reading the disclosure IS the acknowledgement. The gate itself stays
+// enforced in the background — this only removes the click friction.
+if (CONSENT_REQUIRED) {
+  void browser.storage.local.set({ revueonConsentShown: true });
+}
 
 settingsToggle.addEventListener('click', () => settingsArea.classList.toggle('open'));
 
@@ -50,9 +60,42 @@ saveKeyBtn.addEventListener('click', () => {
   });
 });
 
-disclosureOkBtn?.addEventListener('click', () => {
-  void browser.storage.local.set({ revueonConsentShown: true });
-  disclosureEl.style.display = 'none';
+// ── askUser — the agent asks, the popup answers ─────────────────────
+
+function sendAnswer(requestId: number, answer: string): void {
+  chrome.runtime.sendMessage({ action: 'askUserAnswer', requestId, answer });
+  askUserArea.style.display = 'none';
+  askUserInput.value = '';
+  showStatus('<span class="spinner"></span>Working with your answer…', 'info');
+}
+
+// ── revueonReply — the model's own first words to the user ──────────
+// The genuine acknowledgment: the model's first-turn reasoning, forwarded by
+// the background the moment the first model response parses.
+
+chrome.runtime.onMessage.addListener((message: any) => {
+  if (message?.action === 'revueonReply') {
+    const text = String(message.text ?? '');
+    if (text) showStatus(`Revueon: ${text}`, 'info');
+    return;
+  }
+  if (message?.action !== 'askUserPrompt') return;
+  const { requestId, question, options } = message;
+  askUserQuestion.textContent = `❓ ${question}`;
+  askUserOptions.innerHTML = '';
+  for (const opt of (Array.isArray(options) ? options : []) as string[]) {
+    const b = document.createElement('button');
+    b.className = 'btn-sm';
+    b.style.width = '100%';
+    b.textContent = opt;
+    b.addEventListener('click', () => sendAnswer(requestId, opt));
+    askUserOptions.appendChild(b);
+  }
+  askUserArea.style.display = 'block';
+  askUserSend.onclick = () => {
+    const own = askUserInput.value.trim();
+    if (own) sendAnswer(requestId, own);
+  };
 });
 
 // ── helpers ────────────────────────────────────────────────────────
@@ -84,12 +127,13 @@ transformBtn.addEventListener('click', async () => {
 
   const consent = await browser.storage.local.get(['revueonConsentShown']);
   if (CONSENT_REQUIRED && !consent.revueonConsentShown) {
-    disclosureEl.style.display = 'block';
-    showStatus('Please review and acknowledge the disclosure below first.', 'info');
-    return;
+    void browser.storage.local.set({ revueonConsentShown: true });
   }
 
-  showStatus('<span class="spinner"></span>Running…', 'info');
+  // Honest pre-model state (no hardcoded claim of understanding), then the
+  // model's OWN first reasoning arrives as the agent's reply via
+  // 'revueonReply' — zero extra model calls, genuine words.
+  showStatus('<span class="spinner"></span>Thinking…', 'info');
   metricsEl.className = 'metrics';
   elapsedEl.className = 'elapsed show';
   transformBtn.disabled = true;

@@ -15,6 +15,32 @@ export default defineBackground(() => {
   // MV3 keepalive — the loop's tool dispatchs keep this SW alive.
   chrome.runtime.onConnect.addListener(() => {});
 
+  // ── askUser: pending question→answer promises ─────────────────────
+  // The loop's askUser callback broadcasts a question to the extension's
+  // UI pages (the popup). The popup answers (an option or free text);
+  // the answer resolves the pending promise. 120s timeout → the model
+  // is told the user did not answer and proceeds with its best judgment.
+  const askUserPending = new Map<number, (answer: string) => void>();
+  let askUserSeq = 0;
+
+  const askUserViaPopup = (question: string, options: string[]): Promise<string> =>
+    new Promise((resolve) => {
+      const requestId = ++askUserSeq;
+      let settled = false;
+      const finish = (answer: string) => {
+        if (settled) return;
+        settled = true;
+        askUserPending.delete(requestId);
+        resolve(answer);
+      };
+      askUserPending.set(requestId, finish);
+      chrome.runtime.sendMessage({ action: 'askUserPrompt', requestId, question, options }, () => {
+        // No receiver (popup closed) — the user cannot answer.
+        void chrome.runtime.lastError;
+      });
+      setTimeout(() => finish('(no answer — the user did not respond in time; proceed with your best judgment, or giveUp if the request cannot be safely interpreted)'), 120_000);
+    });
+
   // ── A: CSS origin layer — insertCSS / removeCSS at USER origin ────
   // The content script sends CSS; we insert it at the user origin.
   // chrome.scripting cannot be called from a content script.
@@ -68,7 +94,7 @@ export default defineBackground(() => {
       const tabId = message.tabId as number;
       const goal = message.goal as string;
 
-      chrome.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token', 'revueonConsentShown'], async (result) => {
+      chrome.storage.local.get(['cloudflare_account_id', 'cloudflare_api_token', 'revueonConsentShown', 'revueon_model_override', 'revueon_reasoning_effort', 'revueon_max_tokens'], async (result) => {
         const accountId = result.cloudflare_account_id as string | undefined;
         const apiToken = result.cloudflare_api_token as string | undefined;
         // Consent gate (Phase 6 launch requirement). Checked FIRST — the single
@@ -86,24 +112,56 @@ export default defineBackground(() => {
         }
 
         try {
-          const result: LoopResult = await runLoop(goal, tabId, { accountId, apiToken });
+          // R0 benchmark overrides — empty in production → AI_CONFIG defaults.
+          const effort = result.revueon_reasoning_effort as 'low' | 'medium' | 'high' | undefined;
+          // Work overlay: tell the page the agent has started (the content
+          // script shows the translucent layer + blocks clicks), forward each
+          // step, and always remove the layer when the run ends.
+          const notifyTab = (msg: unknown): void => {
+            chrome.tabs.sendMessage(tabId, msg, () => void chrome.runtime.lastError);
+          };
+          notifyTab({ action: 'revueonWorkStart', goal });
+          const loopResult: LoopResult = await runLoop(goal, tabId, {
+            accountId,
+            apiToken,
+            modelOverride: (result.revueon_model_override as string | undefined) || undefined,
+            reasoningEffort: effort === 'medium' || effort === 'high' ? effort : undefined,
+            maxTokens: typeof result.revueon_max_tokens === 'number' ? result.revueon_max_tokens : undefined,
+          }, (entry) => {
+            // The model's own first reasoning = the agent's reply to the user.
+            // Broadcast to the popup (no hardcoded acknowledgment anywhere).
+            if (entry?.kind === 'reply' && entry?.reasoning) {
+              chrome.runtime.sendMessage({ action: 'revueonReply', text: String(entry.reasoning).slice(0, 400) }, () => void chrome.runtime.lastError);
+            }
+            notifyTab({ action: 'revueonWorkStep', entry: { tool: entry?.tool, kind: entry?.kind, reasoning: entry?.kind === 'reply' ? String(entry?.reasoning ?? '').slice(0, 120) : undefined } });
+          }, askUserViaPopup);
+          notifyTab({ action: 'revueonWorkEnd' });
           sendResponse({
-            ok: result.status !== 'error',
-            status: result.status,
-            summary: result.summary,
-            reason: result.reason,
-            paidCalls: result.paidCalls,
-            wallMs: result.wallMs,
-            steps: result.budget.stepsUsed,
-            toolsCalled: result.journal.entries.map((e) => e.tool),
-            journal: result.journal.entries,
-            parseFailures: result.parseFailures ?? [],
+            ok: loopResult.status !== 'error',
+            status: loopResult.status,
+            summary: loopResult.summary,
+            reason: loopResult.reason,
+            paidCalls: loopResult.paidCalls,
+            wallMs: loopResult.wallMs,
+            steps: loopResult.budget.stepsUsed,
+            toolsCalled: loopResult.journal.entries.map((e) => e.tool),
+            journal: loopResult.journal.entries,
+            parseFailures: loopResult.parseFailures ?? [],
           });
         } catch (err) {
+          chrome.tabs.sendMessage(tabId, { action: 'revueonWorkEnd' }, () => void chrome.runtime.lastError);
           sendResponse({ ok: false, error: (err as Error).message });
         }
       });
       return true; // async response
+    }
+
+    // askUser answer from the popup — resolves the pending loop question.
+    if (message.action === 'askUserAnswer') {
+      const finish = askUserPending.get(message.requestId as number);
+      if (finish) finish(String(message.answer ?? ''));
+      sendResponse({ ok: !!finish });
+      return;
     }
 
     return false;

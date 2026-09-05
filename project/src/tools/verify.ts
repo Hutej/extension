@@ -10,7 +10,7 @@
  */
 
 import type { ToolDef, ToolResult } from './index';
-import { parseColor, contrastRatio } from '../shared/color';
+import { parseColor, contrastRatio, contrastFloor, extractGradientStops, type RGBA } from '../shared/color';
 
 // ── snapshot — serialize key DOM state ─────────────────────────────
 
@@ -60,6 +60,7 @@ async function checkLayout(_args: any): Promise<ToolResult> {
   await new Promise<void>((r) => requestAnimationFrame(() => r()));
 
   const issues: string[] = [];
+  const warnings: string[] = [];
   // F5.8 baseline-diff: an UNCAPPED list of every issue, collected BEFORE the
   // per-category display caps. The loop diffs the after-act fullIssues against
   // the pre-act fullIssues to find only NEW issues the act introduced. Without
@@ -67,6 +68,8 @@ async function checkLayout(_args: any): Promise<ToolResult> {
   // pre-existing truncated issues on a real site (Wikipedia has 700+), and the
   // diff would false-flag every pre-existing issue as new → false-undo. The
   // capped `issues` stays for the model's readability; `allIssues` is the truth.
+  // T3: `allWarnings` is the same machinery for the WARNING tier (low contrast
+  // that is not invisible) — diffed separately, never auto-undone.
   const allIssues: string[] = [];
   const addIssue = (s: string) => { allIssues.push(s); };
 
@@ -112,42 +115,83 @@ async function checkLayout(_args: any): Promise<ToolResult> {
     issues.push(`(${zeroSizeTruncated} more zero-size content elements not listed — count is partial)`);
   }
 
-  // 3. Invisible text — low contrast ratio against background.
+  // 3. Text contrast — the T3 tiered scan.
   //    C: scan text nodes in the main content area, not just [data-revueon-inserted].
+  //    Two tiers, both baseline-diffed by the loop (only NEW issues count):
+  //    - BREAKING: ratio < 2.0 ("invisible text") — white-on-white class
+  //      failures; participates in the existing auto-undo path.
+  //    - WARNING: 2.0 ≤ ratio < WCAG AA floor (4.5 normal / 3.0 large text) —
+  //      "low contrast", reported in `warnings` for the model to fix or
+  //      justify; NEVER auto-undone (uncertain ≠ destroy).
+  //    Background resolution: nearest ancestor with a PAINTED (non-transparent)
+  //    background; gradient backgrounds (backgroundImage) are measured
+  //    WORST-CASE across parsed stops (text over a light→dark gradient must
+  //    clear the floor at the bad end); if nothing paints, the canvas default
+  //    (white) is assumed — F5's adversarial fix, kept.
   const textEls = Array.from(main.querySelectorAll('p, span, a, h1, h2, h3, h4, h5, h6, li, td, div')) as HTMLElement[];
   let checked = 0;
+  let invisibleFound = 0;
+  const allWarnings: string[] = [];
+  // R3c: the INVISIBLE tier also records structured failures (element, ratio,
+  // foreground, effective background) — everything this check already computes.
+  // This is the evidence a bounded recovery consumer passes to the model: a
+  // named failure with its measured colors, never "the page looks broken".
+  // Capped alongside the display list; fullContrastFailureCount carries the truth.
+  const contrastFailures: Array<{ tag: string; text: string; ratio: number; fg: string; bg: string }> = [];
   for (const el of textEls) {
-    if (checked++ > 50) break; // ponytail: scan a sample, not the whole page
+    if (checked++ > 240) break; // ponytail: capped scan, not a whole-page census
     if (!el.textContent?.trim() || el.children.length > 0) continue;
     const style = getComputedStyle(el);
+    if (style.display === 'none' || style.visibility === 'hidden') continue;
     const fg = parseColor(style.color);
     if (!fg) continue;
-    let bg: any = null;
+    let bg: RGBA | null = null;
     let bgEl: Element | null = el;
-    while (bgEl && !bg) {
+    let hops = 0;
+    const gradientStops: RGBA[] = [];
+    while (bgEl && !bg && hops++ < 16) {
       const s = getComputedStyle(bgEl);
+      // A gradient painted on ANY ancestor is a real surface for this text —
+      // collect its stops (worst-case candidates) and keep walking for the
+      // solid color underneath.
+      gradientStops.push(...extractGradientStops(s.backgroundImage));
       const c = parseColor(s.backgroundColor);
-      // F5 fix: a FULLY-TRANSPARENT background (rgba(0,0,0,0) / 'transparent')
-      // is "no background painted here", not "black background". parseColor
-      // returns [0,0,0,0] for transparent; contrastRatio ignores alpha, so
-      // treating it as found → black-on-black ratio 1.00 → false "invisible"
-      // on every element whose nearest bg is transparent (very common).
-      // Skip transparent and keep walking up to find the painted ancestor.
+      // A FULLY-TRANSPARENT background is "no background painted here", not
+      // black — skip transparent and keep walking up to the painted ancestor.
       if (c && c[3] > 0) bg = c;
       else bgEl = bgEl.parentElement;
     }
-    // F5 adversarial review (SKEPTIC major): if NO ancestor has a painted
-    // background, the old code silently no-oped (bg=null → skip). Text on a
-    // fully-transparent stack renders against the canvas (white by default).
-    // Default to white so a low-contrast fg (e.g. white text on a transparent
-    // page → renders white-on-white) is still caught instead of silently passed.
-    // (getComputedStyle resolves oklch()/color()/named-colors to rgb(), so
-    // parseColor handles modern color functions for COMPUTED style.)
-    if (!bg) bg = [255, 255, 255, 1];
-    if (bg && contrastRatio(fg, bg) < 1.5) {
-      issues.push(`invisible text: contrast ratio ${contrastRatio(fg, bg).toFixed(2)} in <${el.tagName.toLowerCase()}> "${el.textContent.trim().slice(0, 40)}"`);
-      addIssue(`invisible text: contrast ratio ${contrastRatio(fg, bg).toFixed(2)} in <${el.tagName.toLowerCase()}> "${el.textContent.trim().slice(0, 40)}"`);
-      break; // one is enough to flag
+    // Worst-case candidates: gradient stops (own or any ancestor's) plus the
+    // painted/assumed solid background. The ratio is the MINIMUM across them —
+    // dark text on a light→dark gradient is invisible at the light end even if
+    // the solid base contrasts fine.
+    const stops = gradientStops.length > 0 ? gradientStops : extractGradientStops(style.backgroundImage);
+    const candidates: RGBA[] = [...stops];
+    if (bg) candidates.push(bg);
+    else if (stops.length === 0) candidates.push([255, 255, 255, 1]); // no paint anywhere → canvas default
+    if (candidates.length === 0) continue;
+    const ratio = Math.min(...candidates.map((c) => contrastRatio(fg, c)));
+    const text = el.textContent.trim();
+    const tag = el.tagName.toLowerCase();
+    if (ratio < 2.0) {
+      const issue = `invisible text: contrast ratio ${ratio.toFixed(2)} in <${tag}> "${text.slice(0, 40)}"`;
+      if (invisibleFound < 5) issues.push(issue);
+      if (contrastFailures.length < 8) {
+        contrastFailures.push({
+          tag, text: text.slice(0, 40), ratio: Math.round(ratio * 100) / 100,
+          fg: style.color,
+          bg: bg && bgEl ? getComputedStyle(bgEl).backgroundColor : '(no painted background — canvas default: white)',
+        });
+      }
+      allIssues.push(issue);
+      invisibleFound++;
+      continue;
+    }
+    const floor = contrastFloor(parseFloat(style.fontSize) || 16, style.fontWeight);
+    if (ratio < floor) {
+      const warn = `low contrast: ratio ${ratio.toFixed(2)} < ${floor.toFixed(1)} in <${tag}> "${text.slice(0, 40)}"`;
+      if (allWarnings.length < 6) warnings.push(warn);
+      allWarnings.push(warn);
     }
   }
 
@@ -286,7 +330,15 @@ async function checkLayout(_args: any): Promise<ToolResult> {
 
   return {
     ok: issues.length === 0,
-    result: { issues, allIssues, overflow: bodyOverflow, issueCount: issues.length, fullIssueCount: allIssues.length },
+    result: {
+      issues, allIssues, warnings, allWarnings, contrastFailures, fullContrastFailureCount: invisibleFound,
+      overflow: bodyOverflow, issueCount: issues.length, fullIssueCount: allIssues.length,
+      warningCount: warnings.length, fullWarningCount: allWarnings.length,
+      // T3 resize proof: the loop reads this back after chrome.windows.update
+      // to detect OS width clamping (an un-narrowable window skips the proof
+      // honestly instead of testing the wrong viewport).
+      innerWidth: window.innerWidth,
+    },
     confidence: issues.length === 0 ? 0.8 : 0.4,
     costMs: 0,
   };

@@ -1,351 +1,212 @@
 # Revueon — Architecture
 
-*(Read before touching `project/src/`. Loaded on demand, so it can afford detail.
-If any fact here disagrees with the code, **the code wins** — verify, then update this file.)*
+*Complete specification of the live system. Rebuilt 31 Aug 2026 from source
+after R0/R1/R2. Every number in this file is verified against code — when code
+changes, this file changes in the same commit (stale-doc drift was the T0
+lesson; numbers in `project/proof/*.md` reports are the historical truth).*
 
-**Companion files.** This describes the *shape* of the system. For the permanent tool contract read
-`04_CAPABILITIES.md`. For browser physics — formatting contexts, intrinsic sizing, cascade layers,
-container queries, healing, selector stability — read `05_BROWSER_CRAFT.md` before emitting any CSS
-or touching the DOM.
+## 1. What Revueon is
 
----
+An AI agent that lives in the browser. The user types a goal in plain English;
+Revueon investigates the page, gathers only the evidence it needs, authors the
+cheapest correct change, applies it locally, reads back the effect, and stops.
+The site's backend is never touched. One model, any brain: the model is a
+replaceable config constant — the architecture is the product.
 
-## The one architectural rule
+Honest claim audit: the loop runs in the extension's service worker, every
+tool executes in the page, all state is local (`chrome.storage`). The only
+remote element is the model inference API call — true of every competitor.
 
-> **Every user request is an investigation, not a pipeline.**
->
-> Solve it with the minimum observation level, the minimum reasoning depth, and the minimum
-> execution scope capable of producing a correct result with sufficient confidence.
-> Escalate only when the evidence is insufficient — never because "that's the pipeline."
-
-The retired rule — *"AI owns design decisions, the Layout IR owns structure, the solver owns
-constraints, the compiler owns CSS"* — described layers of a fixed sequence. That sequence was the
-product's central defect. It is gone.
-
----
-
-## The shape of the system
+## 2. The three contexts
 
 ```
-User goal
-   ↓
-Agent loop  (background service worker — the brain)
-   ↓  tool call                    ↑  result + confidence
-Tool layer  (content script — the hands)
-   ↓
-The page
+POPUP (the face — src/entrypoints/popup/)
+  goal input · model reply · askUser question + options + free text
+  status/metrics · credentials · result JSON (#revueon-result, test hook)
+
+BACKGROUND SERVICE WORKER (the brain's host — src/entrypoints/background.ts)
+  runLoop — the agent loop (src/agent/loop.ts)
+  callLoopModel — the ONLY model transport (src/core/reason/)
+  chrome.scripting.insertCSS / removeCSS — USER-origin CSS
+  webNavigation replay · per-tab CSS tracker (storage.session)
+  askUser pending-question map (id → resolver, 120s timeout)
+
+CONTENT SCRIPT (the hands — src/entrypoints/content.ts, one per page)
+  tool dispatch against the live DOM (src/tools/)
+  TransactionLog — exact structural undo (src/core/ops/)
+  work overlay (closed shadow root) · identity store · persisted-DOM replay
 ```
 
-One loop. A growing set of tools. Nothing else.
+## 3. Message protocol (complete)
 
-There is no orchestrator, no fixed stage order, no route table, and no code path chosen from the
-text of the request. Every request goes to the model.
-
----
-
-## The loop
-
-```
-1. Receive the goal and the origin+path.
-2. Ask the model: what do you need to know?
-3. Run the tool it asked for. Append the result to the journal.
-4. Ask again with the journal. Enough evidence?
-      no  → back to 3, one level deeper
-      yes → act
-5. Act. Apply immediately — do not accumulate a batch.
-6. Read the page back. Compare against reality, not against the plan.
-      worse → undo and try something else
-      good  → continue or stop
-7. done(summary) | giveUp(reason) | budget exhausted → stop and say what happened.
-```
-
-**Two behavioural rules earned the hard way.** At least one observation before any act — without it
-the model answers from training data and never looks at the page. And when one third of the budget
-remains, the next turn must be act, done or giveUp — without it the model observes forever on a
-vague goal and the budget dies with nothing applied. Both were observed on real runs. Do not solve
-either by growing the prompt; see `07_ANTIPATTERNS.md` §A10.
-
-**The journal** is the single record of the run: every tool call, every result, every change made.
-It is what the model sees on each turn, what `undo(n)` walks backwards, and what persistence
-replays on the next visit to the same origin.
-
----
-
-## Progressive observation — six levels
-
-Depth is chosen at run time from confidence. Never from a keyword or a category.
-
-| Level | Scope | Typical tool | Cost |
-|---|---|---|---|
-| 0 | Goal + origin only, no DOM | — | ~0 |
-| 1 | One named thing | `findElements`, `readText` | ms |
-| 2 | One component | `inspect`, `measure` | ms |
-| 3 | One region / page map | `describePage` | ~10ms |
-| 4 | Whole page | `perceivePage` | seconds, expensive |
-| 5 | Whole site | not built | — |
-
-Every observation returns **confidence, latency, cost**. High confidence stops the escalation. Low
-confidence escalates one level — and if evidence is still insufficient at the top, the agent **does
-less**, it does not guess more.
-
-**Most requests must never reach level 4.** In the old architecture every request did, which is the
-whole problem: "hide Shorts" and "redesign this site as Apple documentation" invoked identical
-machinery, at 145 seconds each.
-
-**The working pattern is map-then-read.** Level 3 to find the region, level 1 to read only that
-region. The model never sees the whole page, the whole DOM, or any HTML — it sees a map of ~15
-regions, then the text of the one it chose.
-
-**Scope refusal is measured, never named.** A guard checks what a selector actually resolved to —
-element count, share of page text, share of area — not whether it was spelled `body`. Blocklists
-leak; `:root` and `.main-wrapper` walk straight through one.
-
----
-
-## The tool layer
-
-Every capability lives in `src/tools/` and appears in the registry exactly once. **No tool calls
-another tool** — composition happens in the loop where the model can see it and the journal can
-record it. A tool that calls another tool is a hidden pipeline. The full contract is in
-`04_CAPABILITIES.md`.
-
-### Observation — collects evidence, decides nothing
-
-| Tool | Returns |
-|---|---|
-| `describePage` | Region map: roles, component types, text samples, positions, `targetable` |
-| `findElements` | Candidates matching a concept, each with confidence and a selector |
-| `inspect` | Computed style, box, formatting context, children of one element |
-| `measure` | Geometry, overflow, intrinsic sizes |
-| `readText` | Text of one chosen element — redacted, and `truncated` when clipped |
-| `perceivePage` | Full perception. Level 4. Expensive. Called deliberately, rarely. |
-
-No observation tool may return a plan, a spec, a style, or anything applicable to a page. The moment
-observation starts returning "and here's what you should do," perception has taken over design and
-every design decision becomes invisible to the model and untraceable in the journal. That single
-failure cost this project three months.
-
-### Action — scoped and reversible
-
-| Tool | Notes |
-|---|---|
-| `applyCss` | The primary action. A stylesheet the browser owns. |
-| `hide` | Scoped `display:none`, always followed by `heal`. |
-| `heal` | Close the hole a removal leaves. Six ordered CSS steps — `05_BROWSER_CRAFT` §7. |
-| `insert` | **The safe content path.** Adds nodes; cannot collapse a track. Prefer it. |
-| `setText` | Text-level targets only. **Refuses** an element with element children. |
-| `bindKey` | Behaviour. Declarative, reversible. |
-| `recomposePage` | Whole-page layout, as **one tool**. Never the default. Shape in `05_BROWSER_CRAFT` §13. |
-
-### Verification — reads reality, after render
-
-`snapshot` · `diff` · `checkLayout` · `checkContrast` · `assertDomClean` · `look`
-
-All of these read the live DOM after `requestAnimationFrame`, or they are measuring the previous
-frame. They compare against **the page, never the plan** — checking output against intent is a
-compiler validating its own AST, and it reported 9/9 gates green on a destroyed page. `look` sends
-a screenshot to a vision model and gets back a description in words; it is the only check that sees
-what the user sees.
-
-### Control
-
-`undo(steps)` · `done(summary)` · `giveUp(reason)`
-
-`giveUp` is a **success state**. An agent that gives up honestly is worth more than one that invents
-work. Never make it feel like failure in the prompt or the model will hallucinate instead.
-
----
-
-## Errors are instructions
-
-A tool error is read by a model deciding what to do next. It is not a log line.
-
-| Bad | Good |
-|---|---|
-| `"invalid selector"` | `"'body' resolves to 4,102 elements (98% of page text). Call describePage first, then read the specific region."` |
-| `"not found"` | `"No match for 'video player'. describePage found: nav, search, breadcrumb, sidebar, article…"` |
-| `"failed"` | `"setText refused: <main> has 47 element children; replacing them would destroy the layout. Use insert."` |
-
-Every refusal names the reason **and the alternative**. A model told what to do instead recovers in
-one step; a model told "failed" retries until the budget dies.
-
----
-
-## How output reaches the page
-
-**The user origin.** All generated CSS is inserted at the user origin via
-`chrome.scripting.insertCSS({ target: { tabId }, css, origin: 'USER' })` from
-the background service worker. The content script never inserts CSS — it
-sends a message; the background inserts. `chrome.scripting` cannot be called
-from a content script; this is a platform constraint.
-
-User origin beats author origin unconditionally (for the same importance level).
-User-important beats author-important, including inline `style="...!important"`.
-This is why there is no `@layer` wrapper, no style node, and no defence loop.
-The page cannot remove user-origin CSS — it is above the author origin the
-page controls.
-
-**Removal** is `chrome.scripting.removeCSS` with `css` and `origin: 'USER'`
-matching the insertion exactly. The journal stores the exact inserted CSS
-string per entry (`inverse: { kind: 'removeCss', css }`) so undo is exact.
-
-**The emitter** (`core/emit.ts`) takes structured rules, never a CSS string
-that gets post-processed:
-```typescript
-type EmitItem =
-  | { kind: 'style'; selector: string; declarations: Array<{ property: string; value: string }>; important?: boolean }
-  | { kind: 'at'; prelude: string; items: EmitItem[] }
-```
-`!important` is appended at serialisation, per declaration, from the flag — never
-by scanning a value. At-rules (`@media`, `@supports`, `@keyframes`) are a
-separate type and never receive `!important` on their inner declarations. A
-raw CSS string from the model is parsed with the browser's CSSOM (`new
-CSSStyleSheet().replaceSync()`) before it reaches the emitter. Regex does
-not touch CSS values anywhere in this codebase.
-
-`!important` is not blanket. Hide defaults to important. For everything else,
-the emitter emits normal first, `assertApplied` measures whether the computed
-value moved, and re-emits important only if it did not.
-
-**`assertApplied`** — applied means the computed style moved. Every act tool
-returns `{ applied, before, after, matched }`. A run where every act returned
-`applied: false` is a FAILED run. Bytes reaching a stylesheet is not evidence.
-
-**Persistence scope — decision (F4 CONTINUITY, Phase 5).** The journal is
-keyed by **origin + pathname** (`scopeKey(url)` = `u.origin + u.pathname`) —
-never query, never fragment (tokens and personal data live there), never a
-full URL. A look saved on `/wiki/CSS` applies to `/wiki/CSS`, not to
-`/wiki/HTML`. Reasoning: per `06_FOUNDATION.md` F4 and `roadmap.txt` Phase 5,
-the binding unit of continuity is the page scope, and "survives a second
-article" means the modification is durable for *its* scope and is not
-corrupted by visiting another page — it returns when you come back. It does
-*not* mean the modification propagates everywhere. The earlier "origin only"
-position (a "hide the sidebar" is a site-level preference) is **superseded**;
-the SPA-CSS leak it caused (a hide on `/page1` staying on `/page2` because
-USER-origin `insertCSS` persists across `pushState`) is closed by the
-background's strict-scope enforcement in `reinsertSavedCss`. The privacy
-commitment (never store a full URL) is preserved: the key is origin + pathname
-only. This is a product decision ratified 12 Aug 2026; revisit it only if a
-goal is genuinely site-level (then a per-origin site-level layer may return —
-deferred, YAGNI today).
-
-**Cold-navigation flash.** `insertCSS` has no `runAt` in MV3, so a saved look
-can paint one unstyled frame. The background subscribes to
-`chrome.webNavigation.onCommitted` (full navigations — fires before paint) and
-`chrome.webNavigation.onHistoryStateUpdated` (SPA `pushState`/`replaceState` —
-`onCommitted` does *not* fire for those) and re-inserts the saved CSS for the
-new scope before the page renders. The background also **removes** the prior
-scope's CSS so a hide on `/page1` does not leak onto `/page2`. The static CSS
-gap cover is **not measured** — the report says so rather than asserting it.
-
-**Exception: DOM mutation.** Required for inserting content, rewriting text,
-binding keys, and our own affordances. Allowed, rare, and it must record a
-reason from a small named set. A mutation with no declared reason is refused.
-
-**Before any structural mutation**, ask what the element's children contribute
-to its own size and to its parent's. Replacing an element's children deletes
-the intrinsic sizes holding its grid track open — this collapsed an MDN article
-into a 30-pixel column with text breaking mid-word, with no CSS emitted at
-all. `05_BROWSER_CRAFT` §2 has the full anatomy.
-
-**Off** calls `chrome.scripting.removeCSS` for each CSS entry and replays
-text/HTML inverses in reverse. Every act records its exact inverse **before**
-it runs, and **`textContent` is never a valid inverse for anything** — it
-discards every child element. Anything touching structure records a cloned
-node. `on → off → on → off` must produce a byte-identical DOM for text/HTML
-mutations. CSS is removed exactly by construction.
-
----
-
-## The model's role
-
-The model **writes the answer**. It does not fill in a vocabulary we invented.
-
-There is no `DesignSpec`, no relation tokens, no expander, no pack lookup table. Those were a
-ceiling on the model's intelligence disguised as a safety rail — the reason *"summarise this"* was
-literally unspeakable in the old architecture, where 37 relation types could express none of it.
-
-Our job is **validation and repair**: contrast provable before colour is emitted, no measured length
-written back into the page, `minmax(0, 1fr)` and `min-width: 0` present in generated grid and flex,
-container queries rather than media queries, scope respected, reversibility recorded. Review is a
-thing we are good at. Authoring by lookup table is not.
-
-**Model tiering:** a fast model for observation and routing turns; a strong model for design
-judgement and content; a vision model for reading screenshots. Tool calls use native tool calling
-where supported, otherwise a strict single-object JSON envelope with exactly one retry that shows
-the parse error back, then `giveUp`.
-
----
-
-## Budgets and stopping
-
-| Budget | Value | On exhaustion |
+| message | from → to | purpose |
 |---|---|---|
-| Steps | 12 tool calls | Stop, report what was achieved |
-| Wall clock | 60 s total | Stop, keep what already landed |
-| First visible change | 1 s | Not a limit — a requirement |
-| Cost | per-run ceiling | Stop, report spend |
+| `runLoop {goal, tabId}` | popup → background | start the agent loop |
+| `insertCSS {css}` / `removeCSS {css}` | content → background | USER-origin CSS (tab tracked in `storage.session`) |
+| `toggleCss {on}` | content → background | toggle persisted CSS for the scope |
+| `toolCall {tool, args}` | background → content (tab) | dispatch one tool |
+| `undoAll` / `undoLast` / `resetTxn` | background → content | structural rollback / log reset |
+| `revueonWorkStart {goal}` | background → content | show overlay, block page input |
+| `revueonWorkStep {entry:{tool,kind,reasoning?}}` | background → content | overlay phase/reply text |
+| `revueonWorkEnd` | background → content | remove overlay (always — incl. error path) |
+| `revueonReply {text}` | background → popup | the model's own first reply |
+| `askUserPrompt {requestId, question, options}` | background → popup | ask the user |
+| `askUserAnswer {requestId, answer}` | popup → background | resolve the pending question |
+| `toggle` / `remove` | popup → content | user-facing on/off / remove-all |
 
-**Check the budget before starting a call, not after it returns.** A model call takes 10–15 seconds;
-checking afterwards overshoots by a whole call, which is exactly how a 60-second ceiling produced an
-80-second run.
+## 4. The loop, turn by turn (src/agent/loop.ts)
 
-A stopped run is not a failed run. Partial success is success. The agent says what it did, what it
-skipped, and why.
+System prompt (`SYSTEM_PROMPT`, src/agent/prompt.ts): identity, the JSON
+response contract, and the non-negotiable guardrails (preserve content and
+function; never invent selectors; author responsive intent, never measured
+pixels; ask only on genuine ambiguity; done requires visible effect; honest
+giveUp over wrong transformation). User prompt: goal, origin+path (never
+query/fragment), the tool list, the budget line, the full serialized journal,
+and the design-intelligence paragraph (effect-not-property, one coordinated
+stylesheet, sub-region scoping via findElements, intended-visible-effect
+clause, stop-when-satisfied).
 
----
+One model call per turn (`callLoopModel`, temperature 0, JSON object response
+format), one parse retry on invalid JSON. Each successful parse is one of:
+`{tool,args,reasoning}` · `{done,summary}` · `{giveUp,reason}`.
 
-## What lives where
+Turn order and every gate:
+
+1. **First reply** — the first parsed response's `reasoning` (or summary) is
+   forwarded once as the user-facing reply (popup `Revueon: …` + overlay). No
+   hardcoded acknowledgment exists anywhere in the product.
+2. **done** — R2 done-gate first: if applyCss acts were authored and ALL
+   reported `visibleChange:false`, done is refused and the journal names the
+   recovery path. Then the T3 resize proof: the transformation must survive a
+   480px viewport vs a captured narrow baseline; new narrow-viewport issues →
+   undo the last act and refine (breaker-capped).
+3. **giveUp** — unverified acts roll back; verified work disposition applies.
+4. **Tool dispatch** — restricted mode (act reserve reached, 2 no-info
+   observations, or ⅓ budget left) refuses observation tools structurally.
+   `askUser` (control) pauses the loop and round-trips the popup.
+5. **Pre-act** — forced `checkLayout` baseline capture (stateless issues are
+   baseline-diffed, so the site's own defects are never blamed on us); narrow
+   baseline captured once before the first layout-affecting act.
+6. **Act gates (in-tool)** — F1 identity guard (selector → live element,
+   fail-closed; the stylesheet contract for multi-match cascade intents),
+   responsive gate (fixed-px layout dominance refused), motion gate (layout-
+   property transitions refused), reduced-motion auto-wrap for motion sheets.
+7. **Emission** — USER-origin sheet; every rule's computed style is measured
+   before/after (`perSelector`); if ANY rule was defeated, the whole sheet is
+   re-emitted with `!important`; `assertApplied` waits out active transitions.
+8. **Effect feedback (R1)** — `visualEffect`: stride-sampled text leaves
+   (cap 8) + layout containers (cap 24), compared before→after on geometry
+   (move/resize > 8px), visibility, paint (color/bg), type — one honest line:
+   `VISIBLE — 5 resized, 3 moved…` or `NO VISIBLE CHANGE — … call findElements
+   …`. The journal always shows it, plus `rules defeated by page styles: …`.
+9. **Forced post-act checkLayout** — new issues → auto-undo the act;
+   circuit breaker at 2 consecutive undos → honest gaveUp with rollback.
+   R3d exception, before any undo: when the ONLY new issues are
+   invisible-text failures on a CSS sheet, ONE bounded contrast recovery runs
+   (`agent/recover.ts`) — a targeted model call carrying the structured
+   evidence (element, measured ratio, fg, bg), a repair through the same
+   `applyCss`, verification against the pre-act baseline. Repaired → both
+   sheets stay live and the act counts as clean; not repaired → the repair is
+   removed and the standard undo path follows. Hard bound: one recovery per
+   run (a never-reset flag), so primary → repair → repair is impossible.
+10. **Convergence guard (R2)** — 2 consecutive no-visible-change applyCss acts
+    → escalating journal note (re-scope or giveUp).
+11. **Terminal disposition** — `disposeTerminalRun`: verified-clean work is
+    KEPT when the model becomes unreachable; unverified acts roll back.
+
+## 5. Budgets and constants (single source: `src/core/config`, `loop.ts`)
+
+| constant | value | role |
+|---|---|---|
+| maxSteps | 80 | runaway ceiling, not governor |
+| maxWallMs | 300,000 | runaway ceiling |
+| callTimeoutMs | 60,000 | per model call (sized for uncapped completions) |
+| maxCompletionTokens | null | NO artificial output cap (user decision); provider default applies |
+| ACT_RESERVE_MS | 12,000 | wall reserved for acting (tool restriction, not timeout shrink) |
+| MIN_TURN_MS | 5,000 | below this no turn can complete — break |
+| MAX_CHECKLAYOUT_UNDOS | 2 | integrity circuit breaker |
+| NARROW_WIDTH | 480 | resize-proof viewport |
+| MAX_JOURNAL_CHARS | 8,000 | journal section of the prompt (`[TRUNCATED]` flagged) |
+| reasoning_effort | low (GLM models) | per-turn |
+| R0 overrides | `revueon_model_override`, `revueon_reasoning_effort`, `revueon_max_tokens` (chrome.storage) | benchmark without rebuild |
+
+## 6. Observation and evidence
+
+- `describePage` (the default first call): ≤60 semantic regions
+  (id/role/type/selector/textSample ≤80 chars/position/targetable+reason) +
+  the DESIGN snapshot — palette, type, spacing, surface in ≤600 chars,
+  4–30 ms. Sampling: body/html canvas + 3 elements per role + ≤40 regions.
+- `findElements`: resolve a model-named selector (≤10 matches, confidence,
+  targetability). `readText`: capped, redacted element text.
+- `perceivePage`: level-4 deep perception (outline tree walking shadow roots,
+  color model, density, spatial model, surface/elevation, CSS vars, media,
+  landmarks, interactive), 6s walk budget, 24k serialize ceiling, 8k tool
+  result. Expensive — the prompt says call it rarely.
+- Journal serialization: design snapshot first; regions capped at 15 in the
+  prompt; act entries always carry `applied ✓/✗`, the `effect:` line, and
+  defeated selectors; askUser answers appear as `user answered: "…"`.
+- Rule 14 invariant: production NEVER sends screenshots or page content to a
+  model for identification. Origin + path only. Vision is TEST-ONLY.
+
+## 7. Identity, reversal, continuity
+
+- **F1 identity** (src/core/identity*): structural descriptors re-resolved
+  at use time against the live DOM — never a stamped attribute. Fail-closed
+  on zero/many/wrong-target; identical-twin nth-of-type mitigation; act-time
+  fingerprint for setText/insert undo verification; identity digests
+  (SHA-256, style-agnostic) persisted for replay re-verification.
+- **F3 reversal** (src/core/ops/): every act records its exact inverse BEFORE
+  mutating; structural ops record cloned nodes (`textContent` is never a
+  valid inverse); on→off→on→off restores the DOM byte-for-byte (proven on
+  MDN/Wikipedia/HN); the failure path fires `undoAll` (the old RC3 fix).
+- **F4 continuity**: scope = origin + pathname (never query/fragment). CSS
+  replays via webNavigation.onCommitted (before first paint) +
+  onHistoryStateUpdated (SPA pushState). DOM acts replay from the journal
+  with digest re-verification; missing/mismatched targets are reported,
+  never silently skipped. The loop itself never replays (single-replay rule).
+- **F5 integrity**: checkLayout's 7 checks (overflow, zero-size content,
+  invisible text, narrow containers, collapsed main, unreachable/clipped,
+  mid-word breaks), baseline-diffed both wide and narrow; contrast scan
+  three-tier (BREAKING <2.0 / WARNING <AA), every gradient stop.
+
+## 8. Model transport (src/core/reason/)
+
+Cloudflare Workers AI, OpenAI-compatible `/chat/completions`. `max_completion_tokens`
+is sent ONLY when explicitly configured (default: absent — no artificial
+cap). HTTP retries (4) for 429/5xx with parsed `retry-after` backoff; a 400
+drops params one at a time (reasoning_effort → temperature → response_format).
+Parse recovery via `extractJson` (balanced-object extraction). Every failure
+is captured (`parseFailures`) with raw output for root-cause classification.
+Model-agnostic by construction: one constant + storage override; BYOK is a
+settings UI away, not an architecture change.
+
+## 9. What lives where
 
 ```
 project/src/
-  agent/
-    loop.ts        the loop above
-    prompt.ts      the agent prompt — under 2,000 characters, and that is a ceiling not a target
-    journal.ts     record, replay, undo, persist per origin+path
-    budget.ts      steps, time, cost
-  tools/
-    index.ts       the registry — the only list of capabilities
-    observe.ts     describePage, findElements, inspect, measure, readText, perceivePage
-    act.ts         applyCss, hide, heal, insert, setText, move, bindKey, recomposePage
-    verify.ts      snapshot, diff, checkLayout, checkContrast, assertDomClean, look
-  core/
-    perceive/      kept intact — exposed as the single tool perceivePage
-    inventory.ts   the lightweight DOM walk behind describePage and findElements
-    emit.ts        structured CSS emitter — EmitItem[], CSSOM parser, no regex
-    heal.ts        the six healing steps
-    reason/        model transport only — no prompts that decide anything
-    persist/       per-origin journal storage
-    sanitize/      CSS validation, sensitive-data redaction
-    config/        loop config: models, budgets
-  entrypoints/
-    background.ts  hosts the loop — the brain
-    content.ts     dispatches tools — the hands. It wires; it never implements.
-    popup/         goal entry and result display
+├── agent/         loop · prompt · journal (serialization + R2 gates) · budget
+├── tools/         observe · act · verify · registry (index.ts) — ALL capabilities
+├── core/
+│   ├── perceive/  describePage/perceivePage engine (one tool, level 4)
+│   ├── design.ts  the DESIGN snapshot builder
+│   ├── identity*  F1 target guard · ops/ TransactionLog · persist/ state+digests
+│   ├── responsive fixed-px dominance + motion gates · sanitize CSS hygiene
+│   ├── reason/    the ONLY model transport · config/ single source of truth
+├── shared/color.ts  pure color math (parse, WCAG contrast, gradient stops)
+└── entrypoints/  background (brain host) · content (hands + overlay) · popup (face)
 ```
 
-`content.ts` wires and dispatches. It never implements. It previously reached 1,698 lines doing
-exactly the opposite, and that is how the fixed pipeline survived so long unexamined. It is now
-~85 lines. Keep it that way.
+## 10. Known limits (honest, current)
 
----
-
-## Invariants a reviewer can check in five minutes
-
-1. No file or directory is named after an operation.
-2. No table maps request text to a code path.
-3. The word `fallback` appears nowhere as a mechanism that invents work.
-4. Every observation return type is inapplicable to a page.
-5. Every observation tool returns a confidence number.
-6. Every act tool has an exact inverse, and **no inverse uses `textContent`**.
-7. Every mutation call site supplies a reason.
-8. Every capability is in the registry exactly once, and no tool imports another tool.
-9. No length measured off the live page is written back into it.
-10. Every tool that can clip a result sets `truncated`.
-11. Every error string names an alternative.
-12. No file, tool, prompt or constant names a specific website.
-13. Every tool created in a commit is called in that same commit; nothing in `src/` is unreachable
-    from an entrypoint.
-
-A failure in any of these is a build failure, not a warning. "Informational warnings" reached 131 on
-this project before anyone acted on them.
+- Sub-region goals ("only the main content area") can defeat scoping — the
+  model acts without calling findElements first and breaks layout → honest
+  gaveUp. Cheap lever: landmark hints in describePage region data.
+- hn-premium-class open-ended goals end via model timeout, not the model's
+  own done — stop-discipline obedience is partial on flash-tier models.
+- Slow model turns (uncapped completions + flash latency) can consume the
+  300s ceiling on complex goals (R3 dark-theme evidence).
+- Direct tool-call sheets are not persisted — only loop runs persist
+  (contract, not a bug; toggle-off is an honest no-op for test-injected CSS).
+- The image rule: production never sends screenshots to a model; if visual
+  verification is required and no vision model is configured, it is reported
+  as a limitation, never silently skipped.

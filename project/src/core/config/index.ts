@@ -11,27 +11,37 @@
 
 export const AI_CONFIG = {
   // The ONE production model. Cloudflare Workers AI, OpenAI-compatible.
-  strongModel: process.env.RV_MODEL_STRONG ?? '@cf/zai-org/glm-5.2',
+  strongModel: process.env.RV_MODEL_STRONG ?? '@cf/zai-org/glm-5.3-flash',
 
   // Consent gate (Phase 6 launch requirement). Enforced in BOTH the popup UI
   // (shows the disclosure) and the background's runLoop handler (the single
   // entry point, so no caller bypasses it). One constant so they cannot drift.
   consentRequired: true,
 
-  // Loop budget
-  maxSteps: 12,
-  maxWallMs: 60_000,
-  // Phase 2.5 TASK1: 16k let the reasoning model generate long chains and
-  // EXCEED the 30s call timeout on later turns (turn 7 with a grown journal),
-  // which surfaced as "budget too low for retry after parse error" (really a
-  // timeout — proof/parse-failures shows error:'Model call timed out.'). A
-  // single loop turn emits ONE short JSON tool-call/done/giveUp object — even
-  // with reasoning, 4k tokens is ample and completes in seconds, well under the
-  // per-call cap. Smaller = faster = far less timeout risk = ACT is reachable.
-  maxCompletionTokens: 4_000,
+  // Loop budget (T2 reliability amendment). The old 12 steps / 60s wall were
+  // sized for the REMOVED fast companion model (1.4-3.7s/call, Phase 6 notes);
+  // the production model takes 8-20s/call (T2 A/B evidence), so 60s could not
+  // fit even a 3-turn run and manufactured late-run timeouts that rolled back
+  // VERIFIED transformations. The numbers below are a runaway CEILING, not the
+  // governor: genuine stuck states are caught by the no-info restriction (2),
+  // the checkLayout circuit breaker (2), the convergence guard, the min-turn
+  // break, and the model's own done/giveUp long before these are reached.
+  maxSteps: 80,
+  maxWallMs: 300_000,
 
-  // Per-call timeout — the loop makes several small calls, not one big one.
-  callTimeoutMs: 30_000,
+  // Per-call completion-token cap. null = NO artificial cap — the provider's
+  // own default applies and the model is never truncated mid-thought (user
+  // decision 31 Aug 2026: an output limit should never silently shrink what
+  // the agent can author in one turn). Runaway safety stays with callTimeoutMs
+  // and the loop ceilings; a benchmark can still set an explicit cap via the
+  // revueon_max_tokens storage override.
+  maxCompletionTokens: null as number | null,
+
+  // Per-call timeout. Sized for the UNCAPPED completion length (user decision:
+  // no artificial output limit) — with reasoning, a flash-tier turn can run
+  // 25-50s; 30s manufactured mid-run timeouts that killed runs the model was
+  // actively finishing (R3 dark-theme: 297s budgetExhausted via call timeouts).
+  callTimeoutMs: 60_000,
 
   // HTTP-level retries for TRANSIENT server faults ONLY (429/5xx).
   maxTransientRetries: 4,

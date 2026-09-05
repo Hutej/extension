@@ -17,10 +17,10 @@
 import type { ToolDef, ToolResult } from './index';
 import { sanitizeCss } from '../core/sanitize';
 import { applyHealing } from '../core/heal';
-import { parseCss, serializeEmit, primaryTarget, allSelectors, type EmitItem } from '../core/emit';
+import { parseCss, serializeEmit, primaryTarget, allSelectors, allRuleTargets, type EmitItem } from '../core/emit';
 import { recordStructural } from '../core/ops/recorder';
 import { resolveTarget, fingerprint, type IdentityDom } from '../core/identity';
-import { fixedPxDominates } from '../core/responsive';
+import { fixedPxDominates, findLayoutMotion, buildReducedMotionCss } from '../core/responsive';
 import { liveIdentityDom } from '../core/identity-dom';
 import { getIdentity } from '../core/identity-store';
 import { digestOfElement } from '../core/persist/digest.ts';
@@ -155,13 +155,149 @@ async function assertApplied(selector: string, properties: string[], before: str
 
 // ── Core: emit, insert, assert, re-emit important if needed ────────
 
-/** C: emit normal first, measure, re-emit important only if the computed
- *  value did not move. For hide, default to important. Returns the exact
- *  CSS string inserted and the assertApplied result. */
+/** T5 typography visual truth: did the page's RENDERED TEXT change?
+ *  The perSelector assert is rule-level — a sheet scoped to `body` reports
+ *  applied:true when body's computed font moves even while the site's text is
+ *  painted by descendant author rules (HN: news.css sets font-family on body
+ *  AND td; the body-scoped sheet changed body's computed value and NOTHING
+ *  visible — baseline hn-body shipped a visual no-op as success with
+ *  byte-identical before/after screenshots). Typography's truth is the
+ *  rendered text: sample leaf text elements, compare their computed
+ *  typography before/after the sheet settles, and report which changed.
+ *  Evidence, never a decision — the model sees "text unchanged" + the stock
+ *  values and re-scopes (invariant 3). */
+const TEXT_SAMPLE_SEL = 'p, li, td, a, h1, h2, h3, span';
+const TEXT_SAMPLE_CAP = 8;
+
+interface TextEffect {
+  sampled: number;
+  changed: number;
+  /** first unchanged samples (element tag + computed signature) — the stock
+   *  values the model can re-scope against. */
+  unchanged: string[];
+}
+
+function sampleTextEls(): Element[] {
+  const out: Element[] = [];
+  try {
+    const all = Array.from(document.querySelectorAll(TEXT_SAMPLE_SEL)).filter((el) =>
+      Array.from(el.childNodes).some((n) => n.nodeType === 3 && (n.textContent ?? '').trim().length > 2) &&
+      (el as HTMLElement).offsetWidth > 0);
+    // stride-sample across the WHOLE page (DOM-order-first-N would over-sample
+    // the header on list pages: a td.title-scoped sheet read changed:0 there
+    // while the titles visibly changed) — every ceil(n/cap)th element, ≤cap.
+    const stride = Math.max(1, Math.ceil(all.length / TEXT_SAMPLE_CAP));
+    for (let i = 0; i < all.length && out.length < TEXT_SAMPLE_CAP; i += stride) out.push(all[i]);
+  } catch { /* best-effort evidence */ }
+  return out;
+}
+
+function textSignature(el: Element): string {
+  const cs = getComputedStyle(el);
+  return `${el.tagName.toLowerCase()}: ${[cs.fontFamily, cs.fontSize, cs.lineHeight, cs.letterSpacing].join(' | ')}`;
+}
+
+// ── R1: visual effect truth — did ANYTHING visibly change? ──────────
+// T5's textEffect covers typography only. T6 shipped a byte-identical
+// SPACING no-op as done (wiki-content-area): geometry moves are invisible
+// to the text sampler. This generalizes it: sample text leaves AND
+// layout containers, compare geometry / visibility / paint / type, and
+// report one honest line — VISIBLE or NO VISIBLE CHANGE. Evidence for the
+// model (rule 3), never a gate: the model reads it and re-scopes.
+const CONTAINER_SAMPLE_SEL = 'div, section, article, header, nav, main, aside, ul, table, form';
+const CONTAINER_SAMPLE_CAP = 24;
+// ponytail: fixed px deltas, not ratios — ratio thresholds misfire on tiny
+// elements; 8px is the smallest spacing change a user would call visible.
+const MOVE_PX = 8;
+const RESIZE_PX = 8;
+
+interface VisualSample {
+  x: number; y: number; w: number; h: number;
+  visible: boolean;
+  color: string; bg: string; font: string;
+}
+
+function visualSignature(el: Element): VisualSample {
+  const r = el.getBoundingClientRect();
+  const cs = getComputedStyle(el);
+  return {
+    x: Math.round(r.x), y: Math.round(r.y), w: Math.round(r.width), h: Math.round(r.height),
+    visible: r.width > 0 && r.height > 0 && cs.visibility !== 'hidden' && cs.display !== 'none',
+    color: cs.color, bg: cs.backgroundColor,
+    font: `${cs.fontFamily} ${cs.fontSize}/${cs.lineHeight}`,
+  };
+}
+
+function sampleContainerEls(): Element[] {
+  const out: Element[] = [];
+  try {
+    const all = Array.from(document.querySelectorAll(CONTAINER_SAMPLE_SEL)).filter((el) => {
+      const r = (el as HTMLElement).getBoundingClientRect();
+      return r.width > 0 && r.height > 0;
+    });
+    const stride = Math.max(1, Math.ceil(all.length / CONTAINER_SAMPLE_CAP));
+    for (let i = 0; i < all.length && out.length < CONTAINER_SAMPLE_CAP; i += stride) out.push(all[i]);
+  } catch { /* best-effort evidence */ }
+  return out;
+}
+
+export interface VisualEffect {
+  sampled: number;
+  moved: number;
+  resized: number;
+  hiddenNow: number;
+  paintChanged: number;
+  textChanged: number;
+  visibleChange: boolean;
+  /** the model-facing line (rule 13: a no-op names the alternative). */
+  summary: string;
+}
+
+function diffVisual(els: Element[], before: VisualSample[]): VisualEffect | undefined {
+  if (!els.length) return undefined;
+  let moved = 0, resized = 0, hiddenNow = 0, paintChanged = 0, textChanged = 0;
+  for (let i = 0; i < els.length; i++) {
+    const a = visualSignature(els[i]);
+    const b = before[i];
+    if (b.visible && !a.visible) hiddenNow++;
+    if (Math.abs(a.x - b.x) > MOVE_PX || Math.abs(a.y - b.y) > MOVE_PX) moved++;
+    if (Math.abs(a.w - b.w) > RESIZE_PX || Math.abs(a.h - b.h) > RESIZE_PX) resized++;
+    if (a.color !== b.color || a.bg !== b.bg) paintChanged++;
+    if (a.font !== b.font) textChanged++;
+  }
+  const visibleChange = moved + resized + hiddenNow + paintChanged + textChanged > 0;
+  const buckets = [
+    resized && `${resized} resized`,
+    moved && `${moved} moved`,
+    paintChanged && `${paintChanged} repainted`,
+    textChanged && `${textChanged} restyled text`,
+    hiddenNow && `${hiddenNow} hidden`,
+  ].filter(Boolean).join(', ');
+  const summary = visibleChange
+    ? `VISIBLE — ${buckets} (of ${els.length} sampled)`
+    : `NO VISIBLE CHANGE — geometry, text and paint all unchanged on ${els.length} sampled elements. The sheet landed but is shadowed or already at target: the elements that actually paint this content are targeted by other rules. Call findElements on the region you want to change, then scope the CSS to those elements.`;
+  return { sampled: els.length, moved, resized, hiddenNow, paintChanged, textChanged, visibleChange, summary };
+}
+
+/** C: emit normal first, measure EVERY rule the sheet carries, re-emit
+ *  important if ANY rule's computed value did not move. For hide, default to
+ *  important. Returns the exact CSS string inserted, the primary assert, and
+ *  the per-selector verdict.
+ *
+ *  T4 (evidence: proof/T4_DECISION.md §C-1): the sheet is inserted at USER
+ *  origin, and per CSS Cascading L4 §6.4 author-normal beats user-normal —
+ *  site CSS or a presentational bgcolor attribute silently defeats an
+ *  un-important rule. The old code measured only the PRIMARY selector
+ *  (primaryTarget): a sheet whose primary landed shipped as "applied" even
+ *  when every secondary rule was defeated — hn-accents' coordinated blue-gray
+ *  theme delivered exactly one background (the roadmap's named failure:
+ *  "changing only one background"). The retry now triggers when ANY rule
+ *  failed to move, and the result reports which rules landed. */
 async function emitAndInsert(
   rawCss: string,
   defaultImportant: boolean,
-): Promise<{ css: string; assert: AssertResult | null; error?: string }> {
+  withTextEffect: boolean = false,
+): Promise<{ css: string; assert: AssertResult | null; perSelector?: Array<{ selector: string; applied: boolean; note?: string }>; textEffect?: TextEffect; visualEffect?: VisualEffect; error?: string }> {
   const { css: sanitized } = sanitizeCss(rawCss);
   if (!sanitized.trim()) return { css: '', assert: null, error: 'CSS was entirely rejected by sanitizer.' };
 
@@ -169,6 +305,26 @@ async function emitAndInsert(
   if (!items.length) return { css: '', assert: null, error: 'No valid CSS rules after parsing.' };
 
   const target = primaryTarget(items);
+  // T4: measure every style rule (capped — model sheets are typically <10
+  // rules; beyond 24 the dominant rules are measured and the rest noted).
+  const targets = allRuleTargets(items).slice(0, 24);
+
+  const summarize = (results: Array<AssertResult | null>): Array<{ selector: string; applied: boolean; note?: string }> =>
+    targets.map((t, i) => {
+      const r = results[i];
+      if (!r) return { selector: t.selector, applied: false, note: 'unmeasured' };
+      if (r.matched === 0) return { selector: t.selector, applied: false, note: 'no measurable match (state-dependent or absent)' };
+      if (r.applied) return { selector: t.selector, applied: true };
+      return { selector: t.selector, applied: false, note: 'unchanged — already at target, or page styles override even !important' };
+    });
+
+  const measureAll = async (befores: string[]): Promise<Array<AssertResult | null>> => {
+    const out: Array<AssertResult | null> = [];
+    for (let i = 0; i < targets.length; i++) {
+      out.push(await assertApplied(targets[i].selector, targets[i].properties, befores[i]));
+    }
+    return out;
+  };
 
   // Phase 1: emit at the specified importance level.
   const cssPhase = serializeEmit(defaultImportant
@@ -176,19 +332,40 @@ async function emitAndInsert(
     : items,
   );
 
+  // T5: typography visual truth — sample the rendered text BEFORE the sheet
+  // inserts (the sheet may then change body/td values; the samples measure
+  // what the page's text actually renders after the sheet settles).
+  // R1: containers too — geometry/paint deltas (the T6 spacing no-op class).
+  const textEls = withTextEffect ? sampleTextEls() : [];
+  const textBefore = textEls.map(textSignature);
+  const visEls = withTextEffect ? sampleContainerEls() : [];
+  const visBefore = visEls.map(visualSignature);
+  // Compute both effects against the SAME pre-insert baseline (net effect vs
+  // the original page — the !important re-emit path measures against befores2
+  // for rule delivery, but the VISUAL truth is original-page vs final state).
+  const effectOf = () => ({
+    textEffect: buildTextEffect(textEls, textBefore),
+    visualEffect: diffVisual(visEls, visBefore),
+  });
+
   if (target) {
-    const before = readComputed(target.selector, target.properties);
+    const befores = targets.map((t) => readComputed(t.selector, t.properties));
     const insRes = await sendInsertCSS(cssPhase);
     if (!insRes.ok) return { css: cssPhase, assert: null, error: insRes.error };
     await new Promise<void>((r) => requestAnimationFrame(() => r()));
-    const result = await assertApplied(target.selector, target.properties, before);
+    const results = await measureAll(befores);
+    // A rule with no measurable match (e.g. :hover in a fresh profile) cannot
+    // fail — it is skipped by the summarize() note, not by the gate.
+    const allApplied = results.every((r, i) => r === null ? true : (r.matched === 0 ? true : r.applied));
 
-    if (result.applied) return { css: cssPhase, assert: result };
+    if (allApplied) return { css: cssPhase, assert: results[0], perSelector: summarize(results), ...effectOf() };
 
-    // Phase 2: not applied — try with !important (if we didn't already).
+    // Phase 2: SOME rule did not move — re-emit the WHOLE sheet with
+    // !important (if we didn't already). The retry is idempotent for genuine
+    // no-ops (same computed value, now cascade-enforced).
     if (!defaultImportant) {
       // Adversarial review (wf_e3e50d92, skeptic claim_3): the return of
-      // sendRemoveCSS was IGNORERED. If it silently fails, BOTH the normal and
+      // sendRemoveCSS was IGNORED. If it silently fails, BOTH the normal and
       // the !important sheets would be applied, but the inverse records only
       // the !important sheet — so a later removeCSS(inverse) would leave the
       // normal sheet permanently on the page (a silent reversal leak). Fix:
@@ -196,54 +373,195 @@ async function emitAndInsert(
       // insert (return an error so the loop rolls back the normal sheet it
       // DID insert — a clean, single-sheet failure, not a split-brain one).
       const rmRes = await sendRemoveCSS(cssPhase);
-      if (!rmRes.ok) return { css: cssPhase, assert: result, error: `failed to remove the normal sheet before re-emitting !important: ${rmRes.error || 'unknown'}` };
+      if (!rmRes.ok) return { css: cssPhase, assert: results[0], perSelector: summarize(results), ...effectOf(), error: `failed to remove the normal sheet before re-emitting !important: ${rmRes.error || 'unknown'}` };
       const cssImportant = serializeEmit(items.map(i => i.kind === 'style' ? { ...i, important: true } : i));
-      const before2 = readComputed(target.selector, target.properties);
+      const befores2 = targets.map((t) => readComputed(t.selector, t.properties));
       const insRes2 = await sendInsertCSS(cssImportant);
       if (!insRes2.ok) return { css: cssImportant, assert: null, error: insRes2.error };
       await new Promise<void>((r) => requestAnimationFrame(() => r()));
-      const result2 = await assertApplied(target.selector, target.properties, before2);
-      return { css: cssImportant, assert: result2 };
+      const results2 = await measureAll(befores2);
+      return { css: cssImportant, assert: results2[0], perSelector: summarize(results2), ...effectOf() };
     }
-    return { css: cssPhase, assert: result };
+    return { css: cssPhase, assert: results[0], perSelector: summarize(results), ...effectOf() };
   }
 
   // No targetable selector — insert without measurement.
   const insRes = await sendInsertCSS(cssPhase);
   if (!insRes.ok) return { css: cssPhase, assert: null, error: insRes.error };
   await new Promise<void>((r) => requestAnimationFrame(() => r()));
-  return { css: cssPhase, assert: null };
+  return { css: cssPhase, assert: null, ...effectOf() };
+}
+
+/** T5: compare the sampled text signatures — evidence for the model. */
+function buildTextEffect(textEls: Element[], before: string[]): TextEffect | undefined {
+  if (!textEls.length) return undefined;
+  const unchanged: string[] = [];
+  let changed = 0;
+  for (let i = 0; i < textEls.length; i++) {
+    const after = textSignature(textEls[i]);
+    if (after !== before[i]) changed++;
+    else if (unchanged.length < 3) unchanged.push(after);
+  }
+  return { sampled: textEls.length, changed, unchanged };
 }
 
 // ── applyCss — the primary action ──────────────────────────────────
 
+/**
+ * State-dependent pseudo-classes match zero elements in a fresh environment
+ * (no history → `:visited` matches nothing; nothing hovered → `:hover`
+ * matches nothing) while being perfectly valid cascade CSS. Verified T2: HN
+ * dark-mode died 6 acts deep because every sheet carrying `a:visited` was
+ * refused as "matched nothing". These selectors skip the zero-match check;
+ * structural selectors (`td:nth-child(2)`) and hallucinated classes
+ * (`.commtext`) still refuse, and the refusal message still guides.
+ */
+const STATE_PSEUDO = /:(hover|visited|active|focus(-with|-visible)?|target|link|fullscreen|checked|disabled|enabled)\b/i;
+
+/**
+ * R3a: how ONE selector-part of a stylesheet fares against the live page.
+ * Replaces the old refuse-the-whole-sheet guard (guardCssSelector), whose
+ * blast radius the protocol experiment proved fatal to large coherent
+ * authoring: 100% of bold sheets died on a single unmatched selector
+ * (proof/2026-09-02-transformation-protocol-experiment.md, unfiltered
+ * sub-run). Classification, not veto:
+ *
+ *   ok            — matches now (store-known identity verified, or an
+ *                   unknown selector — flagged unverified, as before)
+ *   unmatched-now — zero current matches. KEPT, not dropped: rule 8 — the
+ *                   cascade applies to elements that do not exist yet
+ *                   (SPA re-renders, lazily created content); the selector
+ *                   lies dormant until its element appears. Reported so the
+ *                   model knows what is currently inert.
+ *   broad         — store-known selector matching several elements, or an
+ *                   identical twin. Styling N elements is the POINT of a
+ *                   stylesheet rule; the strict one-target guard (guardTarget)
+ *                   still protects hide/insert/setText. Reported with count.
+ *   drop          — invalid syntax (can never match anything), or a stale
+ *                   identity (wrong-target: the selector describePage
+ *                   verified now resolves to a different element — the one
+ *                   verdict that must not be allowed to style).
+ */
+type CssSelectorVerdict =
+  | { kind: 'ok'; verified: boolean }
+  | { kind: 'unmatched-now' }
+  | { kind: 'broad'; matched: number }
+  | { kind: 'drop'; reason: string };
+
+function classifyCssSelector(selector: string): CssSelectorVerdict {
+  let matched = 0;
+  try { matched = document.querySelectorAll(selector).length; }
+  catch { return { kind: 'drop', reason: 'invalid syntax (can never match)' }; }
+  if (matched === 0) {
+    // State pseudos cannot be statically evaluated (`a:hover` matches nothing
+    // unless hovered) — exempt from the unmatched report, as the old guard was.
+    if (STATE_PSEUDO.test(selector)) return { kind: 'ok', verified: false };
+    return { kind: 'unmatched-now' };
+  }
+  const expectedFp = getIdentity(selector);
+  if (!expectedFp) return { kind: 'ok', verified: false };
+  const r = resolveTarget(liveIdentityDom as IdentityDom, selector, expectedFp);
+  if (r.ok) return { kind: 'ok', verified: true };
+  if (r.reason === 'wrong-target') return { kind: 'drop', reason: 'stale identity — selector now resolves to a different element than the one observed' };
+  return { kind: 'broad', matched: r.matched ?? matched };
+}
+
+/**
+ * Paren-aware selector-list split. `:is(a, b)`, `:not(.x, .y)` must never be
+ * torn at inner commas — the CSSOM already parsed the rule (parseCss); this
+ * only re-splits the selector LIST it hands back, at depth-zero commas.
+ */
+function splitSelectorParts(selector: string): string[] {
+  const parts: string[] = [];
+  let depth = 0;
+  let current = '';
+  for (const ch of selector) {
+    if (ch === '(') depth++;
+    else if (ch === ')') depth = Math.max(0, depth - 1);
+    if (ch === ',' && depth === 0) { parts.push(current); current = ''; continue; }
+    current += ch;
+  }
+  parts.push(current);
+  return parts.map((p) => p.trim()).filter(Boolean);
+}
+
+/** What happened to every selector-part of a sheet — the diagnostics contract
+ *  (rule 12: nothing silently clipped; rule 13: every diagnostic names its
+ *  reason). Capped lists keep the journal bounded on 100-selector sheets. */
+interface SelectorReport {
+  applied: number;
+  unmatchedNow: string[];
+  dropped: Array<{ selector: string; reason: string }>;
+  broad: Array<{ selector: string; count: number }>;
+}
+
+/**
+ * Filter a parsed sheet to its verified selectors, rule by rule, collecting
+ * the report. @keyframes passes untouched (its inner selectors are keyText —
+ * timing tokens, not DOM selectors); @media/@supports recurse (their inner
+ * rules apply to real elements); a rule whose every part dropped is removed.
+ * The returned items serialize back to the exact sheet the runtime can stand
+ * behind. Mirrors hide's healing-rule drop (act.ts hide) — the established
+ * drop-not-refuse precedent.
+ */
+function filterSheetSelectors(items: EmitItem[], report: SelectorReport, unverifiedRef: { value: boolean }): EmitItem[] {
+  const out: EmitItem[] = [];
+  for (const item of items) {
+    if (item.kind === 'at') {
+      if (item.prelude.startsWith('@keyframes')) { out.push(item); continue; }
+      const inner = filterSheetSelectors(item.items, report, unverifiedRef);
+      if (inner.length > 0) out.push({ ...item, items: inner });
+      continue;
+    }
+    if (item.kind !== 'style' || item.declarations.length === 0) { out.push(item); continue; }
+    const kept: string[] = [];
+    for (const part of splitSelectorParts(item.selector)) {
+      const v = classifyCssSelector(part);
+      if (v.kind === 'ok') {
+        kept.push(part);
+        report.applied++;
+        if (!v.verified) unverifiedRef.value = true;
+      } else if (v.kind === 'unmatched-now') {
+        kept.push(part); // dormant, not dead — applies when the element appears
+        if (report.unmatchedNow.length < 12 && !report.unmatchedNow.includes(part)) report.unmatchedNow.push(part);
+      } else if (v.kind === 'broad') {
+        kept.push(part);
+        report.applied++;
+        if (report.broad.length < 6) report.broad.push({ selector: part, count: v.matched });
+      } else if (report.dropped.length < 6) {
+        report.dropped.push({ selector: part, reason: v.reason });
+      }
+    }
+    if (kept.length > 0) out.push({ ...item, selector: kept.join(', ') });
+  }
+  return out;
+}
+
 async function applyCss(args: any): Promise<ToolResult> {
-  const css = args?.css as string;
+  let css = args?.css as string;
   if (!css || !css.trim()) return { ok: false, error: 'missing or empty "css" argument. Provide valid CSS rules as a string.' };
 
-  // F1: verify EVERY selector the emitted CSS will match BEFORE emitting.
-  // applyCss targets the cascade (the sheet hits every matching element of every
-  // rule), so a CSS block hides/moves not just its primary selector but every
-  // secondary selector too. Guarding only primaryTarget (the first rule's first
-  // comma-part) leaves the others unguarded — a model could verify `.a` and hide
-  // `.b` in the same sheet with no identity check on `.b`. Iterate allSelectors
-  // (every style rule's every comma-part, recursing into at-rules) and refuse the
-  // whole act if any selector fails the identity check (zero/many/wrong-target),
-  // naming which selector failed. A unique-but-unverified selector (model-named,
-  // no observe-time fingerprint) is NOT a failure — it mutates flagged unverified
-  // (the design decision locked by tests/f1-identity-test.ts); we only lower
-  // confidence when ANY selector is unverified.
+  // R3a (T2 revision, experiment-corrected): a stylesheet is CASCADE INTENT.
+  // Verify every selector-part against the live page — but classify and keep
+  // the verified remainder instead of refusing the whole sheet over one bad
+  // part (the old all-or-nothing loop is the single failure class that made
+  // large coherent transformations impossible; see classifyCssSelector).
+  // Iterating every style rule's every comma-part recursing into @media/
+  // @supports is inherited from allSelectors — no rule dodges the check.
   const items = parseCss((sanitizeCss(css).css));
-  const selectors = allSelectors(items);
-  let unverified = false;
-  for (const sel of selectors) {
-    const g = guardTarget(sel);
-    if (!g.ok) {
-      // Append which CSS selector failed, so the model can fix it.
-      return { ok: false, error: `[F1 identity] ${g.result.error} (in CSS selector "${sel}")`, confidence: 0.1, costMs: 0 };
-    }
-    if (g.unverified) unverified = true;
+  const selectorReport: SelectorReport = { applied: 0, unmatchedNow: [], dropped: [], broad: [] };
+  const unverifiedRef = { value: false };
+  const filteredItems = filterSheetSelectors(items, selectorReport, unverifiedRef);
+  if (filteredItems.length === 0) {
+    return {
+      ok: false,
+      error: `every selector in the sheet was dropped (${selectorReport.dropped.map((d) => `"${d.selector}": ${d.reason}`).join('; ')}). Call describePage to see the page's current regions and their selectors, then author against them.`,
+      confidence: 0.1,
+      costMs: 0,
+    };
   }
+  const unverified = unverifiedRef.value;
+  css = serializeEmit(filteredItems);
 
   // Phase 7: refuse fixed-pixel LAYOUT DOMINANCE before emitting. A restyle
   // reconstructed from measurements (position:absolute/fixed, fixed px on
@@ -253,7 +571,7 @@ async function applyCss(args: any): Promise<ToolResult> {
   // px is NOT banned: borders/spacing/typography/shadows/radii pass (only the
   // LAYOUT-sizing/positioning properties count). A colour/typography-only
   // restyle (no layout decls) has fixedCount=0 and passes. See core/responsive.ts.
-  const dominance = fixedPxDominates(items);
+  const dominance = fixedPxDominates(filteredItems);
   if (dominance) {
     return {
       ok: false,
@@ -263,8 +581,35 @@ async function applyCss(args: any): Promise<ToolResult> {
     };
   }
 
+  // T3 motion guard: transitions/animations on layout properties reflow the
+  // page on every frame — refuse before any mutation (nothing to roll back).
+  // Same position and shape as the dominance gate above.
+  const motion = findLayoutMotion(filteredItems);
+  if (motion.length > 0) {
+    return {
+      ok: false,
+      error: `[motion] this CSS animates layout properties (${motion.join('; ')}). Layout transitions reflow the page on every animation frame and make the site lag. Animate compositor-friendly properties instead — transform, opacity — or color/filters; e.g. "transition: opacity 200ms" rather than "transition: width 2s". Never use "transition: all" (it silently includes layout properties).`,
+      confidence: 0.1,
+      costMs: 0,
+    };
+  }
+
+  // T3 reduced-motion respect: a sheet that declares motion gets a mechanical
+  // wrap neutralising OUR motion under prefers-reduced-motion (same selectors,
+  // no design decision — the box-sizing of motion). Appended to the raw CSS so
+  // it travels through the same sanitize/parse/emit path.
+  const motionSelectors = allSelectors(filteredItems).filter((sel) => {
+    // A selector needs the wrap only if one of ITS rules declared motion.
+    return filteredItems.some((it) => it.kind === 'style' && it.declarations.some((d) => /^(transition|animation)/.test(d.property.toLowerCase())) && it.selector.split(',').some((p) => p.trim() === sel));
+  });
+  if (motionSelectors.length > 0) {
+    css = css + '\n' + buildReducedMotionCss(motionSelectors);
+  }
+
   // B/C: emit normal first, measure, re-emit important only if not applied.
-  const { css: insertedCss, assert, error } = await emitAndInsert(css, false);
+  // T5: applyCss carries typography visual truth (the rendered-text sample) —
+  // hide's result shape is unchanged.
+  const { css: insertedCss, assert, perSelector, textEffect, visualEffect, error } = await emitAndInsert(css, false, true);
   if (error) return { ok: false, error };
   if (!insertedCss) return { ok: false, error: 'No CSS after sanitization and parsing.' };
 
@@ -273,7 +618,7 @@ async function applyCss(args: any): Promise<ToolResult> {
   // verified EVERY selector above; the primary is the one replay re-verifies
   // for wrong-target detection. null if the sheet had no single targetable
   // selector (e.g. pure at-rules) — replay then falls back to unverified.
-  const primarySel = primaryTarget(items);
+  const primarySel = primaryTarget(filteredItems);
   let identityDigest: string | undefined;
   if (primarySel) {
     const el = document.querySelector(primarySel.selector);
@@ -282,7 +627,7 @@ async function applyCss(args: any): Promise<ToolResult> {
 
   return {
     ok: true,
-    result: { chars: insertedCss.length, css: insertedCss, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null, unverified },
+    result: { chars: insertedCss.length, css: insertedCss, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null, perSelector, textEffect, visualEffect, selectorReport, unverified },
     identityDigest,
     inverse: { kind: 'removeCss', css: insertedCss },
     confidence: unverified ? 0.45 : undefined,

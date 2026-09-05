@@ -61,7 +61,7 @@ export function isTransparent(input: string): boolean {
 }
 
 /** WCAG relative luminance (0..1). */
-export function luminance([r, g, b]: RGBA): number {
+function luminance([r, g, b]: RGBA): number {
   const [rs, gs, bs] = [r, g, b].map((v) => {
     const c = v / 255;
     return c <= 0.03928 ? c / 12.92 : Math.pow((c + 0.055) / 1.055, 2.4);
@@ -77,40 +77,16 @@ export function contrastRatio(fg: RGBA, bg: RGBA): number {
 }
 
 /**
- * Given a background, return a readable text color ('#111111' or '#f5f5f5').
- * This is the Contrast Lock fallback: a background can never be applied without
- * a coupled text color, or the site's original text may vanish.
+ * WCAG AA contrast floor for a text element, by its size. Normal text (<24px,
+ * or <18.66px non-bold): 4.5. Large text (≥24px, or ≥18.66px bold): 3.0 —
+ * WCAG's own large-text allowance. Pure — used by the forced layout check so
+ * the floor is unit-testable without a DOM.
  */
-export function pickReadableText(bg: RGBA): string {
-  return luminance(bg) > 0.45 ? '#111111' : '#f5f5f5';
+export function contrastFloor(fontSizePx: number, fontWeight: number | string): number {
+  const w = typeof fontWeight === 'string' ? (parseInt(fontWeight, 10) || 400) : fontWeight;
+  const large = fontSizePx >= 24 || (fontSizePx >= 18.66 && w >= 700);
+  return large ? 3.0 : 4.5;
 }
-
-/**
- * The contrast ratio of a candidate text color against a gradient's WORST stop.
- * Text over a gradient must clear the contrast floor against EVERY stop — a dark
- * text on a light→dark gradient is invisible at the light end. Returns the MINIMUM
- * contrast ratio across the stops (the worst case), or the ratio against the single
- * color for a non-gradient. Pure.
- */
-/**
- * Pick a readable text color for a gradient background, checking against EVERY
- * stop. A single pickReadableText against the average stop can leave text invisible
- * at one end. Pick dark text if it clears the floor against the lightest (highest-
- * luminance) stop; else light text. Returns '#111111' or '#f5f5f5'. Pure.
- */
-export function pickReadableTextForGradient(stops: RGBA[], floor = MIN_CONTRAST_FOR_PICK): string {
-  if (stops.length === 0) return '#111111';
-  const dark: RGBA = [17, 17, 17, 1];
-  const _light: RGBA = [245, 245, 245, 1];
-  // Dark text is readable iff it clears the floor against the LIGHTEST stop.
-  const lightest = stops.reduce((a, b) => (luminance(b) > luminance(a) ? b : a));
-  if (contrastRatio(dark, lightest) >= floor) return '#111111';
-  // Else light text — readable iff it clears the floor against the DARKEST stop.
-  return '#f5f5f5';
-}
-
-/** The contrast floor the readable-text pick uses (WCAG AA for normal text). */
-export const MIN_CONTRAST_FOR_PICK = 4.5;
 
 /**
  * Chroma-ish colorfulness in 0..1 = (max-min)/255. A loud accent (red, blue,
@@ -122,20 +98,6 @@ export function colorfulness(c: RGBA): number {
   const max = Math.max(c[0], c[1], c[2]);
   const min = Math.min(c[0], c[1], c[2]);
   return (max - min) / 255;
-}
-
-/**
- * RGB Euclidean distance (0..441). Alpha-weighted so a change from transparent
- * to opaque (a region gaining a background) reads as a large, real change.
- * Used by the coverage gate to tell a perceptible repaint from computed jitter.
- */
-export function colorDistance(a: RGBA, b: RGBA): number {
-  // Fold alpha into effective channels (over a neutral) so opacity changes count.
-  const ea = (v: number, al: number) => v * al + 128 * (1 - al);
-  const dr = ea(a[0], a[3]) - ea(b[0], b[3]);
-  const dg = ea(a[1], a[3]) - ea(b[1], b[3]);
-  const db = ea(a[2], a[3]) - ea(b[2], b[3]);
-  return Math.sqrt(dr * dr + dg * dg + db * db);
 }
 
 /**

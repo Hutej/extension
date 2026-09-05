@@ -41,6 +41,7 @@ const controlTools: ToolDef[] = [
   { name: 'undo', kind: 'control', description: 'undo the last N actions', args: { steps: 'number' }, execute: async () => ({ ok: true }) },
   { name: 'done', kind: 'control', description: 'finish with a summary', args: { summary: 'string' }, execute: async () => ({ ok: true }) },
   { name: 'giveUp', kind: 'control', description: 'give up with a reason', args: { reason: 'string' }, execute: async () => ({ ok: true }) },
+  { name: 'askUser', kind: 'control', description: 'ask the user ONE clarifying question (options + their own answer)', args: { question: 'string', options: 'string[]' }, execute: async () => ({ ok: true }) },
 ];
 
 // ── the registry ───────────────────────────────────────────────────
