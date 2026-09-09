@@ -79,8 +79,10 @@ test('T29: the forbidden fixture fails boundary and cycle checks', () => {
   assert.ok(has('boundary', 'core/leak.ts imports tools/impl.ts'), 'core must not import tools');
   assert.ok(has('boundary', 'tools/impl.ts imports agent/host.ts'), 'tools must not import agent');
   assert.ok(has('boundary', 'agent/host.ts imports entrypoints/root.ts'), 'agent must not import entrypoints');
+  assert.ok(has('boundary', 'runtime/leak.ts imports background/host.ts'), 'runtime must not import the broker');
+  assert.ok(has('boundary', 'background/host.ts imports runtime/host.ts'), 'broker must not import DOM executors');
   assert.ok(has('cycle', 'cycle/a.ts'), 'runtime cycle must be flagged');
-  assert.equal(messages.length, 5, `unexpected violation set: ${JSON.stringify(messages)}`);
+  assert.equal(messages.length, 7, `unexpected violation set: ${JSON.stringify(messages)}`);
 });
 
 test('T29: type-only imports are exempt from boundary and cycle rules', () => {

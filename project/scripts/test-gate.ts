@@ -34,6 +34,8 @@ export const EXPECTED_UNIT_SUITES = [
   'digest.test.ts',
   'contracts.test.ts',
   'trust.test.ts',
+  'broker.test.ts',
+  'runtime-session.test.ts',
   'gate.test.ts',
   'known-defects.test.ts',
 ];

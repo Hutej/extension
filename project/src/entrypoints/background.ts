@@ -7,6 +7,7 @@
 import { runLoop, type LoopResult } from '@/agent/loop';
 import { AI_CONFIG } from '@/core/config';
 import { loadJournalState, saveJournalState, scopeKey } from '@/core/persist';
+import { installBroker } from '../background/broker.ts';
 
 /** Phase 6 consent gate — same constant the popup enforces, one source. */
 const CONSENT_REQUIRED = AI_CONFIG.consentRequired;
@@ -14,6 +15,12 @@ const CONSENT_REQUIRED = AI_CONFIG.consentRequired;
 export default defineBackground(() => {
   // MV3 keepalive — the loop's tool dispatchs keep this SW alive.
   chrome.runtime.onConnect.addListener(() => {});
+
+  // S2.1: the v2 document broker — synchronous listener + hydration barrier,
+  // document registry with route-epoch fencing, one run owner per document.
+  // It owns only envelope-shaped v2 messages (protocolVersion=1); the legacy
+  // `action` dispatcher below is untouched until the plan/19 cutover.
+  installBroker();
 
   // ── askUser: pending question→answer promises ─────────────────────
   // The loop's askUser callback broadcasts a question to the extension's

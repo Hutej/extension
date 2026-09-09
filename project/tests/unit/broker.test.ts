@@ -1,0 +1,359 @@
+/**
+ * broker.test — S2.1 document broker core (T08/T11/T21/T14 seeds).
+ *
+ * The unit under test is the pure broker core in src/background/broker.ts:
+ * sender-role verification (contracts §9), envelope/command decoding, the
+ * document registry with route-epoch fencing, one-run-owner per document,
+ * bounded relay, and deterministic rejection of late messages. Platform
+ * seams (clock, ids, tab delivery, registry persistence) are injected; the
+ * chrome wiring is a thin adapter proven by the browser suite.
+ */
+
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import { createBrokerCore, type BrokerDeps, type BrokerReply } from '../../src/background/broker.ts';
+import type { DocumentKey, SenderLike } from '../../src/contracts.ts';
+import type { DocumentRecord } from '../../src/background/broker.ts';
+
+const OWN_ID = 'revueon-test-extension-id';
+
+// ── fixtures ─────────────────────────────────────────────────────────────
+
+function makeDeps(overrides: Partial<BrokerDeps> = {}): BrokerDeps {
+  let n = 0;
+  return {
+    ownExtensionId: OWN_ID,
+    now: () => 10_000,
+    randomId: () => `id-${++n}`,
+    sendToTab: async () => ({ ok: true, kind: 'relayed', receipt: {} }),
+    persistRegistry: async () => {},
+    loadRegistry: async () => [],
+    ...overrides,
+  };
+}
+
+const workspaceSender: SenderLike = {
+  id: OWN_ID,
+  url: `chrome-extension://${OWN_ID}/popup.html`,
+  origin: `chrome-extension://${OWN_ID}`,
+};
+
+const runtimeSender = (over: Partial<SenderLike> = {}): SenderLike => ({
+  id: OWN_ID,
+  url: 'https://site.test/page',
+  origin: 'https://site.test',
+  tab: { id: 4, url: 'https://site.test/page' },
+  frameId: 0,
+  documentId: 'doc-1',
+  ...over,
+});
+
+const foreignSender: SenderLike = { id: 'other-extension-id', origin: 'chrome-extension://other-extension-id' };
+
+const envelope = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
+  protocolVersion: 1,
+  requestId: 'req-1',
+  kind: 'control',
+  deadlineAt: 20_000,
+  payload: {},
+  ...over,
+});
+
+function documentKeyOf(reply: BrokerReply | undefined): DocumentKey {
+  assert.ok(reply && reply.ok && reply.kind === 'registered', `expected registered, got ${JSON.stringify(reply)}`);
+  return (reply as { documentKey: DocumentKey }).documentKey;
+}
+
+const errCode = (reply: BrokerReply | undefined): string => {
+  assert.ok(reply && !reply.ok, `expected error reply, got ${JSON.stringify(reply)}`);
+  return (reply as { error: { code: string } }).error.code;
+};
+
+const errOf = (reply: BrokerReply | undefined): { code: string; retryClass: string; recoveryAction?: string } => {
+  assert.ok(reply && !reply.ok, `expected error reply, got ${JSON.stringify(reply)}`);
+  return (reply as { error: { code: string; retryClass: string; recoveryAction?: string } }).error;
+};
+
+// ── T21: sender-role verification (denied by default) ───────────────────
+
+test('T21: a runtime sender may not start runs', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage(runtimeSender(), envelope({
+    kind: 'run-command',
+    payload: { command: 'StartRun', goal: 'g' },
+    documentKey: { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' },
+    expectedRouteEpoch: 0,
+  }));
+  assert.equal(errCode(reply), 'denied');
+});
+
+test('T21: a foreign/unknown sender is denied every command', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage(foreignSender, envelope({
+    kind: 'run-command',
+    payload: { command: 'StartRun', goal: 'g' },
+  }));
+  assert.equal(errCode(reply), 'denied');
+});
+
+test('T21: a broker-role sender may not start runs either', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage({ id: OWN_ID }, envelope({
+    kind: 'run-command',
+    payload: { command: 'StartRun', goal: 'g' },
+  }));
+  assert.equal(errCode(reply), 'denied');
+});
+
+// ── registration: identity from the browser sender only ─────────────────
+
+test('T21: registration derives the DocumentKey from browser sender metadata', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage(runtimeSender(), envelope({
+    payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' },
+  }));
+  const dk = documentKeyOf(reply);
+  assert.deepEqual(dk, { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' });
+});
+
+test('registration payload cannot forge the tab/document identity', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage(runtimeSender(), envelope({
+    payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1', tabId: 999, browserDocumentId: 'forged' },
+  }));
+  // Unknown payload fields are rejected (v1 strictness) — and even a decoded
+  // field could never override the browser-derived identity.
+  assert.equal(errCode(reply), 'invalid-schema');
+});
+
+test('registration without browser document identity is denied', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage(
+    runtimeSender({ documentId: undefined, tab: undefined, frameId: undefined }),
+    envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }),
+  );
+  assert.equal(errCode(reply), 'denied');
+});
+
+// ── T08/T11: document fencing — stale instance, unknown document, epoch ──
+
+test('T08: a command from a replaced runtime instance is deterministically rejected', async () => {
+  const deps = makeDeps();
+  const core = createBrokerCore(deps);
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  // Reinjection: same document, new runtime instance.
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-2' } }));
+  // The old instance's late StartRun arrives.
+  const reply = await core.handleMessage(workspaceSender, envelope({
+    kind: 'run-command',
+    payload: { command: 'StartRun', goal: 'g' },
+    documentKey: { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' },
+    expectedRouteEpoch: 0,
+  }));
+  assert.equal(errCode(reply), 'stale-document');
+});
+
+test('T21: a tab id alone does not authorize — the exact document must be registered', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage(workspaceSender, envelope({
+    kind: 'run-command',
+    payload: { command: 'StartRun', goal: 'g' },
+    documentKey: { tabId: 999, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' },
+    expectedRouteEpoch: 0,
+  }));
+  assert.equal(errCode(reply), 'unknown-target');
+});
+
+test('T11: a command carrying a stale route epoch is rejected', async () => {
+  const core = createBrokerCore(makeDeps());
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  await core.routeEvent(4, 0); // navigation → epoch 1
+  const reply = await core.handleMessage(workspaceSender, envelope({
+    kind: 'run-command',
+    payload: { command: 'StartRun', goal: 'g' },
+    documentKey: { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' },
+    expectedRouteEpoch: 0,
+  }));
+  assert.equal(errCode(reply), 'stale-route');
+});
+
+test('T11: navigation advances the epoch, drops the run, and notifies the runtime', async () => {
+  const sent: Array<{ tabId: number; message: Record<string, unknown> }> = [];
+  const core = createBrokerCore(makeDeps({
+    sendToTab: async (tabId, message) => {
+      sent.push({ tabId, message: message as Record<string, unknown> });
+      return {};
+    },
+  }));
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  const notified = await core.routeEvent(4, 0);
+  assert.equal(notified, 1);
+  assert.equal(sent.length, 1);
+  assert.equal((sent[0].message.payload as Record<string, unknown>).command, 'RouteChanged');
+  assert.equal((sent[0].message.payload as Record<string, unknown>).routeEpoch, 1);
+});
+
+// ── one run owner per document ───────────────────────────────────────────
+
+test('T14: a second StartRun while a run is active is refused with a recovery action', async () => {
+  const core = createBrokerCore(makeDeps());
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  const dk = { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' };
+  const first = await core.handleMessage(workspaceSender, envelope({
+    kind: 'run-command', payload: { command: 'StartRun', goal: 'g' }, documentKey: dk, expectedRouteEpoch: 0,
+  }));
+  assert.ok(first && first.ok && first.kind === 'run-started');
+  const second = await core.handleMessage(workspaceSender, envelope({
+    kind: 'run-command', payload: { command: 'StartRun', goal: 'g' }, documentKey: dk, expectedRouteEpoch: 0,
+  }));
+  assert.equal(errCode(second), 'conflict');
+  assert.match(errOf(second).recoveryAction ?? '', /CancelRun/);
+});
+
+test('T14: CancelRun releases ownership and is idempotent', async () => {
+  const core = createBrokerCore(makeDeps());
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  const dk = { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' };
+  const start = () => core.handleMessage(workspaceSender, envelope({
+    kind: 'run-command', payload: { command: 'StartRun', goal: 'g' }, documentKey: dk, expectedRouteEpoch: 0,
+  }));
+  const started = await start();
+  assert.ok(started && started.ok);
+  const cancel = await core.handleMessage(workspaceSender, envelope({
+    kind: 'run-command', payload: { command: 'CancelRun' }, documentKey: dk, expectedRouteEpoch: 0,
+  }));
+  assert.ok(cancel && cancel.ok && cancel.kind === 'run-cancelled' && cancel.cancelled === true);
+  const cancelAgain = await core.handleMessage(workspaceSender, envelope({
+    kind: 'run-command', payload: { command: 'CancelRun' }, documentKey: dk, expectedRouteEpoch: 0,
+  }));
+  assert.ok(cancelAgain && cancelAgain.ok && cancelAgain.kind === 'run-cancelled' && cancelAgain.cancelled === false);
+  const restarted = await start();
+  assert.ok(restarted && restarted.ok);
+});
+
+// ── GetOperation relay: bounded, I06-honest ──────────────────────────────
+
+test('GetOperation relays the runtime reply to a workspace sender', async () => {
+  const dk = { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' };
+  const core = createBrokerCore(makeDeps({
+    sendToTab: async () => ({ ok: false, kind: 'error', error: { code: 'unknown-target', phase: 'reconcile', retryClass: 'user-decision', message: 'no receipt' } }),
+  }));
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  const reply = await core.handleMessage(workspaceSender, envelope({
+    payload: { command: 'GetOperation', operationId: 'op-1' },
+    documentKey: dk,
+    expectedRouteEpoch: 0,
+  }));
+  assert.ok(reply && reply.ok && reply.kind === 'relayed');
+  const receipt = (reply as unknown as { receipt: { error: { code: string } } }).receipt;
+  assert.equal(receipt.error.code, 'unknown-target');
+});
+
+test('T08/I06: a relay that never answers within its budget is timeout-unknown, never not-applied', async () => {
+  const dk = { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' };
+  const core = createBrokerCore(makeDeps({
+    // Real timer: the relay budget is min(deadline-now, 5000) — use a tiny
+    // deadline so the test stays fast.
+    sendToTab: () => new Promise(() => undefined),
+  }));
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  const reply = await core.handleMessage(workspaceSender, envelope({
+    payload: { command: 'GetOperation', operationId: 'op-1' },
+    documentKey: dk,
+    expectedRouteEpoch: 0,
+    deadlineAt: 10_050, // 50ms budget on the injected clock (now = 10_000)
+  }));
+  const err = errOf(reply);
+  assert.equal(err.code, 'timeout-unknown');
+  assert.equal(err.retryClass, 'retryable-same-id');
+});
+
+test('T08/I06: an unreachable runtime (no receiver) reports stale-document with recovery', async () => {
+  const dk = { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' };
+  const core = createBrokerCore(makeDeps({
+    sendToTab: async () => {
+      throw new Error('Could not establish connection. Receiving end does not exist.');
+    },
+  }));
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  const reply = await core.handleMessage(workspaceSender, envelope({
+    payload: { command: 'GetOperation', operationId: 'op-1' },
+    documentKey: dk,
+    expectedRouteEpoch: 0,
+  }));
+  assert.equal(errCode(reply), 'stale-document');
+});
+
+// ── envelope hygiene: deadline, version, transport-kind mismatch ─────────
+
+test('a request past its deadline is not processed', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage(workspaceSender, envelope({ deadlineAt: 9_000 }));
+  assert.equal(errCode(reply), 'denied');
+});
+
+test('an unknown protocol version fails schema validation', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage(workspaceSender, envelope({ protocolVersion: 2 }));
+  assert.equal(errCode(reply), 'invalid-schema');
+});
+
+test('a command outside its transport kind is rejected (no kind laundering)', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage(runtimeSender(), envelope({
+    kind: 'subscription', // RegisterDocument disguised as a projection
+    payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' },
+  }));
+  assert.equal(errCode(reply), 'invalid-schema');
+});
+
+test('inbound RuntimeState/RunProgress projections are not routed (undefined)', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage(runtimeSender(), envelope({
+    kind: 'subscription',
+    payload: { command: 'RunProgress', sequence: 1 },
+  }));
+  assert.equal(reply, undefined);
+});
+
+test('late registrations survive a simulated worker restart via the injected store', async () => {
+  let stored: DocumentRecord[] = [];
+  const deps = makeDeps({
+    persistRegistry: async (records) => {
+      stored = JSON.parse(JSON.stringify(records));
+    },
+    loadRegistry: async () => stored,
+  });
+  const core1 = createBrokerCore(deps);
+  await core1.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  await core1.handleMessage(workspaceSender, envelope({
+    kind: 'run-command',
+    payload: { command: 'StartRun', goal: 'g' },
+    documentKey: { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' },
+    expectedRouteEpoch: 0,
+  }));
+
+  // The worker restarts: a new core hydrates from the same session store.
+  const core2 = createBrokerCore({ ...deps, loadRegistry: async () => stored });
+  await core2.hydrated();
+  assert.equal(core2.records().length, 1);
+  const dk = { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' };
+  const second = await core2.handleMessage(workspaceSender, envelope({
+    kind: 'run-command', payload: { command: 'StartRun', goal: 'g' }, documentKey: dk, expectedRouteEpoch: 0,
+  }));
+  assert.equal(errCode(second), 'conflict'); // the run owner survived the restart
+});
+
+test('tab destruction releases registry entries', async () => {
+  const core = createBrokerCore(makeDeps());
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  assert.equal(await core.tabClosed(4), 1);
+  assert.equal(core.records().length, 0);
+  const reply = await core.handleMessage(workspaceSender, envelope({
+    kind: 'run-command',
+    payload: { command: 'StartRun', goal: 'g' },
+    documentKey: { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' },
+    expectedRouteEpoch: 0,
+  }));
+  assert.equal(errCode(reply), 'unknown-target');
+});

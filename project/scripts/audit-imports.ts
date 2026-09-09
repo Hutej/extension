@@ -141,6 +141,8 @@ const BOUNDARIES: { owner: (p: string) => boolean; forbidden: (p: string) => boo
   { owner: (p) => p.startsWith('core/'), forbidden: (p) => p.startsWith('agent/') || p.startsWith('tools/') || p.startsWith('entrypoints/'), rule: 'core/ must not import agent/, tools/ or entrypoints/' },
   { owner: (p) => p.startsWith('tools/'), forbidden: (p) => p.startsWith('agent/') || p.startsWith('entrypoints/') || p.startsWith('core/reason/'), rule: 'tools/ must not import agent/, entrypoints/ or core/reason/ (network boundary)' },
   { owner: (p) => p.startsWith('agent/'), forbidden: (p) => p.startsWith('entrypoints/'), rule: 'agent/ must not import entrypoints/' },
+  { owner: (p) => p.startsWith('runtime/'), forbidden: (p) => p.startsWith('background/') || p.startsWith('agent/') || p.startsWith('tools/') || p.startsWith('entrypoints/'), rule: 'runtime/ must not import the broker, the legacy loop/tools, or entrypoints (plan/02 §1)' },
+  { owner: (p) => p.startsWith('background/'), forbidden: (p) => p.startsWith('runtime/'), rule: 'background/ must not import DOM executors (plan/03: no broker module imports runtime executors)' },
   { owner: () => true, forbidden: (p) => p.startsWith('entrypoints/'), rule: 'entrypoints/ are roots; nothing imports them' },
 ];
 

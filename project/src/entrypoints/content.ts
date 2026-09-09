@@ -16,10 +16,18 @@ import { liveIdentityDom } from '@/core/identity-dom';
 import { registerIdentity } from '@/core/identity-store';
 import { undoAllStructural, undoLastStructural, resetTxnLog, txnSize } from '@/core/ops/recorder';
 import { resetIdentityStore } from '@/core/identity-store';
+import { bootRuntimeSession } from '../runtime/session.ts';
 
 export default defineContentScript({
   matches: ['<all_urls>'],
   main() {
+    // S2.1: the v2 document runtime — one instance per document, verified
+    // registration handshake, route-epoch fencing, serial mutation queue.
+    // It executes NO mutations in this phase (no mutation vertical yet) and
+    // owns only envelope-shaped v2 messages; the legacy tool dispatcher below
+    // remains the sole mutation owner until the plan/19 cutover task.
+    void bootRuntimeSession();
+
     // Re-apply persisted DOM mutations on page load.
     // CSS is re-inserted by the background's webNavigation handler.
     void reapplyPersistedDom();

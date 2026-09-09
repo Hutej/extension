@@ -227,3 +227,192 @@ test('F02 [KNOWN-RED]: a toolCall receipt carries reconcilable operation identit
   assert.equal(receipt.operationId, 'op-fixture');
   assert.equal(receipt.documentId, 'doc-fixture');
 });
+
+// ── S2.1: v2 document broker/runtime vertical (real message paths) ──────
+
+interface CapturedState {
+  documentKey?: { tabId: number; frameId: number; browserDocumentId: string; runtimeInstanceId: string };
+  routeEpoch?: number;
+  state?: string;
+}
+
+/** Open an extension page as the trusted workspace sender (plan/06: workspace
+ *  → broker commands originate from extension pages) and subscribe to the
+ *  runtime's RuntimeState projections. */
+async function openWorkspace(): Promise<Page> {
+  const extId = await sw!.evaluate(() => chrome.runtime.id) as string;
+  const ws = await context!.newPage();
+  await ws.goto(`chrome-extension://${extId}/popup.html`, { waitUntil: 'load' });
+  await ws.evaluate(() => {
+    const w = window as unknown as { __rv2States: CapturedState[] };
+    w.__rv2States = [];
+    chrome.runtime.onMessage.addListener((msg: unknown) => {
+      const m = msg as { protocolVersion?: number; kind?: string; payload?: { command?: string }; documentKey?: CapturedState['documentKey']; payloadState?: string };
+      if (m && m.protocolVersion === 1 && m.kind === 'subscription' && m.payload?.command === 'RuntimeState') {
+        w.__rv2States.push({
+          documentKey: m.documentKey,
+          routeEpoch: (m.payload as unknown as { routeEpoch?: number }).routeEpoch,
+          state: (m.payload as unknown as { state?: string }).state,
+        });
+      }
+    });
+  });
+  return ws;
+}
+
+async function capturedState(ws: Page, tabId: number, minInstanceGeneration = 0): Promise<CapturedState> {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const states = await ws.evaluate(() => (window as unknown as { __rv2States: CapturedState[] }).__rv2States);
+    const mine = states.filter((s) => s.documentKey?.tabId === tabId && s.state === 'ready');
+    if (mine.length > minInstanceGeneration) return mine[mine.length - 1];
+    if (Date.now() > deadline) {
+      throw new Error(`no ready RuntimeState captured for tab ${tabId} (got ${JSON.stringify(states)})`);
+    }
+    await sleep(200);
+  }
+}
+
+/** Send a v2 envelope from the workspace page through the real path. */
+async function workspaceSend(ws: Page, envelope: Record<string, unknown>): Promise<Record<string, unknown>> {
+  return (await ws.evaluate(
+    (msg) => chrome.runtime.sendMessage(msg as unknown as Record<string, unknown>),
+    envelope,
+  )) as Record<string, unknown>;
+}
+
+const runCommandEnvelope = (
+  command: string,
+  documentKey: CapturedState['documentKey'],
+  expectedRouteEpoch: number | undefined,
+  extra: Record<string, unknown> = {},
+): Record<string, unknown> => ({
+  protocolVersion: 1,
+  requestId: `ws-${Math.random().toString(36).slice(2, 10)}`,
+  kind: 'run-command',
+  ...(documentKey ? { documentKey } : {}),
+  ...(expectedRouteEpoch !== undefined ? { expectedRouteEpoch } : {}),
+  deadlineAt: Date.now() + 10_000,
+  payload: { command, ...extra },
+});
+
+const getOperationEnvelope = (
+  documentKey: CapturedState['documentKey'],
+  expectedRouteEpoch: number,
+  operationId: string,
+): Record<string, unknown> => ({
+  protocolVersion: 1,
+  requestId: `ws-${Math.random().toString(36).slice(2, 10)}`,
+  kind: 'control',
+  ...(documentKey ? { documentKey } : {}),
+  expectedRouteEpoch,
+  deadlineAt: Date.now() + 10_000,
+  payload: { command: 'GetOperation', operationId },
+});
+
+const replyError = (reply: Record<string, unknown>): Record<string, unknown> | undefined =>
+  reply.ok === false ? (reply.error as Record<string, unknown>) : undefined;
+
+let workspace: Page | null = null;
+
+test('S2.1: the v2 vertical registers the document runtime with verified identity (T21)', async () => {
+  workspace = await openWorkspace();
+  const { page, tabId } = await openFixture('v2-vertical.html');
+  const state = await capturedState(workspace, tabId);
+  assert.ok(state.documentKey, `registration must carry a verified DocumentKey: ${JSON.stringify(state)}`);
+  assert.equal(state.documentKey!.tabId, tabId, 'identity comes from the browser sender, not the payload');
+  assert.equal(state.documentKey!.frameId, 0);
+  assert.ok(state.documentKey!.browserDocumentId?.length, 'browser document id is authoritative');
+  assert.ok(state.documentKey!.runtimeInstanceId?.length);
+  assert.equal(state.routeEpoch, 0, 'fresh document starts at route epoch 0');
+
+  // The runtime of the fixture page must have actually booted: the legacy
+  // dispatcher must still answer on the same document (coexistence check).
+  const legacyAlive = await sw!.evaluate(
+    async ([id]) => chrome.tabs.sendMessage(id as number, { action: 'resetTxn' }).then(() => true, () => false),
+    [tabId],
+  );
+  assert.equal(legacyAlive, true, 'the legacy dispatcher must remain reachable on its own path');
+  void page;
+});
+
+test('S2.1: one run owner per document — second StartRun is refused with a recovery action (T14)', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { tabId } = await openFixture('v2-vertical.html');
+  const state = await capturedState(workspace, tabId);
+  const dk = state.documentKey!;
+  const first = await workspaceSend(workspace, runCommandEnvelope('StartRun', dk, state.routeEpoch, { goal: 'vertical test' }));
+  assert.equal(first.ok, true, `StartRun must succeed: ${JSON.stringify(first)}`);
+  assert.ok(typeof first.runId === 'string');
+
+  const second = await workspaceSend(workspace, runCommandEnvelope('StartRun', dk, state.routeEpoch, { goal: 'second' }));
+  const err = replyError(second);
+  assert.ok(err, `second StartRun must be refused: ${JSON.stringify(second)}`);
+  assert.equal(err!.code, 'conflict');
+  assert.match(String(err!.recoveryAction), /CancelRun/);
+
+  const cancel = await workspaceSend(workspace, runCommandEnvelope('CancelRun', dk, state.routeEpoch));
+  assert.equal(cancel.ok, true, `CancelRun must succeed: ${JSON.stringify(cancel)}`);
+  const third = await workspaceSend(workspace, runCommandEnvelope('StartRun', dk, state.routeEpoch, { goal: 'after cancel' }));
+  assert.equal(third.ok, true, `StartRun after cancel must succeed: ${JSON.stringify(third)}`);
+  await workspaceSend(workspace, runCommandEnvelope('CancelRun', dk, state.routeEpoch));
+});
+
+test('S2.1: GetOperation relays to the runtime through the broker and the fence holds (T21/T11)', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { tabId } = await openFixture('v2-vertical.html');
+  const state = await capturedState(workspace, tabId);
+  const dk = state.documentKey!;
+
+  // Full vertical: workspace → broker (sender verified) → registry fencing →
+  // tabs.sendMessage → runtime fence → honest no-receipt reply → relayed back.
+  const relayed = await workspaceSend(workspace, getOperationEnvelope(dk, state.routeEpoch!, 'op-unknown-1'));
+  assert.equal(relayed.ok, true, `broker must relay: ${JSON.stringify(relayed)}`);
+  assert.equal(relayed.kind, 'relayed');
+  const inner = (relayed.receipt as Record<string, unknown>) ?? {};
+  assert.equal(inner.ok, false, 'the runtime must answer, not the broker: no receipt is retained for the unknown id');
+  const innerErr = inner.error as Record<string, unknown>;
+  assert.equal(innerErr.code, 'unknown-target');
+
+  // A stale route epoch never reaches the runtime: the broker rejects it.
+  const stale = await workspaceSend(workspace, getOperationEnvelope(dk, (state.routeEpoch ?? 0) + 7, 'op-2'));
+  const staleErr = replyError(stale);
+  assert.ok(staleErr, `stale epoch must be rejected: ${JSON.stringify(stale)}`);
+  assert.equal(staleErr!.code, 'stale-route');
+
+  // A tab id alone does not authorize: an unregistered document is denied.
+  const forged = await workspaceSend(workspace, getOperationEnvelope(
+    { tabId: 987_654, frameId: 0, browserDocumentId: 'forged', runtimeInstanceId: dk.runtimeInstanceId! },
+    0, 'op-3',
+  ));
+  const forgedErr = replyError(forged);
+  assert.ok(forgedErr, `forged document must be denied: ${JSON.stringify(forged)}`);
+  assert.equal(forgedErr!.code, 'unknown-target');
+});
+
+test('S2.1: after reload, the old runtime instance is deterministically rejected (T08 late messages)', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const fixture = await openFixture('v2-vertical.html');
+  const oldState = await capturedState(workspace, fixture.tabId);
+  const oldInstance = oldState.documentKey!.runtimeInstanceId;
+
+  // Full navigation: the old runtime dies with the document; a fresh one
+  // registers (extension-reinjection-equivalent identity replacement).
+  await fixture.page.reload({ waitUntil: 'load' });
+  const newState = await capturedState(workspace, fixture.tabId, 1); // a SECOND ready state for this tab
+  assert.notEqual(
+    newState.documentKey!.runtimeInstanceId, oldInstance,
+    'a fresh document must register a new runtime instance',
+  );
+
+  // The old instance's key no longer resolves: the late command is rejected
+  // deterministically (stale-document or unknown-target — never executed).
+  const late = await workspaceSend(workspace, getOperationEnvelope(oldState.documentKey!, oldState.routeEpoch!, 'op-late'));
+  const lateErr = replyError(late);
+  assert.ok(lateErr, `a late command for the old instance must be rejected: ${JSON.stringify(late)}`);
+  assert.ok(['stale-document', 'unknown-target'].includes(String(lateErr!.code)), `unexpected code: ${lateErr!.code}`);
+
+  // And the fresh instance answers normally.
+  const fresh = await workspaceSend(workspace, getOperationEnvelope(newState.documentKey!, newState.routeEpoch!, 'op-fresh'));
+  assert.equal(fresh.ok, true, `fresh instance must be reachable: ${JSON.stringify(fresh)}`);
+});
