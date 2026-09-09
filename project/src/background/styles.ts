@@ -29,7 +29,7 @@
  * the only chrome.* wiring. DOM-free by layer table (plan/02 §1).
  */
 
-import type { DocumentKey } from '../contracts.ts';
+import { LIMITS, type DocumentKey } from '../contracts.ts';
 
 // ── delivery state ───────────────────────────────────────────────────────
 
@@ -59,7 +59,11 @@ export type StyleReply =
   | { ok: true; kind: 'committed'; operationId: string; promotedNamespace: string }
   | { ok: false; kind: 'error'; code: string; message: string; recoveryAction?: string };
 
-export const STYLE_SHEET_MAX_BYTES = 262_144; // delivery ceiling; the S4 compiler owns the authored-sheet contract
+// plan/08 §3: document-root sheets insert at USER origin — user normal loses
+// to author normal, so overrides carry explicit scoped important declarations.
+// The S4 compiler owns the authored-sheet contract; this ceiling is the
+// delivery bound (plan/04 LIMITS.maxSheetBytes is the shared constant).
+export const STYLE_SHEET_MAX_BYTES = LIMITS.maxSheetBytes;
 const NAMESPACE_PATTERN = /^[A-Za-z0-9._-]{1,200}$/;
 const MAX_TRACKED_INTENTS = 128; // bounded session ledger per plan/15; eviction only after terminal state
 
@@ -211,6 +215,12 @@ export function createStyleDelivery(deps: StyleDeps): StyleDelivery {
     }
     if (css.length > STYLE_SHEET_MAX_BYTES) {
       return deny('out-of-bounds', `sheet exceeds the ${STYLE_SHEET_MAX_BYTES}-byte delivery ceiling`);
+    }
+    // plan/08 §3: "CSS URL-free policy is rechecked at broker boundary." The
+    // S4.1 compiler's AST policy is primary; this is an independent fail-closed
+    // backstop at the privilege boundary, not a replacement for the parser.
+    if (/url\s*\(|@import|image-set\s*\(/i.test(css)) {
+      return deny('unsafe-value', 'staged sheet contains a network-capable construct; the compiler must reject it first', 'recompile the operation through the CSS policy');
     }
     if (revokedNamespaces.has(namespace)) {
       // I07: a cancelled namespace is never reused or reactivated.
@@ -403,7 +413,7 @@ export function createChromeStyleDelivery(overrides: Partial<StyleDeps> = {}): S
     insertCss: (target, css) =>
       new Promise((resolve, reject) => {
         chrome.scripting.insertCSS(
-          { target: { tabId: target.tabId, documentIds: [target.documentId] }, css, origin: 'AUTHOR' },
+          { target: { tabId: target.tabId, documentIds: [target.documentId] }, css, origin: 'USER' },
           () => {
             const err = chrome.runtime.lastError;
             if (err) reject(new Error(err.message ?? 'insertCSS failed'));
@@ -414,7 +424,7 @@ export function createChromeStyleDelivery(overrides: Partial<StyleDeps> = {}): S
     removeCss: (target, css) =>
       new Promise((resolve, reject) => {
         chrome.scripting.removeCSS(
-          { target: { tabId: target.tabId, documentIds: [target.documentId] }, css, origin: 'AUTHOR' },
+          { target: { tabId: target.tabId, documentIds: [target.documentId] }, css, origin: 'USER' },
           () => {
             const err = chrome.runtime.lastError;
             if (err) reject(new Error(err.message ?? 'removeCSS failed'));

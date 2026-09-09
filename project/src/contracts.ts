@@ -51,6 +51,7 @@ export const LIMITS = {
   maxLabelChars: 120, // collapse label
   maxChordChars: 64,
   cursorTtlMs: 30_000, // plan/04 snapshot cursor validity
+  maxSheetBytes: 262_144, // compiled sheet delivery ceiling (S2.2 styles/S4.1 compiler)
 } as const;
 
 // ── 2. Decoder core ──────────────────────────────────────────────────────

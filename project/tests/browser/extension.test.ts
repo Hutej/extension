@@ -469,12 +469,12 @@ test('S3.1/T04: Observe returns a bounded, privacy-filtered snapshot through the
   assert.ok(workspace, 'workspace page from the registration test');
   const { page, tabId } = await openFixture('observe.html');
   const state = await capturedState(workspace, tabId);
-  const reply = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Observe' }));
+  const reply = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
   assert.equal(reply.ok, true, `Observe must be delivered: ${JSON.stringify(reply).slice(0, 300)}`);
   const snapshot = (reply as { receipt?: { snapshot?: Record<string, unknown> } }).receipt?.snapshot as {
     schemaVersion: number;
     regions: SnapshotRegion[];
-    actions: Array<{ kind: string; controlType?: string }>;
+    actions: Array<{ kind: string; controlType?: string; targetRef: string }>;
     documentMetadata: { origin: string };
     roots: Array<{ kind: string }>;
     coverage: { completed: boolean; visitedNodes: number };
@@ -515,7 +515,7 @@ test('S3.1/T03: a 10k-node page reports partial coverage with a usable cursor', 
   const { tabId } = await openFixture('observe-large.html');
   const state = await capturedState(workspace, tabId);
   const started = Date.now();
-  const reply = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Observe' }));
+  const reply = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
   const wallMs = Date.now() - started;
   const { receipt } = reply as { receipt?: { snapshot?: { coverage: { completed: boolean; reason?: string; nextCursor?: string; visitedNodes: number }; regions: SnapshotRegion[] } } };
   const snapshot = receipt?.snapshot;
@@ -528,9 +528,9 @@ test('S3.1/T03: a 10k-node page reports partial coverage with a usable cursor', 
   assert.equal(snapshot!.regions.length <= 60, true, 'region budget holds');
 
   // Expansion through the cursor works; a forged cursor is refused.
-  const expand = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Expand', cursor: snapshot!.coverage.nextCursor! }));
+  const expand = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Expand', cursor: snapshot!.coverage.nextCursor! }));
   assert.equal(expand.ok, true, `expansion with a live cursor works: ${JSON.stringify(expand).slice(0, 200)}`);
-  const forged = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Expand', cursor: 'forged:0:99999999999999' }));
+  const forged = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Expand', cursor: 'forged:0:99999999999999' }));
   const err = replyError(forged);
   assert.ok(err, 'a forged cursor is refused');
   assert.ok(['stale-route', 'unknown-target'].includes(String(err!.code)), `cursor refusal code: ${err!.code}`);
@@ -540,19 +540,19 @@ test('S3.1/T05: Inspect resolves the exact observed node and refuses stale/unkno
   assert.ok(workspace, 'workspace page from the registration test');
   const { page, tabId } = await openFixture('observe.html');
   const state = await capturedState(workspace, tabId);
-  const reply = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Observe' }));
+  const reply = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
   const snapshot = (reply as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt?.snapshot;
   assert.ok(snapshot);
   const heading = snapshot!.regions.find((r) => r.semantics.tag === 'h1');
   assert.ok(heading, 'the h1 is observed');
 
-  const facts = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Inspect', targetRef: heading!.targetRef, fields: ['geometry', 'style'] }));
+  const facts = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Inspect', targetRef: heading!.targetRef, fields: ['geometry', 'style'] }));
   assert.equal(facts.ok, true, `inspect resolves the exact ref: ${JSON.stringify(facts).slice(0, 200)}`);
   const factsBody = (facts as { receipt?: { facts?: { tag?: string; geometry?: { w: number } } } }).receipt?.facts;
   assert.equal(factsBody?.tag, 'h1');
   assert.ok(factsBody?.geometry, 'requested fields are returned');
 
-  const unknown = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Inspect', targetRef: 't9999' }));
+  const unknown = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Inspect', targetRef: 't9999' }));
   assert.equal(replyError(unknown)?.code, 'unknown-target', 'an unobserved ref is refused');
 
   // Replace the observed node (site re-render), then inspect again: stale.
@@ -562,7 +562,7 @@ test('S3.1/T05: Inspect resolves the exact observed node and refuses stale/unkno
     fresh.textContent = 'Replaced heading';
     h1.replaceWith(fresh);
   });
-  const stale = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Inspect', targetRef: heading!.targetRef }));
+  const stale = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Inspect', targetRef: heading!.targetRef }));
   const staleErr = replyError(stale);
   assert.ok(staleErr, 'a replaced node must not resolve');
   assert.equal(staleErr!.code, 'stale-target', 'the exact-node ref goes stale, never re-resolves to a lookalike');

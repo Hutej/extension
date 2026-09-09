@@ -20,6 +20,7 @@
   "devDependencies": {
     "@playwright/test": "^1.62.1",
     "@types/chrome": "^0.2.2",
+    "@types/css-tree": "3.2.0",
     "@typescript-eslint/eslint-plugin": "^8.65.0",
     "@typescript-eslint/parser": "^8.65.0",
     "axe-core": "^4.12.1",
@@ -27,5 +28,8 @@
     "playwright": "^1.61.1",
     "typescript": "^5.8.3",
     "wxt": "^0.20.6"
+  },
+  "dependencies": {
+    "css-tree": "3.2.1"
   }
 }
