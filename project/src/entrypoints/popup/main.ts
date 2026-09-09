@@ -21,7 +21,6 @@ const accountIdEl = $<HTMLInputElement>('accountId');
 const apiTokenEl = $<HTMLInputElement>('apiToken');
 const saveKeyBtn = $<HTMLButtonElement>('saveKeyBtn');
 const credStatusEl = $<HTMLDivElement>('credStatus');
-const disclosureEl = $<HTMLDivElement>('disclosure');
 const askUserArea = $<HTMLDivElement>('askUserArea');
 const askUserQuestion = $<HTMLDivElement>('askUserQuestion');
 const askUserOptions = $<HTMLDivElement>('askUserOptions');
@@ -63,7 +62,7 @@ saveKeyBtn.addEventListener('click', () => {
 // ── askUser — the agent asks, the popup answers ─────────────────────
 
 function sendAnswer(requestId: number, answer: string): void {
-  chrome.runtime.sendMessage({ action: 'askUserAnswer', requestId, answer });
+  void chrome.runtime.sendMessage({ action: 'askUserAnswer', requestId, answer });
   askUserArea.style.display = 'none';
   askUserInput.value = '';
   showStatus('<span class="spinner"></span>Working with your answer…', 'info');
@@ -100,9 +99,29 @@ chrome.runtime.onMessage.addListener((message: any) => {
 
 // ── helpers ────────────────────────────────────────────────────────
 
+/** Is this tab a real web page Revueon can act on? URL visibility comes from
+ *  the <all_urls> host permission — no "tabs" permission needed. Extension
+ *  pages (chrome-extension://), system pages and unresolvable URLs never
+ *  qualify: only http/https pages carry the Revueon content script. */
+function isWebPageTab(tab: { id?: number; url?: string } | undefined): boolean {
+  return typeof tab?.url === 'string' && tab.url.startsWith('http') && typeof tab.id === 'number';
+}
+
+/** The tab Revueon acts on: the ACTIVE tab when it is a real web page
+ *  (http/https), otherwise the first web page tab in the current window.
+ *
+ *  The popup itself can be an ordinary TAB (the test harness opens it as one,
+ *  so does "open in new tab"). When that tab is the active one, the old
+ *  active-only query resolved the POPUP as the target and every dispatch
+ *  failed with "Could not establish connection. Receiving end does not
+ *  exist." — while the content script was healthy (R3 requests 3–9). The
+ *  fallback keeps the real page as the target in exactly that state. */
 async function getTabId(): Promise<number | null> {
-  const tabs = await browser.tabs.query({ active: true, currentWindow: true });
-  return tabs[0]?.id ?? null;
+  const [active] = await browser.tabs.query({ active: true, currentWindow: true });
+  if (isWebPageTab(active)) return active.id as number;
+  const tabs = await browser.tabs.query({ currentWindow: true });
+  const webTab = tabs.find((t) => isWebPageTab(t));
+  return webTab ? (webTab.id as number) : null;
 }
 
 function showStatus(msg: string, kind: 'ok' | 'err' | 'info'): void {
@@ -123,7 +142,7 @@ transformBtn.addEventListener('click', async () => {
   const goal = intentEl.value.trim();
   if (!goal) { showStatus('Enter a request first.', 'err'); return; }
   const tabId = await getTabId();
-  if (!tabId) { showStatus('Cannot find the active tab.', 'err'); return; }
+  if (!tabId) { showStatus('No web page tab found to transform. Open a web page and run again.', 'err'); return; }
 
   const consent = await browser.storage.local.get(['revueonConsentShown']);
   if (CONSENT_REQUIRED && !consent.revueonConsentShown) {

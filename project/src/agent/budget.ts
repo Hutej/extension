@@ -86,6 +86,98 @@ export function disposeTerminalRun(hasActed: boolean, verifiedClean: boolean): T
   return verifiedClean ? 'keep' : 'rollback';
 }
 
+// ── transport circuit-breaker — pure policy (same section: loop decisions, no browser) ──
+
+/**
+ * R3 evidence: when the extension↔tab bridge dies mid-run, EVERY tool dispatch
+ * fails with the SAME chrome.runtime.lastError message, the model retries
+ * through the loop, and 88 calls / 575s burned with zero effect (req7 alone:
+ * 24 blind applyCss calls into a dead port). The loop counts CONSECUTIVE
+ * failures of THIS class and ends the run at the cap; any dispatch that is not
+ * a transport failure proves the bridge is alive and resets the streak.
+ *
+ * ONLY chrome's own runtime-messaging failures count. Tool-authored errors
+ * (validation, sanitizer/refusal results), dispatch timeouts, generic 'no
+ * response from content script', and model parse failures are NOT transport
+ * failures — none of them is evidence the bridge is dead, and none may trip
+ * the breaker. 2 = the codebase's established consecutive-streak cap
+ * (consecutiveNoInfo restricts at 2; the F5 checkLayout breaker trips at 2):
+ * two identical pieces of evidence is what the loop already treats as "stop
+ * trying".
+ */
+export const MAX_TRANSPORT_FAILURES = 2;
+
+/** Chrome's own connection-level sendMessage failures — the dead-bridge class.
+ *  A tool can never legitimately produce these strings: they originate only in
+ *  dispatchTool's chrome.runtime.lastError callback. */
+const TRANSPORT_ERROR_MARKERS: readonly string[] = [
+  'Could not establish connection. Receiving end does not exist.',
+  'The message port closed before a response was received.',
+];
+
+/** The transport-failure streak after one more dispatch result. Non-transport
+ *  results (success, refusal, validation error, timeout) all prove the bridge
+ *  is alive → the streak resets to 0. Pure — unit-testable without a tab. */
+export function transportStreakAfter(current: number, error: unknown): number {
+  const message = typeof error === 'string' ? error : '';
+  const isTransportFailure = TRANSPORT_ERROR_MARKERS.some((marker) => message.includes(marker));
+  return isTransportFailure ? current + 1 : 0;
+}
+
+/** The breaker's journal notice — single source so the claim stays honest
+ *  everywhere it appears. States what is KNOWN (the transport is down, the run
+ *  is ending, retrying cannot succeed) and names the recovery action (rule 13).
+ *  It deliberately makes NO claim about the page state: whether this run's
+ *  changes were kept or rolled back is the terminal disposition policy's
+ *  decision, carried by the run reason — not by this entry. */
+export function transportBreakerNotice(failures: number, lastError: string): string {
+  return `[transport] the browser transport to this tab is unavailable — ${failures} consecutive tool dispatches failed with the same connection-level error ("${lastError}"). No further tool call can execute in this run; retrying through the model cannot succeed. The run is ending. Reload the page (or re-open the tab) and run the request again.`;
+}
+
+// ── R2-followup: no-new-information convergence guard ─────────────────
+
+/** applyCss acts reporting visibleChange === false before the guard refuses
+ *  the next one. 2 = the codebase's established consecutive-streak cap (the
+ *  R2 note fired at 2; consecutiveNoInfo restricts at 2; the F5 breaker trips
+ *  at 2). One invisible act can be a miscalibration; two in a row is the
+ *  model re-authoring blind on shadowed targets. */
+export const MAX_NO_VISIBLE_ACTS = 2;
+
+/** The deterministic dispatch guard for the two no-progress classes the R3
+ *  run actually exhibited (proof/r3-benchmark.json):
+ *
+ *  1. Re-verification of an UNCHANGED page — req5 spent ~38 of 52 paid turns
+ *     calling checkLayout (19 consecutive) on a page no act had touched since
+ *     the last definitive check; the journal already held that answer. A
+ *     model-called checkLayout can only learn something new if an act or undo
+ *     changed the page since the last definitive check.
+ *  2. Re-authoring with no visible effect — the R2 guard appended an advisory
+ *     note the model ignored (req7: 17 applyCss acts, 1 live sheet at the
+ *     end, 10+ acts after the notes fired). At MAX_NO_VISIBLE_ACTS the next
+ *     applyCss is REFUSED until an information-yielding observation re-scopes
+ *     the model (the loop resets the streak on one).
+ *
+ *  PURE — returns the refusal reason (rule 13: always names the alternative)
+ *  or null when the dispatch may proceed. The loop's OWN checkLayout calls
+ *  (the forced post-act integrity check, the pre-act baseline, the resize
+ *  proof) never pass through here — integrity enforcement is untouched; only
+ *  model-initiated dispatch that cannot produce new evidence is refused.
+ *  Visible progress (every act with visibleChange === true) is never refused —
+ *  legitimate multi-step refinement continues exactly as before. */
+export function convergenceRefusal(input: {
+  toolName: string;
+  noVisibleStreak: number;
+  pageMutatedSinceCheck: boolean;
+}): string | null {
+  if (input.toolName === 'checkLayout' && !input.pageMutatedSinceCheck) {
+    return 'checkLayout already measured this exact page state — its result is in the journal and nothing has changed the page since (no act or undo landed). Re-running it cannot produce new information. Call an act tool to change the page, done if the goal is satisfied, or giveUp.';
+  }
+  if (input.toolName === 'applyCss' && input.noVisibleStreak >= MAX_NO_VISIBLE_ACTS) {
+    return `[convergence] your last ${input.noVisibleStreak} applyCss acts produced NO VISIBLE CHANGE — another stylesheet on the same shadowed targets will not help either. Call findElements on the region the goal names and inspect what it returns, then re-scope the next sheet to that evidence (applyCss is refused until an observation returns something new). Or done if the goal is already satisfied, or giveUp.`;
+  }
+  return null;
+}
+
 // ── T3 objective correctness — pure policy helpers ────────────────────
 
 /**

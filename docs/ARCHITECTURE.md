@@ -198,13 +198,26 @@ project/src/
 
 ## 10. Known limits (honest, current)
 
+- The user-side reversal does not restore the original page for
+  loop-persisted CSS: popup remove-all leaves the page transformed (R10
+  6 Sep: `pageRestoredToOriginal: false`; toggle-off restores 1/9 live).
+  The removal path is the remaining product gap — the apply path is healthy
+  (toggle-on restores 9/9).
+- Live state and replayed state diverge on reload: storage persists every
+  applied sheet and the webNavigation replay fires, but the post-reload page
+  differs from the pre-reload live page (R10 6 Sep: survivesReload 4/9,
+  `finalDiffersFromRemoved: true`). Replay fidelity is the second face of
+  the reversal gap.
 - Sub-region goals ("only the main content area") can defeat scoping — the
   model acts without calling findElements first and breaks layout → honest
   gaveUp. Cheap lever: landmark hints in describePage region data.
 - hn-premium-class open-ended goals end via model timeout, not the model's
-  own done — stop-discipline obedience is partial on flash-tier models.
+  own done — stop-discipline obedience is partial on flash-tier models (R10
+  6 Sep: 3 post-verification timeouts in one run; verified work KEPT each
+  time — the terminal disposition working exactly as designed).
 - Slow model turns (uncapped completions + flash latency) can consume the
-  300s ceiling on complex goals (R3 dark-theme evidence).
+  300s ceiling on complex goals (R3 dark-theme evidence; R10: 207s/214s on
+  two clean dones).
 - Direct tool-call sheets are not persisted — only loop runs persist
   (contract, not a bug; toggle-off is an honest no-op for test-injected CSS).
 - The image rule: production never sends screenshots to a model; if visual

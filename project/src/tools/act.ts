@@ -20,7 +20,7 @@ import { applyHealing } from '../core/heal';
 import { parseCss, serializeEmit, primaryTarget, allSelectors, allRuleTargets, type EmitItem } from '../core/emit';
 import { recordStructural } from '../core/ops/recorder';
 import { resolveTarget, fingerprint, type IdentityDom } from '../core/identity';
-import { fixedPxDominates, findLayoutMotion, buildReducedMotionCss } from '../core/responsive';
+import { fixedPxDominates, stripFixedLayoutDeclarations, findLayoutMotion, buildReducedMotionCss, type ResponsiveStrip } from '../core/responsive';
 import { liveIdentityDom } from '../core/identity-dom';
 import { getIdentity } from '../core/identity-store';
 import { digestOfElement } from '../core/persist/digest.ts';
@@ -356,7 +356,7 @@ async function emitAndInsert(
     const results = await measureAll(befores);
     // A rule with no measurable match (e.g. :hover in a fresh profile) cannot
     // fail — it is skipped by the summarize() note, not by the gate.
-    const allApplied = results.every((r, i) => r === null ? true : (r.matched === 0 ? true : r.applied));
+    const allApplied = results.every((r) => r === null ? true : (r.matched === 0 ? true : r.applied));
 
     if (allApplied) return { css: cssPhase, assert: results[0], perSelector: summarize(results), ...effectOf() };
 
@@ -539,7 +539,7 @@ function filterSheetSelectors(items: EmitItem[], report: SelectorReport, unverif
 
 async function applyCss(args: any): Promise<ToolResult> {
   let css = args?.css as string;
-  if (!css || !css.trim()) return { ok: false, error: 'missing or empty "css" argument. Provide valid CSS rules as a string.' };
+  if (!css || !css.trim()) return { ok: false, error: '[invalid call] NO MUTATION OCCURRED — the "css" argument was missing or empty (the args object carried no CSS rules). Expected: applyCss({ css: "<valid CSS rules, one coherent stylesheet>" }). Your transformation was NOT lost — nothing was applied and nothing needs re-authoring. Retry applyCss with the css argument carrying the rules you intended.' };
 
   // R3a (T2 revision, experiment-corrected): a stylesheet is CASCADE INTENT.
   // Verify every selector-part against the live page — but classify and keep
@@ -563,28 +563,42 @@ async function applyCss(args: any): Promise<ToolResult> {
   const unverified = unverifiedRef.value;
   css = serializeEmit(filteredItems);
 
-  // Phase 7: refuse fixed-pixel LAYOUT DOMINANCE before emitting. A restyle
-  // reconstructed from measurements (position:absolute/fixed, fixed px on
-  // width/height/offsets) breaks on resize — Law 6. Count fixed-px layout
-  // signals vs responsive signals; if fixed DOMINATES, refuse before any
-  // mutation (nothing to roll back — the model retries with responsive CSS).
-  // px is NOT banned: borders/spacing/typography/shadows/radii pass (only the
-  // LAYOUT-sizing/positioning properties count). A colour/typography-only
-  // restyle (no layout decls) has fixedCount=0 and passes. See core/responsive.ts.
+  // Phase 7 (R3-strip): fixed-pixel LAYOUT DOMINANCE no longer refuses the
+  // whole sheet. The old whole-sheet refusal over one offending declaration
+  // was the blast radius that made large coherent authoring impossible (the
+  // protocol experiment's named failure — a full restyle sheet refused whole
+  // over one measured width). The dominance counter still governs: if fixed
+  // DOMINATES, the counted offending declarations are STRIPPED (the shared
+  // classifier — the strip removes exactly what the counter counted, never a
+  // declaration the gate would pass), debris rules are dropped (reported),
+  // and the verified remainder (colour/typography/responsive structure)
+  // flows through the identical sanitize→parse→emit→assert path. A sheet
+  // with NOTHING valid remaining is still refused — same law, narrowed
+  // blast radius. Nothing silently clipped — the strip report rides in the
+  // result (rule 12/13) so the model can rewrite ONLY the stripped
+  // declarations instead of re-authoring the whole sheet.
   const dominance = fixedPxDominates(filteredItems);
+  let gatedItems = filteredItems;
+  let responsiveStrip: ResponsiveStrip | undefined;
   if (dominance) {
-    return {
-      ok: false,
-      error: `[responsive] this CSS uses fixed-pixel layout (${dominance.fixedCount} fixed signal(s): ${dominance.fixed.join(', ')}) but only ${dominance.responsiveCount} responsive signal(s). A layout rebuilt from measured pixels breaks when the viewport changes. Rewrite it with responsive sizing: percentages, fr, auto, minmax(), clamp(), fit-content, aspect-ratio, Flexbox (display:flex), or CSS Grid (display:grid) instead of fixed px on width/height/position and position:absolute. Fixed px is fine for borders, spacing, typography, and shadows.`,
-      confidence: 0.1,
-      costMs: 0,
-    };
+    responsiveStrip = stripFixedLayoutDeclarations(filteredItems);
+    if (responsiveStrip.items.length === 0) {
+      return {
+        ok: false,
+        error: `[responsive] every layout declaration in this sheet is fixed-pixel (${dominance.fixedCount} fixed signal(s): ${dominance.fixed.join(', ')}) — nothing remains after stripping. A layout rebuilt from measured pixels breaks when the viewport changes. Rewrite it with responsive sizing: percentages, fr, auto, minmax(), clamp(), fit-content, aspect-ratio, Flexbox (display:flex), or CSS Grid (display:grid) instead of fixed px on width/height/position. Fixed px is fine for borders, spacing, typography, and shadows.`,
+        confidence: 0.1,
+        costMs: 0,
+      };
+    }
+    gatedItems = responsiveStrip.items;
+    css = serializeEmit(gatedItems);
   }
 
   // T3 motion guard: transitions/animations on layout properties reflow the
   // page on every frame — refuse before any mutation (nothing to roll back).
-  // Same position and shape as the dominance gate above.
-  const motion = findLayoutMotion(filteredItems);
+  // Same position and shape as the dominance gate above; gates the KEPT
+  // remainder (a stripped sheet may still carry layout motion).
+  const motion = findLayoutMotion(gatedItems);
   if (motion.length > 0) {
     return {
       ok: false,
@@ -598,9 +612,9 @@ async function applyCss(args: any): Promise<ToolResult> {
   // wrap neutralising OUR motion under prefers-reduced-motion (same selectors,
   // no design decision — the box-sizing of motion). Appended to the raw CSS so
   // it travels through the same sanitize/parse/emit path.
-  const motionSelectors = allSelectors(filteredItems).filter((sel) => {
+  const motionSelectors = allSelectors(gatedItems).filter((sel) => {
     // A selector needs the wrap only if one of ITS rules declared motion.
-    return filteredItems.some((it) => it.kind === 'style' && it.declarations.some((d) => /^(transition|animation)/.test(d.property.toLowerCase())) && it.selector.split(',').some((p) => p.trim() === sel));
+    return gatedItems.some((it) => it.kind === 'style' && it.declarations.some((d) => /^(transition|animation)/.test(d.property.toLowerCase())) && it.selector.split(',').some((p) => p.trim() === sel));
   });
   if (motionSelectors.length > 0) {
     css = css + '\n' + buildReducedMotionCss(motionSelectors);
@@ -615,10 +629,11 @@ async function applyCss(args: any): Promise<ToolResult> {
 
   // F4: persisted identity digest of the primary target element (style-agnostic
   // — a display:none / recoloured element still verifies on replay). The act
-  // verified EVERY selector above; the primary is the one replay re-verifies
-  // for wrong-target detection. null if the sheet had no single targetable
-  // selector (e.g. pure at-rules) — replay then falls back to unverified.
-  const primarySel = primaryTarget(filteredItems);
+  // verified EVERY selector above; the primary of the KEPT remainder is the one
+  // replay re-verifies for wrong-target detection. null if the sheet had no
+  // single targetable selector (e.g. pure at-rules) — replay then falls back
+  // to unverified.
+  const primarySel = primaryTarget(gatedItems);
   let identityDigest: string | undefined;
   if (primarySel) {
     const el = document.querySelector(primarySel.selector);
@@ -627,7 +642,7 @@ async function applyCss(args: any): Promise<ToolResult> {
 
   return {
     ok: true,
-    result: { chars: insertedCss.length, css: insertedCss, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null, perSelector, textEffect, visualEffect, selectorReport, unverified },
+    result: { chars: insertedCss.length, css: insertedCss, applied: assert?.applied ?? null, before: assert?.before, after: assert?.after, matched: assert?.matched ?? null, perSelector, textEffect, visualEffect, selectorReport, responsiveReport: responsiveStrip ? { stripped: responsiveStrip.stripped, droppedRules: responsiveStrip.droppedRules, keptRuleCount: responsiveStrip.keptRuleCount } : undefined, unverified },
     identityDigest,
     inverse: { kind: 'removeCss', css: insertedCss },
     confidence: unverified ? 0.45 : undefined,
@@ -639,7 +654,7 @@ async function applyCss(args: any): Promise<ToolResult> {
 
 async function hide(args: any): Promise<ToolResult> {
   const selector = args?.selector as string;
-  if (!selector) return { ok: false, error: 'missing "selector" argument. Call describePage or findElements to get a selector, then pass it here.' };
+  if (!selector) return { ok: false, error: '[invalid call] NO MUTATION OCCURRED — the "selector" argument was missing. Expected: <tool>({ selector: "<CSS selector>" }). Call describePage or findElements to get a selector, then retry this tool with it.' };
 
   // F1: verify identity before the hide. hide already refused zero/over-broad;
   // add the wrong-target guard so a selector that now points to a different
@@ -735,8 +750,8 @@ async function setText(args: any): Promise<ToolResult> {
   const text = args?.text as string;
   const reason = args?.reason as string;
 
-  if (!selector) return { ok: false, error: 'missing "selector" argument. Call describePage or findElements to get a selector, then pass it here.' };
-  if (!text) return { ok: false, error: 'missing "text" argument. Provide the new text as a plain string.' };
+  if (!selector) return { ok: false, error: '[invalid call] NO MUTATION OCCURRED — the "selector" argument was missing. Expected: <tool>({ selector: "<CSS selector>" }). Call describePage or findElements to get a selector, then retry this tool with it.' };
+  if (!text) return { ok: false, error: '[invalid call] NO MUTATION OCCURRED — the "text" argument was missing. Expected: setText({ selector: "<CSS selector>", text: "<new text as a plain string>", reason: "<why content changes>" }). Retry setText with all three arguments.' };
   if (!reason || !TEXT_MUTATION_REASONS.has(reason.toLowerCase())) {
     return { ok: false, error: `mutation refused: no valid reason. Provide one of: ${[...TEXT_MUTATION_REASONS].join(', ')}. The reason declares why this is a DOM mutation, not CSS.` };
   }
@@ -805,7 +820,6 @@ async function setText(args: any): Promise<ToolResult> {
 
 function deriveContainerStyle(anchor: HTMLElement): string {
   const bodyStyle = getComputedStyle(document.body);
-  const anchorStyle = getComputedStyle(anchor);
 
   const baseFont = parseFloat(bodyStyle.fontSize) || 16;
   const headingSize = `${Math.round(baseFont * 1.15)}px`;
@@ -871,8 +885,8 @@ async function insert(args: any): Promise<ToolResult> {
   const html = args?.html as string;
   const where = (args?.where as string) || 'top';
 
-  if (!selector) return { ok: false, error: 'missing "selector" argument. Call describePage or findElements to get a selector, then pass it here.' };
-  if (!html?.trim()) return { ok: false, error: 'missing "html" argument. Provide HTML content to insert as a string.' };
+  if (!selector) return { ok: false, error: '[invalid call] NO MUTATION OCCURRED — the "selector" argument was missing. Expected: <tool>({ selector: "<CSS selector>" }). Call describePage or findElements to get a selector, then retry this tool with it.' };
+  if (!html?.trim()) return { ok: false, error: '[invalid call] NO MUTATION OCCURRED — the "html" argument was missing or empty. Expected: insert({ selector: "<anchor CSS selector>", html: "<HTML fragment>", where: "top"|"bottom"|"before"|"after" }). Retry insert with the html argument carrying the fragment.' };
 
   // F1: re-resolve + verify identity before the insert. insert targets an anchor
   // element by selector; a wrong anchor puts the inserted node in the wrong place.
@@ -944,7 +958,7 @@ async function insert(args: any): Promise<ToolResult> {
 
 async function heal(args: any): Promise<ToolResult> {
   const selectors = args?.selectors as string[];
-  if (!selectors?.length) return { ok: false, error: 'missing "selectors" argument (array of CSS selectors). Pass the selector of the hidden element(s) so healing can close the gap they left.' };
+  if (!selectors?.length) return { ok: false, error: '[invalid call] NO MUTATION OCCURRED — the "selectors" argument was missing or empty. Expected: heal({ selectors: ["<CSS selector>", ...] }). Pass the selector(s) of the hidden element(s) so healing can close the gap they left.' };
 
   // F1: verify each healed selector is the intended (now-hidden) target. heal is
   // a follow-up to a prior hide on a verified target; re-verify so a stale
@@ -1003,15 +1017,15 @@ function notImplemented(name: string): Promise<ToolResult> {
 
 export const actTools: ToolDef[] = [
   { name: 'applyCss', kind: 'act', description: 'apply CSS to the page (user-origin stylesheet)',
-    args: { css: 'string' }, execute: applyCss },
+    args: { css: 'string — valid CSS rules, one coherent stylesheet' }, execute: applyCss },
   { name: 'hide', kind: 'act', description: 'hide an element and heal the gap (display:none + reflow)',
-    args: { selector: 'string' }, execute: hide },
+    args: { selector: 'string — CSS selector' }, execute: hide },
   { name: 'setText', kind: 'act', description: 'replace text in a text-only element (no element children, plain text, needs reason)',
-    args: { selector: 'string', text: 'string', reason: 'string' }, execute: setText },
+    args: { selector: 'string — CSS selector', text: 'string — new text, plain', reason: 'string — why content changes' }, execute: setText },
   { name: 'insert', kind: 'act', description: 'insert HTML at a position (top/bottom/before/after) relative to a selector',
-    args: { selector: 'string', html: 'string', where: 'string' }, execute: insert },
+    args: { selector: 'string — anchor CSS selector', html: 'string — HTML fragment', where: '"top" | "bottom" | "before" | "after"' }, execute: insert },
   { name: 'heal', kind: 'act', description: 'close the layout gap from a hidden element',
-    args: { selectors: 'string[]' }, execute: heal },
+    args: { selectors: 'string[] — CSS selectors' }, execute: heal },
   { name: 'bindKey', kind: 'act', description: 'bind a keyboard shortcut',
     args: { key: 'string', action: 'string' }, execute: () => notImplemented('bindKey'), stub: true },
   { name: 'recomposePage', kind: 'act', description: 'whole-page structural recomposition (never default)',

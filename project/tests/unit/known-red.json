@@ -1,0 +1,4 @@
+[
+  "F05: a failed post-repair verification must never count as repaired",
+  "F05: an absent post-repair check (null result) must never count as repaired"
+]

@@ -96,7 +96,7 @@ export async function callLoopModel(req: LoopModelRequest): Promise<LoopModelRes
     // field means "let the provider decide", not "truncate the agent".
     if (maxTokens !== undefined) bodyObj.max_completion_tokens = maxTokens;
     if (useResponseFormat) bodyObj.response_format = { type: 'json_object' };
-    if (reasoning && useReasoningEffort) bodyObj.reasoning_effort = req.reasoningEffort ?? 'low';
+    if (reasoning && useReasoningEffort) bodyObj.reasoning_effort = req.reasoningEffort ?? AI_CONFIG.reasoningEffort;
     // E1: temperature 0 for determinism on tool-selection turns.
     if (useTemperature && req.temperature !== undefined) bodyObj.temperature = req.temperature;
 

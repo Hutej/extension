@@ -5,8 +5,6 @@
  * Vision (screenshots → a vision model) is TEST/QA infrastructure only and
  * lives in tests/, never in production src/ — production never sends a
  * screenshot to a vision model. See CORE MEMORY / CLAUDE.md image rule.
- *
- * Budgets: 12 steps, 60s wall clock.
  */
 
 export const AI_CONFIG = {
@@ -37,11 +35,23 @@ export const AI_CONFIG = {
   // revueon_max_tokens storage override.
   maxCompletionTokens: null as number | null,
 
-  // Per-call timeout. Sized for the UNCAPPED completion length (user decision:
-  // no artificial output limit) — with reasoning, a flash-tier turn can run
-  // 25-50s; 30s manufactured mid-run timeouts that killed runs the model was
-  // actively finishing (R3 dark-theme: 297s budgetExhausted via call timeouts).
-  callTimeoutMs: 60_000,
+  // Per-call timeout. P2 named change (pre-authorized by the owner: "60s ->
+  // 120s ONLY if timeout-driven failures appear in the first 3 baseline
+  // runs; log it"): the Task B baseline leg hit model-call timeouts in run 3
+  // (breathing-room: "the model became unreachable (Model call timed out.)")
+  // and run 9 (premium) — verified work kept, refinement strangled mid-run.
+  // Sized for the UNCAPPED completion length (user decision: no artificial
+  // output limit) — with reasoning, a flash-tier turn can run 25-50s at low
+  // effort and longer at higher efforts.
+  callTimeoutMs: 120_000,
+
+  // GLM reasoning effort (reasoning_effort in the chat payload). 'low' is the
+  // production default — proven across the R3/R10 runs and the P1 smoke.
+  // 'minimal' is NOT a valid GLM value (the schema is low|medium|high; an
+  // unsupported value gets the transport's 400-drop fallback, which silently
+  // removes the param instead of honouring it). Benchmarks override this via
+  // the revueon_reasoning_effort storage override, not by editing here.
+  reasoningEffort: 'low' as 'low' | 'medium' | 'high',
 
   // HTTP-level retries for TRANSIENT server faults ONLY (429/5xx).
   maxTransientRetries: 4,

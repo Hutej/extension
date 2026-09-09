@@ -44,7 +44,15 @@ density, spatial model, surface/elevation, CSS vars, scrollables, media,
 landmarks, interactive elements. Walk budget 6s; serialize ceiling 24k;
 tool result capped 8k (truncated flag).
 
-### inspect / measure — stubs, hidden from the prompt.
+### inspect  *(live, prompt-visible)*
+Args: `{selector, properties?, cascade?}`. Element-level computed state:
+requested properties verbatim (default set = typography + paint + layout),
+painted background (the "will my change be visible" answer), orientation
+(tag/count/verified), and the deterministic cascade subset — per property the
+winning rule, its source (revueon/page) and inheritance. The journal line
+carries all of it (never a bare "ok").
+
+### measure — stub, hidden from the prompt.
 
 ## act — scoped, reversible
 
@@ -73,7 +81,7 @@ Args: `{selector}`. `display:none` + heal the gap; default-important sheet;
 identity-guarded single target; cloned-node/DOM path when structural.
 
 ### insert
-Args: `{selector, position: top|bottom|before|after, html}`. Identity-guarded
+Args: `{selector, where: top|bottom|before|after, html}`. Identity-guarded
 target; recorded in the TransactionLog with a cloned-node exact inverse;
 persisted with digest for reload replay (insert-replay: the digest is captured
 BEFORE insertion — the PHASE5 high-severity fix).

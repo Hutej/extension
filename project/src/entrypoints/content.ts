@@ -73,7 +73,21 @@ export default defineContentScript({
       if (message.action === 'toolCall') {
         const tool = getTool(message.tool);
         if (!tool) { sendResponse({ ok: false, error: `unknown tool: ${message.tool}` }); return; }
-        void tool.execute(message.args).then((result) => sendResponse(result));
+        // A2 (P2, C15): a crash inside a tool used to escape this handler —
+        // sendResponse never fired, the port died, and the tab stopped
+        // answering every later dispatch (P1-REPORT §6: the keyframes probe).
+        // ANY brain can send ANY argument (C15); the system survives all of
+        // it. One catch at the dispatch entry turns every crash into a
+        // rule-13 result: what went wrong + what the model can do next.
+        void tool.execute(message.args)
+          .then((result) => sendResponse(result))
+          .catch((err: unknown) => {
+            const detail = err instanceof Error ? `${err.name}: ${err.message}` : String(err);
+            sendResponse({
+              ok: false,
+              error: `[dispatch] the ${message.tool} tool crashed before it could report (${detail}). The tool may have PARTIALLY applied — its own confirmation never reached the journal, so do not assume success or failure. Verify the page state with checkLayout before re-authoring; CSS acts are safe to retry (insertCSS dedupes identical sheets), and findElements re-scopes if the target drifted.`,
+            });
+          });
         return true; // async response
       }
 
@@ -422,13 +436,23 @@ async function removeMismatchedCss(state: { entries: any[] }, outcomes: ReplayOu
     const r = resolveTarget(liveIdentityDom, sel, null);
     if (!r.ok || !r.el) { outcomes.push({ selector: sel, status: mapResolveReason(r.reason), error: `CSS target ${r.error ?? sel} — CSS left in place; remove via toggle off if stale` }); continue; }
     const liveDigest = await digestOfElement(r.el, liveIdentityDom);
+
     if (liveDigest !== digest) {
-      // Wrong element — remove the CSS the background inserted before paint.
-      try {
-        await new Promise<void>((resolve) =>
-          chrome.runtime.sendMessage({ action: 'removeCSS', css: inv.css }, () => resolve()));
-      } catch { /* ignore */ }
-      outcomes.push({ selector: sel, status: 'identity-mismatch', error: `CSS target "${sel}" changed since the hide — CSS removed to avoid hiding the wrong element` });
+      // R3 production evidence (proof/r3-benchmark.json: req2's reload played a
+      // broken partial page and the next run gave up with 0 acts; req8's reload
+      // ≈ pristine; req10's final reload mangled): this removal STRIPPED the
+      // accumulated state at every reload whenever the live structure drifted
+      // since act time (banner/variant DOM on a live site) or the capture-time
+      // document.querySelector resolution diverged from resolveTarget. A sheet
+      // is CASCADE INTENT scoped to a SELECTOR — whatever the selector matches
+      // after a re-render is what the sheet styles, the same semantics as any
+      // stylesheet on a live site. So a digest mismatch is REPORTED here,
+      // never removed: the reload must replay the full persisted state, and
+      // the user's toggle-off / remove-all remains the supported reversal.
+      // (DOM-act replay keeps its mismatch skip — insert/setText mutate one
+      // element instance, where the wrong-element risk is real. That path is
+      // untouched; only this CSS removal is.)
+      outcomes.push({ selector: sel, status: 'identity-mismatch', error: `CSS target "${sel}" changed since the act — reported, sheet left in place (a reload must not strip the accumulated state)` });
     }
   }
 }

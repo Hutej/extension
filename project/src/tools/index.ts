@@ -59,14 +59,19 @@ export function getTool(name: string): ToolDef | undefined {
 }
 
 /** Serialize the tool list for the agent prompt. Only working tools (no stubs).
- *  Compact: one line per tool, args inline. */
+ *  Compact: one line per tool, args inline WITH their type hints — the registry
+ *  record is the single argument schema (never duplicated in the prompt). The
+ *  R3 evidence: bare arg names alone produced 15 missing/empty-"css" refusals
+ *  in one run; a visible type hint is the cheapest fix at the prompt's cost. */
+function serializeArgs(args: Record<string, string>): string {
+  const argStr = Object.entries(args).map(([k, hint]) => hint ? `${k}: ${hint}` : k).join(', ');
+  return argStr ? `(${argStr})` : '';
+}
+
 export function serializeToolList(): string {
   return allTools
     .filter((t) => t.kind !== 'control' && !t.stub)
-    .map((t) => {
-      const argStr = Object.entries(t.args).map(([k]) => k).join(',');
-      return argStr ? `${t.name}(${argStr}) — ${t.description}` : `${t.name} — ${t.description}`;
-    })
+    .map((t) => `${t.name}${serializeArgs(t.args)} — ${t.description}`)
     .join('\n');
 }
 
@@ -78,9 +83,16 @@ export function serializeRestrictedToolList(): string {
     ((t.kind === 'act' || t.kind === 'verify') && !t.stub) || t.name === 'done' || t.name === 'giveUp'
   );
   return restricted
-    .map((t) => {
-      const argStr = Object.entries(t.args).map(([k]) => k).join(',');
-      return argStr ? `${t.name}(${argStr}) — ${t.description}` : `${t.name} — ${t.description}`;
-    })
+    .map((t) => `${t.name}${serializeArgs(t.args)} — ${t.description}`)
     .join('\n');
+}
+
+/** Compact actionable malformed-call report: the exact expected argument shape,
+ *  inline, so the model can correct the call on its NEXT turn without a second
+ *  wrong guess. Single source — the prompt and every error compose this. */
+export function expectedArgs(name: string): string {
+  const tool = registry.get(name);
+  if (!tool) return '';
+  const argStr = Object.entries(tool.args).map(([k, hint]) => hint ? `${k}: ${hint}` : k).join(', ');
+  return argStr ? `Expected: ${name}({ ${argStr} })` : `Expected: ${name}({})`;
 }

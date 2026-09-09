@@ -50,7 +50,7 @@ export function parseCss(css: string): EmitItem[] {
 
 function extractFromRules(rules: CSSRuleList): EmitItem[] {
   const items: EmitItem[] = [];
-  for (const rule of rules as any) {
+  for (const rule of Array.from(rules)) {
     if (rule instanceof CSSStyleRule) {
       const declarations: Array<{ property: string; value: string }> = [];
       let anyImportant = false;
@@ -83,7 +83,7 @@ function extractFromRules(rules: CSSRuleList): EmitItem[] {
 
 function extractKeyframes(rule: CSSKeyframesRule): EmitItem[] {
   const items: EmitItem[] = [];
-  for (const kf of rule.cssRules as any) {
+  for (const kf of Array.from(rule.cssRules)) {
     if (kf instanceof CSSKeyframeRule) {
       const declarations: Array<{ property: string; value: string }> = [];
       const style = kf.style;
@@ -109,13 +109,17 @@ function extractKeyframes(rule: CSSKeyframesRule): EmitItem[] {
  *  selector — because CSSOM expands shorthands (e.g. `background: red` → 10
  *  longhands with `background-image` first, which stays `none` while
  *  `background-color` turns red). Asserting only declarations[0] reads the
- *  wrong property and reports applied:false on a successful application. */
+ *  wrong property and reports applied:false on a successful application.
+ *  P2 fix (A1): @keyframes is SKIPPED, mirroring allRuleTargets/allSelectors
+ *  — its inner selectors are keyText ('to', '100%'), not DOM selectors;
+ *  handing one to document.querySelector threw and killed the dispatch
+ *  (P1-REPORT.md §6 bug 1, probe evidence). */
 export function primaryTarget(items: EmitItem[]): { selector: string; properties: string[] } | null {
   for (const item of items) {
     if (item.kind === 'style' && item.declarations.length > 0) {
       return { selector: item.selector.split(',')[0].trim(), properties: item.declarations.map((d) => d.property) };
     }
-    if (item.kind === 'at') {
+    if (item.kind === 'at' && !item.prelude.startsWith('@keyframes')) {
       const inner = primaryTarget(item.items);
       if (inner) return inner;
     }

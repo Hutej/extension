@@ -19,14 +19,14 @@
  */
 
 import { callLoopModel } from '../core/reason';
-import { getTool } from '../tools/index';
+import { getTool, serializeToolList } from '../tools/index';
 import { buildPrompt, SYSTEM_PROMPT } from './prompt';
 import { Journal } from './journal';
-import { Budget, disposeTerminalRun, diffNewIssues, classifyResizeProof } from './budget';
+import { Budget, disposeTerminalRun, diffNewIssues, classifyResizeProof, MAX_TRANSPORT_FAILURES, transportStreakAfter, transportBreakerNotice, convergenceRefusal } from './budget';
 import { attemptContrastRecovery, newContrastFailures, isContrastOnlyIssues, type ContrastFailure } from './recover';
 export { disposeTerminalRun }; // back-compat re-export
 import { AI_CONFIG } from '../core/config';
-import { saveJournalState, loadJournalState, scopeKey, mergeLiveScopeEntries, trimScopeEntries, actIdentity } from '../core/persist';
+import { saveJournalState, loadJournalState, scopeKey, mergeLiveScopeEntries, trimScopeEntries } from '../core/persist';
 import { shouldRefuseDone } from './journal';
 
 // D: Budget gate constants.
@@ -160,6 +160,7 @@ export async function runLoop(
   let paidCalls = 0;
   let consecutiveNoInfo = 0;
   let consecutiveCheckLayoutUndos = 0; // F5 circuit-breaker — consecutive forced-checkLayout undos
+  let consecutiveTransportFailures = 0; // transport breaker — consecutive connection-level dispatch failures
   let hasActed = false;
   // T2 reliability: is the page's current act-state verified clean by the
   // forced post-act checkLayout? Set true on a CLEAN check; unchanged on a
@@ -175,6 +176,14 @@ export async function runLoop(
   let wideInnerWidth = 0;
   // R2 convergence guard: consecutive applyCss acts with visibleChange === false.
   let noVisibleStreak = 0;
+  // R2-followup: has the page changed (an act applied / an undo ran) since the
+  // last DEFINITIVE checkLayout result entered the journal? true also before
+  // any check has run (the first model-called checkLayout is always allowed).
+  // A model-called checkLayout on an unchanged page re-reads an answer the
+  // journal already holds — the R3 req5 run spent 19 CONSECUTIVE paid turns
+  // that way. The loop's own forced checkLayout consumes each act's change
+  // (act → true, forced check → false), so this flag only gates model calls.
+  let pageMutatedSinceCheck = true;
   // R3d: bounded contrast recovery — used AT MOST ONCE per run. The flag is
   // the mechanical hard bound (never reset, checked before the attempt): the
   // run can never chain primary → repair → repair, no matter what the model
@@ -377,7 +386,10 @@ export async function runLoop(
 
     const tool = getTool(toolName);
     if (!tool) {
-      journal.append({ tool: toolName, kind: 'observe', args: toolArgs, result: { error: `unknown tool: ${toolName}. Available tools are in the tool list above.` } as any, costMs: 0, timestamp: Date.now() });
+      // Compiler-grade malformed-call report: the model just sent a name that
+      // is not in the registry — give it the registry (compact, one line per
+      // tool) so the corrected call needs no second wrong guess.
+      journal.append({ tool: toolName, kind: 'observe', args: toolArgs, result: { error: `unknown tool: "${toolName}" — not in this runtime's registry. NO MUTATION OCCURRED. Available tools:\n${serializeToolList()}` } as any, costMs: 0, timestamp: Date.now() });
       continue;
     }
 
@@ -391,6 +403,21 @@ export async function runLoop(
       if (toolName === 'undo') {
         const steps = typeof toolArgs.steps === 'number' ? toolArgs.steps : 1;
         const r = await journal.undo(steps, (inverse) => dispatchInverse(tabId, inverse));
+        // An undo restores (or fails to restore) page state — either way the
+        // page's current act-state is no longer the one the last definitive
+        // check measured. A fresh checkLayout is informative again.
+        if (r.undone > 0 || r.failed > 0) pageMutatedSinceCheck = true;
+        // Model-facing outcome — one compact entry. Without it a FAILED undo
+        // was silent: the acts stayed live on the page while the model reasoned
+        // from the false assumption they were removed. On failure journal.undo
+        // KEEPS the act entries (the state matches reality) and this entry
+        // carries the runtime's own reason verbatim — nothing is fabricated.
+        journal.append({
+          tool: 'undo', kind: 'control' as const, args: { steps },
+          result: { undone: r.undone, failed: r.failed, reason: r.reason },
+          reasoning: 'model-initiated undo outcome',
+          costMs: 0, timestamp: Date.now(),
+        });
         onProgress?.({ tool: 'undo', undone: r.undone, failed: r.failed, reason: r.reason });
         continue;
       }
@@ -434,6 +461,16 @@ export async function runLoop(
         await rollbackDomIfActed(tabId, journal, origin);
         return { status: 'gaveUp', reason: toolArgs.reason ?? 'Agent gave up.', journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
       }
+    }
+
+    // No-new-information dispatch guard: refuse a model-initiated call that
+    // cannot produce new evidence given what the journal already holds (see
+    // convergenceRefusal in budget.ts for the two R3-evidenced classes). The
+    // refusal itself is the evidence — it names act / done / giveUp (rule 13).
+    const refusalReason = convergenceRefusal({ toolName, noVisibleStreak, pageMutatedSinceCheck });
+    if (refusalReason) {
+      journal.append({ tool: toolName, kind: 'observe' as const, args: toolArgs, result: { error: refusalReason } as any, reasoning: 'no-new-information guard: this dispatch cannot produce new evidence', costMs: 0, timestamp: Date.now() });
+      continue;
     }
 
     // Dispatch the tool.
@@ -519,13 +556,26 @@ export async function runLoop(
       const noInfo = (r.matches?.length === 0) || (r.error) || (r.regionCount === 0) ||
         (toolName === 'readText' && r.error);
       if (noInfo) consecutiveNoInfo++;
-      else consecutiveNoInfo = 0;
+      else {
+        consecutiveNoInfo = 0;
+        // An information-yielding observation is the guard's sanctioned way
+        // out: the model looked again (re-scoped), so its next applyCss gets a
+        // fair hearing. A no-info observation does NOT re-arm (a broken observe
+        // cannot launder the streak).
+        noVisibleStreak = 0;
+      }
     } else if (tool.kind === 'act') {
       // T2 reliability: hasActed means an act actually SUCCEEDED (ok:true) —
       // a refused act (F1/responsive/identity) changed nothing and must not
       // drive the terminal disposition ("acted but unverified → rollback")
       // when there is literally nothing on the page to roll back.
-      if (toolResult.ok) hasActed = true;
+      if (toolResult.ok) {
+        hasActed = true;
+        // The page changed — a fresh model-called checkLayout can learn
+        // something (the forced post-act check will usually consume this
+        // first, which is exactly the point).
+        pageMutatedSinceCheck = true;
+      }
       consecutiveNoInfo = 0;
       // R2 convergence guard: consecutive successful applyCss acts that
       // changed NOTHING visible. Streak 2 = the model is retrying the same
@@ -542,9 +592,29 @@ export async function runLoop(
 
     budget.totalCostMs += entry.costMs;
 
+    // Transport circuit-breaker: the extension↔tab bridge is dead. Chrome fails
+    // every dispatch with the SAME connection error, so retrying through the
+    // model cannot succeed — the R3 run burned 88 calls / 575s this way before
+    // the bridge revived. The streak counts only genuine chrome messaging
+    // failures and resets on ANY other dispatch result (a refusal or validation
+    // error is itself proof the bridge is alive). At the cap the run ends
+    // honestly: the terminal disposition policy (not the breaker) decides
+    // keep-vs-rollback, and the reason claims only what actually happened.
+    consecutiveTransportFailures = transportStreakAfter(consecutiveTransportFailures, toolResult.error);
+    if (consecutiveTransportFailures >= MAX_TRANSPORT_FAILURES) {
+      journal.append({ tool: 'note', kind: 'observe' as const, args: {}, result: { error: transportBreakerNotice(consecutiveTransportFailures, String(toolResult.error ?? '')) } as any, reasoning: 'transport breaker: the browser bridge is unavailable', costMs: 0, timestamp: Date.now() });
+      if (disposeTerminalRun(hasActed, verifiedClean) === 'rollback') {
+        await rollbackDomIfActed(tabId, journal, origin);
+        return { status: 'gaveUp', reason: `giving up: the browser transport to this tab is unavailable (${consecutiveTransportFailures} consecutive dispatches failed with the same connection error). Any changes made this run were rolled back to keep the page intact. Reload the page and run the request again.`, journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+      }
+      await persistJournal(journal, origin);
+      return { status: 'gaveUp', reason: `giving up: the browser transport to this tab is unavailable (${consecutiveTransportFailures} consecutive dispatches failed with the same connection error). ${(hasActed && verifiedClean) ? 'The transformation applied and verified earlier in this run was kept.' : 'Nothing was modified.'} Reload the page and run the request again.`, journal, budget, paidCalls, wallMs: budget.elapsedMs(), parseFailures };
+    }
+
     // P10: if the action made things worse, undo immediately.
     if (tool.kind === 'act' && toolResult.worse) {
-      await journal.undo(1, (inverse) => dispatchInverse(tabId, inverse));
+      const worseUndo = await journal.undo(1, (inverse) => dispatchInverse(tabId, inverse));
+      if (worseUndo.undone > 0 || worseUndo.failed > 0) pageMutatedSinceCheck = true;
     }
 
     // F5 INTEGRITY: after every successful ACT, FORCE checkLayout to run (the
@@ -588,6 +658,12 @@ export async function runLoop(
       const clTimeout = Math.min(Math.max(rem.wallMs, MIN_TURN_MS), 30_000);
       const cl = await dispatchTool(tabId, 'checkLayout', {}, clTimeout);
       const { outcome, issues: rawIssues, allIssues: rawAll, allWarnings: rawWarn } = classifyCheckLayout(cl);
+      // A DEFINITIVE check result (clean or issues — not a verifier error) is
+      // the journal's current answer for this page state: further model-called
+      // checks are refused until an act/undo changes the page again. On a
+      // verifier ERROR the flag stays as-is — the model re-checking IS the
+      // recovery the error message names.
+      if (outcome !== 'error') pageMutatedSinceCheck = false;
       // F5.8 baseline-diff: keep only issues the ACT INTRODUCED — after-act
       // allIssues NOT in the pre-act baseline allIssues. checkLayout now returns
       // an UNCAPPED allIssues (the display `issues` is capped for the model) so
@@ -677,6 +753,7 @@ export async function runLoop(
             // standard undo path below.
             journal.append(repairEntry);
             const uRepair = await journal.undo(1, (inverse) => dispatchInverse(tabId, inverse));
+            if (uRepair.undone > 0 || uRepair.failed > 0) pageMutatedSinceCheck = true;
             (clEntry.result as any).recovery = uRepair.undone > 0 ? 'attempted-and-removed' : 'attempted-remove-failed';
             if (uRepair.undone === 0) {
               (clEntry.result as any).message = `the failed recovery repair could NOT be removed (undo failed) — it may still be on the page.`;
@@ -689,6 +766,7 @@ export async function runLoop(
             consecutiveCheckLayoutUndos++;
             // The undo restored the previously verified act-state — the flag's
             // meaning ("current page state verified") is preserved, not cleared.
+            pageMutatedSinceCheck = true;
             (clEntry.result as any).autoUndone = true;
             (clEntry.result as any).message = `checkLayout found ${clIssues.length} NEW issue(s) (pre-existing baseline issues excluded): ${clIssues.join('; ')}. The last action was automatically undone — the page's layout would have been broken. Try a different approach or give up.`;
           } else if (u.failed > 0) {
@@ -698,6 +776,7 @@ export async function runLoop(
             // act is still live on the page (journal kept the entry). The page is
             // possibly broken → the terminal disposition must roll back.
             verifiedClean = false;
+            pageMutatedSinceCheck = true; // uncertain state — let the model re-check
             (clEntry.result as any).autoUndone = false;
             (clEntry.result as any).undoFailed = true;
             (clEntry.result as any).message = `checkLayout found ${clIssues.length} NEW issue(s) but the automatic undo FAILED to restore the DOM (${u.reason ?? 'stale/wrong-target'}). The action is still on the page. Call the undo tool (steps: 1) to retry, or give up.`;
@@ -784,6 +863,9 @@ export async function runLoop(
       // The undo failed — the breaking sheet may still be on the page.
       verifiedClean = false;
     }
+    // The proof measured (and possibly restored) the page — the last normal-
+    // viewport check no longer describes it. Let the model re-check.
+    pageMutatedSinceCheck = true;
     journal.append({
       tool: 'checkLayout', kind: 'verify' as const, args: {},
       result: { resizeProof: true, outcome: 'issues', narrowInnerWidth: check?.result?.innerWidth ?? null, newIssues: proof.newIssues, autoUndone: u.undone > 0, undoFailed: u.failed > 0 },

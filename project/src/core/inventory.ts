@@ -306,13 +306,3 @@ function cssEscape(s: string): string {
 /** Serialize the inventory for the model call. Compact, a few thousand chars.
  *  F1: surface the UNTARGETABLE REASON (not just the bare token) so the agent
  *  can choose the alternative path (rule 13: every error names an alternative). */
-export function serializeInventory(regions: CandidateRegion[]): string {
-  return regions.map((r) => {
-    const text = r.textSample ? ` text="${r.textSample}"` : '';
-    // R3: emit the reason text, not just the bare UNTARGETABLE token. A bare
-    // token leaves the agent unable to recover (no anchor? not unique? parse
-    // error?) and it falls back to guessing — the exact roadmap failure.
-    const untargetable = r.targetable ? '' : ` UNTARGETABLE(${r.untargetableReason ?? 'unknown'})`;
-    return `[${r.id}] role=${r.role} type=${r.componentType}${text} pos=${r.position} width=${r.width} repeat=${r.repeatCount}${untargetable}`;
-  }).join('\n');
-}

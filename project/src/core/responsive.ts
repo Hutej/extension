@@ -87,6 +87,18 @@ function isResponsiveValue(v: string): boolean {
   return false;
 }
 
+/** The ONE per-declaration fixed-layout-signal classifier — both the dominance
+ *  counter (countResponsiveSignals) and the strip walk (stripFixedLayoutDeclarations)
+ *  consume it, so what gets counted and what gets stripped can never drift apart
+ *  (no second classifier). position:absolute/fixed fixes an element to measured
+ *  coordinates; a bare page-scale px length on a sizing/offset property fixes
+ *  geometry to a measured size. */
+function isFixedLayoutDeclaration(prop: string, val: string): boolean {
+  const p = prop.toLowerCase();
+  if (p === 'position' && /\b(absolute|fixed)\b/.test(val.toLowerCase())) return true;
+  return SIZING_PROPS.has(p) && isFixedPxValue(val);
+}
+
 export interface ResponsiveCount {
   fixedCount: number;
   responsiveCount: number;
@@ -108,10 +120,12 @@ export function countResponsiveSignals(items: EmitItem[]): ResponsiveCount {
           const prop = d.property.toLowerCase();
           const val = d.value;
 
-          // position:absolute/fixed — fixes an element to coordinates.
-          if (prop === 'position' && /\b(absolute|fixed)\b/.test(val.toLowerCase())) {
+          // The shared fixed-layout classifier — what gets counted and what
+          // gets stripped is the ONE predicate (no second classifier):
+          // position:absolute/fixed + page-scale px on sizing/offset props.
+          if (isFixedLayoutDeclaration(prop, val)) {
             fixedCount++;
-            if (fixed.length < 6) fixed.push(`position:${val.trim()}`);
+            if (fixed.length < 6) fixed.push(`${prop}: ${val.trim()}`);
             continue;
           }
           // display:flex/grid — a responsive layout signal (the browser owns it).
@@ -127,13 +141,6 @@ export function countResponsiveSignals(items: EmitItem[]): ResponsiveCount {
           // flex/grid layout properties — responsive structure signals.
           if (/^(flex|flex-|grid-|grid-template-|grid-area|justify-|align-|place-|gap|row-gap|column-gap)/.test(prop)) {
             responsiveCount++;
-            continue;
-          }
-
-          // A px value on a LAYOUT-sizing/offset property = fixed geometry.
-          if (SIZING_PROPS.has(prop) && isFixedPxValue(val)) {
-            fixedCount++;
-            if (fixed.length < 6) fixed.push(`${prop}: ${val.trim()}`);
             continue;
           }
           // A responsive value on any property = responsive signal.
@@ -214,4 +221,92 @@ export function buildReducedMotionCss(motionSelectors: string[]): string {
     .map((s) => `  ${s} { transition: none !important; animation: none !important; }`)
     .join('\n');
   return `@media (prefers-reduced-motion: reduce) {\n${rules}\n}`;
+}
+
+// ── T3 strip gate (R3-strip) ─────────────────────────────────────────
+// Inside a sheet the dominance counter flags (fixed-px layout dominates), the
+// counted offending declarations are STRIPPED instead of refusing the whole
+// sheet — the counted predicate is the shared classifier, so the strip removes
+// exactly what the counter counted, never a declaration the gate would pass.
+// A rule that loses EVERY declaration is dropped (reported); a rule reduced to
+// ONLY layout-sizing remnants (inert debris — offsets without positioning) is
+// dropped too (reported): both carry no styling content worth applying. The
+// verified remainder (colour/typography/responsive structure) flows through the
+// normal path. Pure walk, mirroring filterSheetSelectors' structure: @keyframes
+// untouched, @media/@supports recurse, @media rules (@font-face etc.) push
+// through. Nothing silently clipped — the strip report rides in the result
+// (rule 12/13) so the model can rewrite ONLY the stripped declarations.
+
+export interface StrippedDeclaration {
+  selector: string;
+  property: string;
+  value: string;
+}
+
+export interface DroppedRule {
+  selector: string;
+  reason: 'every layout declaration in the rule was fixed-pixel' | 'reduced to inert layout remnants — no styling content kept';
+}
+
+export interface ResponsiveStrip {
+  /** The kept items (fixed-layout declarations removed, debris rules dropped). */
+  items: EmitItem[];
+  /** What was stripped (capped report) — exactly what the counter counted. */
+  stripped: StrippedDeclaration[];
+  /** Rules dropped whole, with the reason (capped report). */
+  droppedRules: DroppedRule[];
+  /** Rules that kept styling content and flow through the normal path. */
+  keptRuleCount: number;
+}
+
+/** Strip the fixed-layout declarations the dominance counter counts from
+ *  EmitItem[] (recursing into @media/@supports), dropping rules that carry no
+ *  styling content afterwards. Pure — mirrors filterSheetSelectors' walk
+ *  (@keyframes untouched, @media/@supports recurse). The REPORT is capped; the
+ *  strip itself is not. Nothing silently clipped — rule 12/13. */
+export function stripFixedLayoutDeclarations(items: EmitItem[]): ResponsiveStrip {
+  const stripped: StrippedDeclaration[] = [];
+  const droppedRules: DroppedRule[] = [];
+  let keptRuleCount = 0;
+
+  const isLayoutOnlyRemnant = (kept: { property: string }[]) =>
+    kept.length > 0 && kept.every((d) => SIZING_PROPS.has(d.property.toLowerCase()));
+
+  const walk = (xs: EmitItem[]): EmitItem[] => {
+    const out: EmitItem[] = [];
+    for (const item of xs) {
+      if (item.kind !== 'style') {
+        if (item.kind === 'at') {
+          if (item.prelude.startsWith('@keyframes')) { out.push(item); continue; }
+          const inner = walk(item.items);
+          if (inner.length > 0) out.push({ ...item, items: inner });
+        } else {
+          out.push(item);
+        }
+        continue;
+      }
+      if (item.declarations.length === 0) { out.push(item); continue; }
+      const kept = item.declarations.filter((d) => {
+        if (isFixedLayoutDeclaration(d.property.toLowerCase(), d.value)) {
+          if (stripped.length < 6) stripped.push({ selector: item.selector, property: d.property.toLowerCase(), value: d.value.trim() });
+          return false;
+        }
+        return true;
+      });
+      if (kept.length === 0) {
+        if (droppedRules.length < 6) droppedRules.push({ selector: item.selector, reason: 'every layout declaration in the rule was fixed-pixel' });
+        continue;
+      }
+      if (isLayoutOnlyRemnant(kept)) {
+        if (droppedRules.length < 6) droppedRules.push({ selector: item.selector, reason: 'reduced to inert layout remnants — no styling content kept' });
+        continue;
+      }
+      keptRuleCount++;
+      out.push({ ...item, declarations: kept });
+    }
+    return out;
+  };
+
+  const kept = walk(items);
+  return { items: kept, stripped, droppedRules, keptRuleCount };
 }

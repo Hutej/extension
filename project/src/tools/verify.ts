@@ -401,13 +401,13 @@ async function assertDomClean(_args: any): Promise<ToolResult> {
 
 export const verifyTools: ToolDef[] = [
   { name: 'snapshot', kind: 'verify', description: 'capture DOM state checksum',
-    args: { selector: 'string?' }, execute: snapshot },
+    args: { selector: 'string? — CSS selector (default whole page)' }, execute: snapshot },
   { name: 'diff', kind: 'verify', description: 'compare two snapshots',
-    args: { before: 'object', after: 'object' }, execute: diff },
+    args: { before: 'object — earlier snapshot result', after: 'object — later snapshot result' }, execute: diff },
   { name: 'checkLayout', kind: 'verify', description: 'check for layout issues (overflow, zero-size, invisible text, collapsed columns)',
     args: {}, execute: checkLayout },
   { name: 'checkContrast', kind: 'verify', description: 'measure text/background contrast ratio',
-    args: { selector: 'string?' }, execute: checkContrast },
+    args: { selector: 'string? — CSS selector (default whole page)' }, execute: checkContrast },
   { name: 'assertDomClean', kind: 'verify', description: 'assert no Revueon traces remain after toggle off',
     args: {}, execute: assertDomClean },
 ];

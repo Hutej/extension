@@ -219,6 +219,55 @@ function serializeResult(entry: JournalEntry): string {
     return `text (${r.text.length} chars${r.truncated ? `, was truncated` : ''}):\n${text}`;
   }
 
+  // inspect — the requested properties ARE the evidence; `k=v` pairs beat
+  // prose. Cascade winners (when requested) name WHAT decides each value —
+  // the anti-churn answer. Without this branch the entire payload serialized
+  // as 'ok' and the model flew blind on every inspect it made.
+  if (entry.tool === 'inspect' && r.properties != null) {
+    const props = Object.entries(r.properties as Record<string, string>)
+      .map(([k, v]) => `${k}=${v}`).join(' ');
+    const parts: string[] = [props];
+    if (r.visible === false) parts.push('NOT VISIBLE');
+    // Only the ancestor-painted case is decision-useful here: it answers
+    // "will my background change be visible" before authoring. When the
+    // element paints its own surface, the properties line already says it.
+    if (r.paintedBackground?.onAncestor) parts.push(`paints against ${r.paintedBackground.color} on an ancestor`);
+    if (r.cascade != null) {
+      const decided: string[] = [];
+      const unresolved: string[] = [];
+      for (const [p, c] of Object.entries(r.cascade as Record<string, any>)) {
+        if (c?.winner) decided.push(`${p} ← ${c.winner} (${c.source}${c.inherited ? ', inherited' : ''})`);
+        else if (c?.note) unresolved.push(`${p}: ${c.note}`);
+      }
+      if (decided.length) parts.push(`decided by: ${decided.join('; ')}`);
+      if (unresolved.length) parts.push(`unresolved: ${unresolved.join('; ')}`);
+    }
+    const orientation = `${r.count}× ${r.tag}${r.verified ? ' [verified]' : ''}`;
+    return `${orientation} — ${parts.join(' — ')}`;
+  }
+
+  // checkContrast — the ratio IS the evidence; a bare 'ok' would discard the
+  // one number the refine decision turns on after a color transformation. The
+  // AA mark is the mechanical WCAG threshold the recovery prompt already
+  // speaks (4.5 normal text / 3.0 large) — an annotation, not a decision.
+  if (entry.tool === 'checkContrast' && r.ratio !== undefined) {
+    if (r.note) return `contrast: ${r.note}`;
+    const mark = r.ratio >= 4.5 ? 'AA ✓' : r.ratio >= 3 ? 'large-text only' : 'below AA';
+    return `contrast ratio ${r.ratio} (fg ${r.fg} on bg ${r.bg}) — ${mark}`;
+  }
+
+  // undo — the outcome IS the evidence: how many acts actually left the page.
+  // A failure must never read as success: the transformation may still be live
+  // on the page, so the line says NO ASSUMPTION OF REVERSAL and forwards the
+  // runtime's own reason verbatim (never fabricated).
+  if (entry.tool === 'undo' && r.undone !== undefined) {
+    if (r.failed > 0) {
+      const partial = r.undone > 0 ? ` (${r.undone} earlier act${r.undone === 1 ? '' : 's'} undone)` : '';
+      return `undo FAILED — ${r.failed} act${r.failed === 1 ? '' : 's'} could not be undone${partial}: ${r.reason ?? 'the runtime reported no reason'}. NO ASSUMPTION OF REVERSAL — the transformation may still be live on the page.`;
+    }
+    return `${r.undone} act${r.undone === 1 ? '' : 's'} undone`;
+  }
+
   // Act results — surface applied status (C) + the effect truth (R1).
   if (r.applied !== undefined) {
     const parts: string[] = [];
@@ -259,6 +308,21 @@ function serializeResult(entry: JournalEntry): string {
       if (sr.broad?.length) bits.push(`broad selectors kept: ${sr.broad.slice(0, 3).map((b: any) => `${b.selector} (${b.count} elements)`).join(', ')}`);
       if (sr.dropped?.length) bits.push(`DROPPED: ${sr.dropped.slice(0, 4).map((d: any) => `${d.selector} — ${d.reason}`).join('; ')}`);
       parts.push(`selectors: ${bits.join(' — ')}`);
+    }
+    // R3-strip report: the PARTIAL application — which fixed-pixel layout
+    // declarations were stripped (exactly what the dominance counter counted)
+    // and which debris rules were dropped whole, with the reason. Without
+    // this the model cannot distinguish fully-applied from stripped-partial
+    // and cannot rewrite ONLY the offending declarations — silent stripping
+    // would ship geometry as removed while the sheet reported success (rule
+    // 12/13). Capped: the first 4 stripped declarations + 3 dropped rules
+    // carry the diagnosis.
+    if (r.responsiveReport) {
+      const rr = r.responsiveReport;
+      const bits: string[] = [`${rr.keptRuleCount} rule(s) kept`];
+      if (rr.stripped?.length) bits.push(`STRIPPED (fixed-pixel layout — stripped, rewrite only these): ${rr.stripped.slice(0, 4).map((s: any) => `${s.selector} { ${s.property}: ${s.value} }`).join('; ')}${rr.stripped.length >= 6 ? ' (+)' : ''}`);
+      if (rr.droppedRules?.length) bits.push(`dropped whole: ${rr.droppedRules.slice(0, 3).map((d: any) => `"${d.selector}" (${d.reason})`).join('; ')}${rr.droppedRules.length >= 6 ? ' (+)' : ''}`);
+      parts.push(`responsive strip: ${bits.join(' — ')}. Rewrite ONLY the stripped declarations with responsive sizing (percentages, fr, auto, minmax(), clamp(), fit-content, Flexbox/Grid) and applyCss again — do not re-author the whole sheet.`);
     }
     if (r.unverified) parts.push('UNVERIFIED target (selector describePage never returned — act on a single live match, not an observed identity)');
     return parts.join(', ');

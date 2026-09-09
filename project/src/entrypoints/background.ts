@@ -83,6 +83,18 @@ export default defineBackground(() => {
       return true;
     }
 
+    // Cascade introspection: inspect(cascade) needs the exact USER-origin CSS
+    // strings this tab currently carries. USER sheets are invisible to
+    // document.styleSheets — this tracker is the only place they exist, so
+    // inspect can attribute a winning declaration to Revueon instead of
+    // reporting "unknown" for every rule we inserted.
+    if (message.action === 'getInsertedCss') {
+      const tabId = sender.tab?.id;
+      if (tabId == null) { sendResponse({ ok: false, error: 'no tab id' }); return; }
+      sendResponse({ ok: true, css: [...(insertedCssByTab.get(tabId) ?? [])] });
+      return;
+    }
+
     // Toggle CSS off/on — called by the content script's toggle handler.
     if (message.action === 'toggleCss') {
       void handleToggleCss(sender.tab?.id, message.on, sendResponse);
