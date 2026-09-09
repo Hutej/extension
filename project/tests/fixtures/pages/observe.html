@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Observation fixture — ordinary documentation page</title>
+</head>
+<body>
+  <header id="top">
+    <h1>Widget Documentation</h1>
+    <nav><a href="/docs">Docs</a><a href="/support">Support</a></nav>
+  </header>
+  <main>
+    <section id="intro">
+      <h2>Introduction</h2>
+      <p>This paragraph explains the widget's public behavior in plain language.</p>
+      <p>Contact us at sentinel.user@example.com for more information.</p>
+    </section>
+    <form id="login-form" aria-label="Sign in">
+      <label for="user">Username</label>
+      <input id="user" name="username" type="text" placeholder="Your username">
+      <label for="pass">Password</label>
+      <input id="pass" name="password" type="password" placeholder="SENTINEL-PASSWORD-VALUE">
+      <label for="mail">Email</label>
+      <input id="mail" name="email" type="email" value="sentinel.email@example.com">
+      <button type="submit" id="go">Sign in</button>
+    </form>
+    <div id="host"></div>
+    <section id="cards">
+      <ul id="card-list">
+        <li class="card">Card one</li>
+        <li class="card">Card two</li>
+        <li class="card">Card three</li>
+      </ul>
+    </section>
+  </main>
+  <footer>© Widget Corp</footer>
+  <script>
+    // Open shadow root with a control inside — a registered root of its own.
+    document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML =
+      '<div id="shadow-box" role="region" aria-label="Widget panel"><button id="shadow-btn">Shadow action</button></div>';
+  </script>
+</body>
+</html>

@@ -310,8 +310,13 @@ const getOperationEnvelope = (
   payload: { command: 'GetOperation', operationId },
 });
 
-const replyError = (reply: Record<string, unknown>): Record<string, unknown> | undefined =>
-  reply.ok === false ? (reply.error as Record<string, unknown>) : undefined;
+const replyError = (reply: Record<string, unknown>): Record<string, unknown> | undefined => {
+  if (reply.ok === false) return reply.error as Record<string, unknown>;
+  // A relayed reply wraps the runtime's own error reply as the receipt.
+  const receipt = reply.receipt as Record<string, unknown> | undefined;
+  if (receipt && receipt.ok === false) return receipt.error as Record<string, unknown>;
+  return undefined;
+};
 
 let workspace: Page | null = null;
 
@@ -436,4 +441,129 @@ test('S2.2: the style-delivery authority is runtime-only on the real path (T21 l
   const err = replyError(reply);
   assert.ok(err, `workspace StageStyle must be denied: ${JSON.stringify(reply)}`);
   assert.equal(err!.code, 'denied');
+});
+
+// ── S3.1: bounded semantic observation (T03/T04/T05 live) ───────────────
+
+const observeEnvelope = (
+  documentKey: CapturedState['documentKey'],
+  expectedRouteEpoch: number,
+  payload: Record<string, unknown>,
+): Record<string, unknown> => ({
+  protocolVersion: 1,
+  requestId: `ws-${Math.random().toString(36).slice(2, 10)}`,
+  kind: 'observe-request',
+  ...(documentKey ? { documentKey } : {}),
+  expectedRouteEpoch,
+  deadlineAt: Date.now() + 10_000,
+  payload,
+});
+
+interface SnapshotRegion {
+  targetRef: string;
+  semantics: { tag: string; role?: string; nameApprox?: string };
+  textSample?: string;
+}
+
+test('S3.1/T04: Observe returns a bounded, privacy-filtered snapshot through the real path', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, tabId } = await openFixture('observe.html');
+  const state = await capturedState(workspace, tabId);
+  const reply = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Observe' }));
+  assert.equal(reply.ok, true, `Observe must be delivered: ${JSON.stringify(reply).slice(0, 300)}`);
+  const snapshot = (reply as { receipt?: { snapshot?: Record<string, unknown> } }).receipt?.snapshot as {
+    schemaVersion: number;
+    regions: SnapshotRegion[];
+    actions: Array<{ kind: string; controlType?: string }>;
+    documentMetadata: { origin: string };
+    roots: Array<{ kind: string }>;
+    coverage: { completed: boolean; visitedNodes: number };
+  };
+  assert.ok(snapshot, 'the relay carries the snapshot');
+  assert.equal(snapshot.schemaVersion, 1);
+  assert.equal(snapshot.coverage.completed, true, 'a small fixture is fully covered');
+  assert.ok(snapshot.regions.length <= 60, 'region budget respected');
+  assert.ok(snapshot.coverage.visitedNodes <= 2_000, 'node budget respected');
+  // T04 sentinels: no private value/name reaches the snapshot, ever.
+  const raw = JSON.stringify(snapshot);
+  assert.equal(raw.includes('SENTINEL-PASSWORD-VALUE'), false, 'the password placeholder must be absent');
+  assert.equal(raw.includes('sentinel.email@example.com'), false, 'the email value must be absent');
+  // The email in VISIBLE page text is residual-redacted, not leaked.
+  const intro = snapshot.regions.find((r) => r.textSample?.includes('Contact us'));
+  assert.ok(intro, 'the intro paragraph is observed');
+  assert.equal(intro.textSample!.includes('sentinel.user@example.com'), false, 'email in text is redacted');
+  assert.match(intro.textSample!, /redacted:email/);
+  // Private controls keep no name context at all.
+  const passwordRegion = snapshot.regions.find((r) => r.semantics.tag === 'input' && (r as { hidden?: boolean }).hidden !== undefined);
+  const passwordAction = snapshot.actions.find((a) => a.controlType === 'password');
+  assert.equal(passwordAction, undefined, 'the password control type is never reported');
+  const passwordInput = snapshot.regions.find((r) => {
+    const a = snapshot.actions.find((act) => act.targetRef === r.targetRef);
+    return a === undefined && r.semantics.tag === 'input';
+  });
+  assert.ok(passwordInput === undefined || passwordInput.semantics.nameApprox === undefined || !passwordInput.semantics.nameApprox.includes('SENTINEL'),
+    'no sentinel name on any input region');
+  // Open shadow root is a registered root of its own (I26).
+  assert.ok(snapshot.roots.some((r) => r.kind === 'shadow-root'), 'the open shadow root is a registered root');
+  const shadowRegion = snapshot.regions.find((r) => r.semantics.nameApprox?.includes('Widget panel'));
+  assert.ok(shadowRegion, 'shadow content is observed in its own root');
+  void page;
+});
+
+test('S3.1/T03: a 10k-node page reports partial coverage with a usable cursor', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { tabId } = await openFixture('observe-large.html');
+  const state = await capturedState(workspace, tabId);
+  const started = Date.now();
+  const reply = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Observe' }));
+  const wallMs = Date.now() - started;
+  const { receipt } = reply as { receipt?: { snapshot?: { coverage: { completed: boolean; reason?: string; nextCursor?: string; visitedNodes: number }; regions: SnapshotRegion[] } } };
+  const snapshot = receipt?.snapshot;
+  assert.ok(snapshot, 'snapshot delivered');
+  assert.equal(snapshot!.coverage.completed, false, '10k nodes are honestly partial');
+  assert.equal(snapshot!.coverage.reason, 'node-budget');
+  assert.ok(snapshot!.coverage.nextCursor, 'a cursor is offered');
+  assert.ok(snapshot!.coverage.visitedNodes <= 2_000, 'node budget holds');
+  assert.ok(wallMs < 3_000, `end-to-end observe latency stays bounded (got ${wallMs}ms)`);
+  assert.equal(snapshot!.regions.length <= 60, true, 'region budget holds');
+
+  // Expansion through the cursor works; a forged cursor is refused.
+  const expand = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Expand', cursor: snapshot!.coverage.nextCursor! }));
+  assert.equal(expand.ok, true, `expansion with a live cursor works: ${JSON.stringify(expand).slice(0, 200)}`);
+  const forged = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Expand', cursor: 'forged:0:99999999999999' }));
+  const err = replyError(forged);
+  assert.ok(err, 'a forged cursor is refused');
+  assert.ok(['stale-route', 'unknown-target'].includes(String(err!.code)), `cursor refusal code: ${err!.code}`);
+});
+
+test('S3.1/T05: Inspect resolves the exact observed node and refuses stale/unknown refs', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, tabId } = await openFixture('observe.html');
+  const state = await capturedState(workspace, tabId);
+  const reply = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Observe' }));
+  const snapshot = (reply as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt?.snapshot;
+  assert.ok(snapshot);
+  const heading = snapshot!.regions.find((r) => r.semantics.tag === 'h1');
+  assert.ok(heading, 'the h1 is observed');
+
+  const facts = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Inspect', targetRef: heading!.targetRef, fields: ['geometry', 'style'] }));
+  assert.equal(facts.ok, true, `inspect resolves the exact ref: ${JSON.stringify(facts).slice(0, 200)}`);
+  const factsBody = (facts as { receipt?: { facts?: { tag?: string; geometry?: { w: number } } } }).receipt?.facts;
+  assert.equal(factsBody?.tag, 'h1');
+  assert.ok(factsBody?.geometry, 'requested fields are returned');
+
+  const unknown = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Inspect', targetRef: 't9999' }));
+  assert.equal(replyError(unknown)?.code, 'unknown-target', 'an unobserved ref is refused');
+
+  // Replace the observed node (site re-render), then inspect again: stale.
+  await page.evaluate(() => {
+    const h1 = document.querySelector('h1')!;
+    const fresh = h1.cloneNode(true) as Element;
+    fresh.textContent = 'Replaced heading';
+    h1.replaceWith(fresh);
+  });
+  const stale = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch, { command: 'Inspect', targetRef: heading!.targetRef }));
+  const staleErr = replyError(stale);
+  assert.ok(staleErr, 'a replaced node must not resolve');
+  assert.equal(staleErr!.code, 'stale-target', 'the exact-node ref goes stale, never re-resolves to a lookalike');
 });

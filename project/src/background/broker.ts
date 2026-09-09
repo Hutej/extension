@@ -80,7 +80,7 @@ const deny = (code: ErrorCode, phase: ErrorPhase, message: string, extra?: Param
 const ID = decodeString({ max: 128, pattern: /^[A-Za-z0-9._:-]+$/ });
 const COMMANDS_BY_TRANSPORT: Record<Envelope['kind'], readonly string[]> = {
   'run-command': ['StartRun', 'CancelRun'],
-  'observe-request': [], // planner→runtime evidence queries arrive with S3
+  'observe-request': ['Observe', 'Inspect', 'Expand'],
   'style-delivery': ['StageStyle', 'RemoveStyle', 'CommitComposition'],
   control: ['RegisterDocument', 'GetOperation', 'RenewLease', 'SaveRevision', 'SetEnabled', 'RemoveCustomization'],
   subscription: ['RuntimeState', 'RunProgress'], // runtime→workspace projections: never routed
@@ -128,6 +128,21 @@ const GET_OPERATION_PAYLOAD = decodeRecord(
 
 const COMMIT_PAYLOAD = decodeRecord(
   { command: decodeLiteral(['CommitComposition']), operationId: ID },
+  { maxDepth: 8 },
+);
+
+const OBSERVE_PAYLOAD = decodeRecord(
+  { command: decodeLiteral(['Observe']) },
+  { maxDepth: 8 },
+);
+
+const INSPECT_PAYLOAD = decodeRecord(
+  { command: decodeLiteral(['Inspect']), targetRef: decodeString({ max: 64, pattern: /^[A-Za-z0-9._-]+$/ }), fields: optional(decodeArray(decodeString({ max: 32 }), 16)) },
+  { maxDepth: 8 },
+);
+
+const EXPAND_PAYLOAD = decodeRecord(
+  { command: decodeLiteral(['Expand']), cursor: decodeString({ max: 256, pattern: /^[A-Za-z0-9._:-]+$/ }) },
   { maxDepth: 8 },
 );
 
@@ -389,31 +404,31 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
         // Relay to the registered runtime and bound the wait. The envelope is
         // forwarded unchanged: the runtime fences it against its own identity
         // (documentKey + expectedRouteEpoch) independently (I04).
-        const budgetMs = Math.max(0, Math.min(envelope.deadlineAt - deps.now(), 5000));
-        let raced = false;
-        const timeout = new Promise<never>((_, reject) => {
-          setTimeout(() => {
-            raced = true;
-            reject(new Error('relay deadline'));
-          }, budgetMs);
-        });
-        try {
-          const reply = await Promise.race([deps.sendToTab(record.documentKey.tabId, envelope), timeout]);
-          if (reply !== null && typeof reply === 'object' && 'ok' in (reply as Record<string, unknown>)) {
-            return { ok: true, kind: 'relayed', receipt: reply as Record<string, unknown> };
-          }
-          return deny('internal', 'reconcile', 'runtime reply was not a well-formed response');
-        } catch (err) {
-          if (raced) {
-            // I06: timeout is unknown, never "not applied".
-            return deny('timeout-unknown', 'deliver', 'the runtime did not answer within the relay budget', {
-              recoveryAction: 'retry the same request id, or re-read document state',
-            });
-          }
-          return deny('stale-document', 'reconcile', `runtime unreachable: ${(err as Error).message}`, {
-            recoveryAction: 'reload the target document so its runtime re-registers',
-          });
+        return relayToRuntime(deps, record.documentKey.tabId, envelope);
+      }
+
+      case 'Observe':
+      case 'Inspect':
+      case 'Expand': {
+        const resolved = resolveDocument(envelope);
+        if (!('record' in resolved)) return resolved;
+        // Per-command payload validation (bounded, kind-specific).
+        if (envelope.kind !== 'observe-request') {
+          return deny('invalid-schema', 'decode', `${command} requires the observe-request transport kind`);
         }
+        if (command === 'Observe') {
+          const p = OBSERVE_PAYLOAD(envelope.payload, 'payload');
+          if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        } else if (command === 'Inspect') {
+          const p = INSPECT_PAYLOAD(envelope.payload, 'payload');
+          if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        } else {
+          const p = EXPAND_PAYLOAD(envelope.payload, 'payload');
+          if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        }
+        // Observation executes in the registered runtime, which owns the
+        // snapshot/cursor/target registry. Relay is deadline-bounded (I06).
+        return relayToRuntime(deps, resolved.record.documentKey.tabId, envelope);
       }
 
       case 'StageStyle': {
@@ -528,6 +543,43 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
 
 function stylesFor(deps: BrokerDeps): StyleDelivery {
   return deps.styles;
+}
+
+/** Deadline-bounded relay of a page-scoped command to the registered
+ *  runtime. The envelope is forwarded unchanged: the runtime fences it
+ *  against its own identity (documentKey + expectedRouteEpoch) (I04). A
+ *  timeout is unknown, never "not applied" (I06). */
+function relayToRuntime(
+  deps: BrokerDeps,
+  tabId: number,
+  envelope: Envelope,
+): Promise<BrokerReply> {
+  const budgetMs = Math.max(0, Math.min(envelope.deadlineAt - deps.now(), 5000));
+  let raced = false;
+  const timeout = new Promise<never>((_, reject) => {
+    setTimeout(() => {
+      raced = true;
+      reject(new Error('relay deadline'));
+    }, budgetMs);
+  });
+  return (async () => {
+    try {
+      const reply = await Promise.race([deps.sendToTab(tabId, envelope), timeout]);
+      if (reply !== null && typeof reply === 'object' && 'ok' in (reply as Record<string, unknown>)) {
+        return { ok: true, kind: 'relayed', receipt: reply as Record<string, unknown> };
+      }
+      return deny('internal', 'reconcile', 'runtime reply was not a well-formed response');
+    } catch (err) {
+      if (raced) {
+        return deny('timeout-unknown', 'deliver', 'the runtime did not answer within the relay budget', {
+          recoveryAction: 'retry the same request id, or re-read document state',
+        });
+      }
+      return deny('stale-document', 'reconcile', `runtime unreachable: ${(err as Error).message}`, {
+        recoveryAction: 'reload the target document so its runtime re-registers',
+      });
+    }
+  })();
 }
 
 function styleReplyToBrokerReply(reply: Awaited<ReturnType<StyleDelivery['stage']>>): BrokerReply {

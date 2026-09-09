@@ -33,12 +33,16 @@ import {
   decodeEnvelope,
   decodeRecord,
   decodeString,
+  decodeLiteral,
+  decodeArray,
   decodeFiniteNumber,
+  optional,
   type DocumentKey,
   type Envelope,
   type ErrorRecord,
   type SenderLike,
 } from '../contracts.ts';
+import { createObservationEngine, type ObservationEngine } from './observe.ts';
 
 // ── serial queue (plan/06 §2 boundary 1) ─────────────────────────────────
 
@@ -273,8 +277,9 @@ const HANDSHAKE_RETRIES = 5;
 const HANDSHAKE_RETRY_MS = 200;
 const RELAY_BUDGET_MS = 5000;
 
-/** Runtime-inbound command kinds (S2.1 vertical: receipt lookup only). */
-const RUNTIME_INBOUND_COMMANDS = new Set(['GetOperation']);
+/** Runtime-inbound command kinds: receipt lookup (S2.1) and bounded
+ *  observation (S3.1 — the runtime owns the snapshot/cursor/target registry). */
+const RUNTIME_INBOUND_COMMANDS = new Set(['GetOperation', 'Observe', 'Inspect', 'Expand']);
 
 function randomInstanceId(): string {
   // crypto.randomUUID needs a secure context; getRandomValues does not.
@@ -338,6 +343,24 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
   const core = createSessionCore();
   const queue = createTaskQueue();
   let disposed = false;
+
+  // S3.1: the runtime owns observation — bounded snapshots, cursors and the
+  // target registry live here for this document's lifetime.
+  const observation: ObservationEngine = createObservationEngine({
+    doc: document,
+    epoch: () => core.routeEpoch(),
+    now: () => Date.now(),
+    randomId: randomInstanceId,
+  });
+
+  const INSPECT_PAYLOAD = decodeRecord(
+    { command: decodeLiteral(['Inspect']), targetRef: decodeString({ max: 64, pattern: /^[A-Za-z0-9._-]+$/ }), fields: optional(decodeArray(decodeString({ max: 32 }), 16)) },
+    { maxDepth: 8 },
+  );
+  const EXPAND_PAYLOAD = decodeRecord(
+    { command: decodeLiteral(['Expand']), cursor: decodeString({ max: 256, pattern: /^[A-Za-z0-9._:-]+$/ }) },
+    { maxDepth: 8 },
+  );
 
   const register = async (): Promise<boolean> => {
     for (let attempt = 0; attempt < HANDSHAKE_RETRIES; attempt++) {
@@ -432,7 +455,11 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
 
     const payloadCommand = (envelope.payload as Record<string, unknown>).command;
     const command = typeof payloadCommand === 'string' ? payloadCommand : '';
-    if (!RUNTIME_INBOUND_COMMANDS.has(command) || !senderMayInvoke(role, command)) return false;
+    // A broker-role sender is a trusted relay: the broker verified the
+    // originator's role against the same allowlist before forwarding
+    // (plan/06 §1 hops). Direct workspace senders still pass the allowlist.
+    if (!RUNTIME_INBOUND_COMMANDS.has(command)) return false;
+    if (role !== 'broker' && !senderMayInvoke(role, command)) return false;
 
     const fence = core.fence(envelope);
     if (fence) {
@@ -456,6 +483,43 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
         },
       });
       return false;
+    }
+
+    // S3.1 observation commands run through the serial queue at observation
+    // priority (plan/06 §2): bounded, cooperative, cancellable.
+    if (command === 'Observe' || command === 'Inspect' || command === 'Expand') {
+      void queue
+        .submit(QUEUE_PRIORITY.observation, () => {
+          if (disposed) throw new Error('runtime disposed');
+          if (command === 'Observe') {
+            return { ok: true, kind: 'snapshot', snapshot: observation.collectSnapshot() };
+          }
+          if (command === 'Expand') {
+            const p = EXPAND_PAYLOAD(envelope.payload, 'payload');
+            if (!p.ok) return { ok: false, kind: 'error', error: sessionError('invalid-schema', 'malformed expand payload') };
+            const r = observation.expand(p.value.cursor);
+            return r.ok
+              ? { ok: true, kind: 'snapshot', snapshot: r.snapshot }
+              : { ok: false, kind: 'error', error: sessionError(r.reason === 'stale' ? 'stale-route' : 'unknown-target', r.detail, 're-observe for a fresh cursor') };
+          }
+          const p = INSPECT_PAYLOAD(envelope.payload, 'payload');
+          if (!p.ok) return { ok: false, kind: 'error', error: sessionError('invalid-schema', 'malformed inspect payload') };
+          const r = observation.inspect(p.value.targetRef, p.value.fields ?? []);
+          return r.ok
+            ? { ok: true, kind: 'facts', facts: r.facts }
+            : { ok: false, kind: 'error', error: sessionError(r.reason === 'stale' ? 'stale-target' : 'unknown-target', r.detail, 're-observe to refresh target refs') };
+        })
+        .then(
+          (reply) => {
+            try { sendResponse(reply); } catch { /* channel gone */ }
+          },
+          (err: unknown) => {
+            try {
+              sendResponse({ ok: false, kind: 'error', error: sessionError('internal', `observation failed: ${err instanceof Error ? err.message : String(err)}`) });
+            } catch { /* channel gone */ }
+          },
+        );
+      return true; // async response
     }
     return false;
   };

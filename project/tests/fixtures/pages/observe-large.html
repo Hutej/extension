@@ -1,0 +1,26 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Large observation fixture — 10k nodes</title>
+</head>
+<body>
+  <main id="root">
+    <h1>Large page</h1>
+    <div id="filler"></div>
+  </main>
+  <script>
+    // Deterministic 10,000-node filler: 100 sections × 100 paragraphs.
+    // No randomness — snapshot determinism requires a frozen, fixed DOM.
+    const filler = document.getElementById('filler');
+    const parts = [];
+    for (let s = 0; s < 100; s++) {
+      let html = `<section id="s${s}"><h2>Section ${s}</h2>`;
+      for (let p = 0; p < 100; p++) html += `<p class="row">Paragraph ${s}-${p} with some text content.</p>`;
+      html += '</section>';
+      parts.push(html);
+    }
+    filler.innerHTML = parts.join('');
+  </script>
+</body>
+</html>

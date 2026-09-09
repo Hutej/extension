@@ -38,6 +38,7 @@ export const EXPECTED_UNIT_SUITES = [
   'runtime-session.test.ts',
   'styles.test.ts',
   'token-scope.test.ts',
+  'targets.test.ts',
   'gate.test.ts',
   'known-defects.test.ts',
 ];
