@@ -416,3 +416,24 @@ test('S2.1: after reload, the old runtime instance is deterministically rejected
   const fresh = await workspaceSend(workspace, getOperationEnvelope(newState.documentKey!, newState.routeEpoch!, 'op-fresh'));
   assert.equal(fresh.ok, true, `fresh instance must be reachable: ${JSON.stringify(fresh)}`);
 });
+
+test('S2.2: the style-delivery authority is runtime-only on the real path (T21 live)', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { tabId } = await openFixture('v2-vertical.html');
+  const state = await capturedState(workspace, tabId);
+  const dk = state.documentKey!;
+  // StageStyle is a runtime→broker command (plan/06 §1): a workspace sender
+  // is denied even though it is a trusted extension context.
+  const reply = await workspaceSend(workspace, {
+    protocolVersion: 1,
+    requestId: `ws-${Math.random().toString(36).slice(2, 10)}`,
+    kind: 'style-delivery',
+    documentKey: dk,
+    expectedRouteEpoch: state.routeEpoch,
+    deadlineAt: Date.now() + 10_000,
+    payload: { command: 'StageStyle', operationId: 'op-browser-1', namespace: 'rv2.t.r.g.d', css: '#target { color: red; }' },
+  });
+  const err = replyError(reply);
+  assert.ok(err, `workspace StageStyle must be denied: ${JSON.stringify(reply)}`);
+  assert.equal(err!.code, 'denied');
+});

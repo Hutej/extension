@@ -42,6 +42,7 @@ import {
   type ErrorPhase,
   type SenderLike,
 } from '../contracts.ts';
+import { createChromeStyleDelivery, type StyleDelivery, type StageOrder } from './styles.ts';
 
 // ── replies ──────────────────────────────────────────────────────────────
 
@@ -80,7 +81,7 @@ const ID = decodeString({ max: 128, pattern: /^[A-Za-z0-9._:-]+$/ });
 const COMMANDS_BY_TRANSPORT: Record<Envelope['kind'], readonly string[]> = {
   'run-command': ['StartRun', 'CancelRun'],
   'observe-request': [], // planner→runtime evidence queries arrive with S3
-  'style-delivery': [], // StageStyle/RemoveStyle/CommitComposition arrive with S2.2
+  'style-delivery': ['StageStyle', 'RemoveStyle', 'CommitComposition'],
   control: ['RegisterDocument', 'GetOperation', 'RenewLease', 'SaveRevision', 'SetEnabled', 'RemoveCustomization'],
   subscription: ['RuntimeState', 'RunProgress'], // runtime→workspace projections: never routed
 };
@@ -125,6 +126,31 @@ const GET_OPERATION_PAYLOAD = decodeRecord(
   { maxDepth: 8 },
 );
 
+const COMMIT_PAYLOAD = decodeRecord(
+  { command: decodeLiteral(['CommitComposition']), operationId: ID },
+  { maxDepth: 8 },
+);
+
+const STAGE_STYLE_PAYLOAD = decodeRecord(
+  {
+    command: decodeLiteral(['StageStyle']),
+    operationId: ID,
+    namespace: decodeString({ max: 200, pattern: /^[A-Za-z0-9._-]+$/ }),
+    css: decodeString({ max: 262_144 }),
+    rootId: optional(decodeString({ max: 128, pattern: /^[A-Za-z0-9._-]+$/ })),
+  },
+  { maxDepth: 8 },
+);
+
+const REMOVE_STYLE_PAYLOAD = decodeRecord(
+  {
+    command: decodeLiteral(['RemoveStyle']),
+    operationId: ID,
+    css: optional(decodeString({ max: 262_144 })),
+  },
+  { maxDepth: 8 },
+);
+
 function firstIssue(issues: { path: string; message: string }[]): string {
   const i = issues[0];
   return i ? `${i.path}: ${i.message}` : 'undecodable message';
@@ -153,6 +179,8 @@ export interface BrokerDeps {
   sendToTab(tabId: number, message: unknown): Promise<unknown>;
   persistRegistry(records: DocumentRecord[]): Promise<void>;
   loadRegistry(): Promise<DocumentRecord[]>;
+  /** Privileged CSS delivery (plan/03 background/styles) — S2.2. */
+  styles: StyleDelivery;
 }
 
 export interface BrokerCore {
@@ -335,6 +363,29 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
         const record = resolved.record;
         const p = GET_OPERATION_PAYLOAD(envelope.payload, 'payload');
         if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        // Style-delivery receipts live in the broker ledger (T14: a lost ack
+        // is reconciled through GetOperation, never by blind re-execution).
+        const styleReceipt = deps.styles.receiptFor(p.value.operationId);
+        if (styleReceipt) {
+          const status = styleReceipt.state === 'inserted' ? 'applied-provisional'
+            : styleReceipt.state === 'unknown' || styleReceipt.state === 'staging' ? 'outcome-unknown'
+            : 'rolled-back';
+          return {
+            ok: true,
+            kind: 'relayed',
+            receipt: {
+              ok: true,
+              receipt: {
+                requestId: envelope.requestId,
+                operationId: p.value.operationId,
+                payloadDigest: styleReceipt.payloadDigest,
+                status,
+                currentEpoch: { routeEpoch: record.routeEpoch, domRevision: 0, customizationRevision: 0, viewportRevision: 0 },
+                ...(styleReceipt.error ? { error: { code: 'internal', phase: 'deliver', retryClass: 'retryable-same-id', message: styleReceipt.error } } : {}),
+              },
+            },
+          };
+        }
         // Relay to the registered runtime and bound the wait. The envelope is
         // forwarded unchanged: the runtime fences it against its own identity
         // (documentKey + expectedRouteEpoch) independently (I04).
@@ -365,6 +416,41 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
         }
       }
 
+      case 'StageStyle': {
+        const resolved = resolveDocument(envelope);
+        if (!('record' in resolved)) return resolved;
+        const p = STAGE_STYLE_PAYLOAD(envelope.payload, 'payload');
+        if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        const order: StageOrder = {
+          operationId: p.value.operationId,
+          namespace: p.value.namespace,
+          css: p.value.css,
+          documentKey: resolved.record.documentKey,
+          ...(p.value.rootId !== undefined ? { rootId: p.value.rootId } : {}),
+        };
+        return styleReplyToBrokerReply(await deps.styles.stage(order));
+      }
+
+      case 'RemoveStyle': {
+        const resolved = resolveDocument(envelope);
+        if (!('record' in resolved)) return resolved;
+        const p = REMOVE_STYLE_PAYLOAD(envelope.payload, 'payload');
+        if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        return styleReplyToBrokerReply(await deps.styles.remove(
+          p.value.operationId,
+          resolved.record.documentKey,
+          p.value.css,
+        ));
+      }
+
+      case 'CommitComposition': {
+        const resolved = resolveDocument(envelope);
+        if (!('record' in resolved)) return resolved;
+        const p = COMMIT_PAYLOAD(envelope.payload, 'payload');
+        if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        return styleReplyToBrokerReply(await deps.styles.commit(p.value.operationId, resolved.record.documentKey));
+      }
+
       case 'RenewLease':
       case 'SaveRevision':
       case 'SetEnabled':
@@ -389,6 +475,8 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
           record.documentKey.browserDocumentId !== currentDocumentId
         ) {
           registry.delete(key);
+          // Delivered sheets die with the document; record terminal receipts.
+          deps.styles.documentDestroyed(record.documentKey);
         }
       }
     }
@@ -421,6 +509,7 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
     for (const [key, record] of registry) {
       if (record.documentKey.tabId === tabId) {
         registry.delete(key);
+        deps.styles.documentDestroyed(record.documentKey);
         removed += 1;
       }
     }
@@ -434,6 +523,29 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
     tabClosed,
     records: () => [...registry.values()],
     hydrated: hydrate,
+  };
+}
+
+function stylesFor(deps: BrokerDeps): StyleDelivery {
+  return deps.styles;
+}
+
+function styleReplyToBrokerReply(reply: Awaited<ReturnType<StyleDelivery['stage']>>): BrokerReply {
+  if (reply.ok) {
+    if (reply.kind === 'committed') {
+      return { ok: true, kind: 'relayed', receipt: { ok: true, receipt: { operationId: reply.operationId, status: 'accepted', promotedNamespace: reply.promotedNamespace } } };
+    }
+    return { ok: true, kind: 'relayed', receipt: { ok: true, receipt: { operationId: reply.operationId, status: reply.receiptStatus, deliveryState: reply.state } } };
+  }
+  return {
+    ok: false,
+    kind: 'error',
+    error: errorRecord(
+      reply.code as ErrorCode,
+      'deliver',
+      reply.message,
+      reply.recoveryAction ? { recoveryAction: reply.recoveryAction } : undefined,
+    ),
   };
 }
 
@@ -486,8 +598,12 @@ export function installBroker(): void {
       const stored = await chrome.storage.session.get(REGISTRY_KEY);
       return (stored[REGISTRY_KEY] as DocumentRecord[] | undefined) ?? [];
     },
+    styles: createChromeStyleDelivery(),
   };
   const core = createBrokerCore(deps);
+  // Startup reconciliation: exact-clean uncertain/staging intents before any
+  // new delivery (plan/03: recover uncertain intent by exact cleanup).
+  void core.hydrated().then(() => stylesFor(deps).reconcile());
 
   chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
     if (!isV2EnvelopeShape(raw)) return false; // legacy dispatcher owns these

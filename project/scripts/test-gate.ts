@@ -36,6 +36,8 @@ export const EXPECTED_UNIT_SUITES = [
   'trust.test.ts',
   'broker.test.ts',
   'runtime-session.test.ts',
+  'styles.test.ts',
+  'token-scope.test.ts',
   'gate.test.ts',
   'known-defects.test.ts',
 ];

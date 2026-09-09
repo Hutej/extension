@@ -14,6 +14,7 @@ import assert from 'node:assert/strict';
 import { createBrokerCore, type BrokerDeps, type BrokerReply } from '../../src/background/broker.ts';
 import type { DocumentKey, SenderLike } from '../../src/contracts.ts';
 import type { DocumentRecord } from '../../src/background/broker.ts';
+import type { StageOrder, StyleDelivery } from '../../src/background/styles.ts';
 
 const OWN_ID = 'revueon-test-extension-id';
 
@@ -21,6 +22,20 @@ const OWN_ID = 'revueon-test-extension-id';
 
 function makeDeps(overrides: Partial<BrokerDeps> = {}): BrokerDeps {
   let n = 0;
+  const recorded: StageOrder[] = [];
+  const styles: StyleDelivery = {
+    stage: async (order) => {
+      recorded.push(order);
+      return { ok: true, kind: 'staged', operationId: order.operationId, state: 'inserted', receiptStatus: 'applied-provisional' };
+    },
+    remove: async () => ({ ok: true, kind: 'removed', operationId: '', state: 'removed', receiptStatus: 'rolled-back' }),
+    commit: async () => ({ ok: true, kind: 'committed', operationId: '', promotedNamespace: 'ns' }),
+    cancelNamespace: async () => ({ ok: true, kind: 'removed', operationId: '', state: 'removed', receiptStatus: 'rolled-back' }),
+    receiptFor: () => undefined,
+    documentDestroyed: () => 0,
+    reconcile: async () => 0,
+    intents: () => [],
+  };
   return {
     ownExtensionId: OWN_ID,
     now: () => 10_000,
@@ -28,6 +43,7 @@ function makeDeps(overrides: Partial<BrokerDeps> = {}): BrokerDeps {
     sendToTab: async () => ({ ok: true, kind: 'relayed', receipt: {} }),
     persistRegistry: async () => {},
     loadRegistry: async () => [],
+    styles,
     ...overrides,
   };
 }
@@ -49,6 +65,8 @@ const runtimeSender = (over: Partial<SenderLike> = {}): SenderLike => ({
 });
 
 const foreignSender: SenderLike = { id: 'other-extension-id', origin: 'chrome-extension://other-extension-id' };
+
+const CSS_X = '#x { color: rebeccapurple; }';
 
 const envelope = (over: Record<string, unknown> = {}): Record<string, unknown> => ({
   protocolVersion: 1,
@@ -356,4 +374,110 @@ test('tab destruction releases registry entries', async () => {
     expectedRouteEpoch: 0,
   }));
   assert.equal(errCode(reply), 'unknown-target');
+});
+
+// ── S2.2: style-delivery routing (runtime → broker, fenced) ─────────────
+
+test('S2.2: StageStyle routes to the delivery module with the registry-resolved identity', async () => {
+  const staged: StageOrder[] = [];
+  const core = createBrokerCore(makeDeps({
+    styles: {
+      ...makeDeps().styles,
+      stage: async (order) => {
+        staged.push(order);
+        return { ok: true, kind: 'staged', operationId: order.operationId, state: 'inserted', receiptStatus: 'applied-provisional' };
+      },
+    },
+  }));
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  const reply = await core.handleMessage(runtimeSender(), envelope({
+    kind: 'style-delivery',
+    payload: { command: 'StageStyle', operationId: 'op-1', namespace: 'rv2.t.r.g.d', css: '#a{color:red}' },
+    documentKey: { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' },
+    expectedRouteEpoch: 0,
+  }));
+  assert.ok(reply && reply.ok && reply.kind === 'relayed', `StageStyle must be delivered: ${JSON.stringify(reply)}`);
+  assert.equal(staged.length, 1);
+  assert.deepEqual(staged[0].documentKey, { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' });
+});
+
+test('S2.2/T21: a workspace sender may not stage styles (runtime-only authority)', async () => {
+  const core = createBrokerCore(makeDeps());
+  const reply = await core.handleMessage(workspaceSender, envelope({
+    kind: 'style-delivery',
+    payload: { command: 'StageStyle', operationId: 'op-1', namespace: 'rv2.t.r.g.d', css: '#a{color:red}' },
+  }));
+  assert.equal(errCode(reply), 'denied');
+});
+
+test('S2.2/T08: a stale-instance StageStyle never reaches the delivery module', async () => {
+  const staged: StageOrder[] = [];
+  const core = createBrokerCore(makeDeps({
+    styles: {
+      ...makeDeps().styles,
+      stage: async (order) => {
+        staged.push(order);
+        return { ok: true, kind: 'staged', operationId: order.operationId, state: 'inserted', receiptStatus: 'applied-provisional' };
+      },
+    },
+  }));
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-2' } }));
+  const reply = await core.handleMessage(runtimeSender(), envelope({
+    kind: 'style-delivery',
+    payload: { command: 'StageStyle', operationId: 'op-1', namespace: 'rv2.t.r.g.d', css: '#a{color:red}' },
+    documentKey: { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' },
+    expectedRouteEpoch: 0,
+  }));
+  assert.equal(errCode(reply), 'stale-document');
+  assert.equal(staged.length, 0, 'no delivery for a replaced runtime instance');
+});
+
+test('S2.2: RemoveStyle and CommitComposition route to the delivery module', async () => {
+  const removed: Array<{ operationId: string; css?: string }> = [];
+  const committed: string[] = [];
+  const core = createBrokerCore(makeDeps({
+    styles: {
+      ...makeDeps().styles,
+      remove: async (operationId, _dk, css) => {
+        removed.push({ operationId, css });
+        return { ok: true, kind: 'removed', operationId, state: 'removed', receiptStatus: 'rolled-back' };
+      },
+      commit: async (operationId) => {
+        committed.push(operationId);
+        return { ok: true, kind: 'committed', operationId, promotedNamespace: 'rv2.t.r.g.d' };
+      },
+    },
+  }));
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  const dk = { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' };
+  const rm = await core.handleMessage(runtimeSender(), envelope({
+    kind: 'style-delivery', payload: { command: 'RemoveStyle', operationId: 'op-9', css: CSS_X }, documentKey: dk, expectedRouteEpoch: 0,
+  }));
+  assert.ok(rm && rm.ok && rm.kind === 'relayed');
+  assert.deepEqual(removed[0], { operationId: 'op-9', css: CSS_X });
+  const cm = await core.handleMessage(runtimeSender(), envelope({
+    kind: 'style-delivery', payload: { command: 'CommitComposition', operationId: 'op-1' }, documentKey: dk, expectedRouteEpoch: 0,
+  }));
+  assert.ok(cm && cm.ok && cm.kind === 'relayed');
+  assert.deepEqual(committed, ['op-1']);
+});
+
+test('S2.2: GetOperation prefers the broker style ledger (lost-ack reconciliation)', async () => {
+  const core = createBrokerCore(makeDeps({
+    styles: {
+      ...makeDeps().styles,
+      receiptFor: (operationId) => operationId === 'op-style-1'
+        ? { operationId, payloadDigest: 'd1', namespace: 'ns', documentKey: { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' }, css: 'x', rootId: 'document', recordedAt: 1, state: 'unknown' as const, error: 'insertCSS did not resolve within the delivery budget' }
+        : undefined,
+    },
+  }));
+  await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
+  const dk = { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' };
+  const reply = await core.handleMessage(workspaceSender, envelope({
+    payload: { command: 'GetOperation', operationId: 'op-style-1' }, documentKey: dk, expectedRouteEpoch: 0,
+  }));
+  assert.ok(reply && reply.ok && reply.kind === 'relayed');
+  const receipt = (reply as unknown as { receipt: { receipt: { status: string } } }).receipt.receipt;
+  assert.equal(receipt.status, 'outcome-unknown', 'the ledger receipt answers without relaying to a possibly-dead runtime');
 });
