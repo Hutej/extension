@@ -31,6 +31,7 @@ import {
   classifySender,
   senderMayInvoke,
   decodeEnvelope,
+  decodeOperationBatch,
   decodeRecord,
   decodeString,
   decodeLiteral,
@@ -43,6 +44,10 @@ import {
   type SenderLike,
 } from '../contracts.ts';
 import { createObservationEngine, type ObservationEngine } from './observe.ts';
+import { createTargetRegistry } from './targets.ts';
+import { createTokenScope } from './styles.ts';
+import { createContentCreator } from './content.ts';
+import { createTransaction, type BatchReceipt, type StyleClient, type StyleOutcome } from './transaction.ts';
 
 // ── serial queue (plan/06 §2 boundary 1) ─────────────────────────────────
 
@@ -277,9 +282,9 @@ const HANDSHAKE_RETRIES = 5;
 const HANDSHAKE_RETRY_MS = 200;
 const RELAY_BUDGET_MS = 5000;
 
-/** Runtime-inbound command kinds: receipt lookup (S2.1) and bounded
- *  observation (S3.1 — the runtime owns the snapshot/cursor/target registry). */
-const RUNTIME_INBOUND_COMMANDS = new Set(['GetOperation', 'Observe', 'Inspect', 'Expand']);
+/** Runtime-inbound command kinds: receipt lookup (S2.1), bounded observation
+ *  (S3.1) and one-batch application (S4.2 — the runtime owns the transaction). */
+const RUNTIME_INBOUND_COMMANDS = new Set(['GetOperation', 'Observe', 'Inspect', 'Expand', 'ApplyBatch']);
 
 function randomInstanceId(): string {
   // crypto.randomUUID needs a secure context; getRandomValues does not.
@@ -345,12 +350,91 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
   let disposed = false;
 
   // S3.1: the runtime owns observation — bounded snapshots, cursors and the
-  // target registry live here for this document's lifetime.
-  const observation: ObservationEngine = createObservationEngine({
+  // target registry live here for this document's lifetime. The registry is
+  // SHARED: ApplyBatch (S4.2) resolves the exact nodes Observe registered.
+  const targets = createTargetRegistry();
+  const observation: ObservationEngine = createObservationEngine(
+    {
+      doc: document,
+      epoch: () => core.routeEpoch(),
+      now: () => Date.now(),
+      randomId: randomInstanceId,
+    },
+    targets,
+  );
+
+  // Persisted non-secret installation id (plan/08 §3 namespace component).
+  const installationId = (): string => {
+    try {
+      const KEY = 'rv2-installation-id';
+      const existing = localStorage.getItem(KEY);
+      if (existing) return existing.replace(/[^A-Za-z0-9_-]/g, '').slice(0, 24);
+      const fresh = randomInstanceId().replace(/-/g, '').slice(0, 24);
+      localStorage.setItem(KEY, fresh);
+      return fresh;
+    } catch {
+      return randomInstanceId().replace(/-/g, '').slice(0, 24); // storage unavailable — per-session id
+    }
+  };
+
+  // Runtime→broker style delivery client (plan/06 §1: StageStyle/
+  // RemoveStyle/CommitComposition are runtime-sender commands).
+  const sendStyleCommand = async (payload: Record<string, unknown>): Promise<StyleOutcome> => {
+    const envelope: Envelope = {
+      protocolVersion: 1,
+      requestId: randomInstanceId(),
+      kind: 'style-delivery',
+      ...(core.documentKey() ? { documentKey: core.documentKey()! } : {}),
+      expectedRouteEpoch: core.routeEpoch(),
+      deadlineAt: Date.now() + 15_000,
+      payload,
+    };
+    const reply = (await chrome.runtime.sendMessage(envelope)) as Record<string, unknown> | null;
+    const receipt = (reply && typeof reply === 'object' ? (reply as { receipt?: Record<string, unknown> }).receipt : undefined) as Record<string, unknown> | undefined;
+    const inner = (receipt && typeof receipt === 'object' ? (receipt as { receipt?: Record<string, unknown> }).receipt : undefined) as Record<string, unknown> | undefined;
+    const error = (reply && typeof reply === 'object' ? (reply as { error?: Record<string, unknown> }).error : undefined) as Record<string, unknown> | undefined;
+    if (error) return { ok: false, code: String(error.code ?? 'internal'), message: String(error.message ?? 'style delivery refused') };
+    const status = String(inner?.status ?? '');
+    const state = String(inner?.deliveryState ?? '');
+    if (status === 'applied-provisional') return { ok: true, state: state === 'unknown' || state === 'staging' ? 'unknown' : 'inserted' };
+    if (status === 'outcome-unknown') return { ok: true, state: 'unknown' };
+    if (status === 'rolled-back') return { ok: true, state: 'removed' };
+    if (status === 'accepted') return { ok: true, state: 'committed' };
+    return { ok: false, code: 'internal', message: `unexpected style-delivery reply: ${JSON.stringify(reply).slice(0, 200)}` };
+  };
+  const styleClient: StyleClient = {
+    stage: (order) => sendStyleCommand({ command: 'StageStyle', operationId: order.operationId, namespace: order.namespace, css: order.css, ...(order.rootId !== undefined ? { rootId: order.rootId } : {}) }),
+    remove: (operationId, css) => sendStyleCommand(css !== undefined ? { command: 'RemoveStyle', operationId, css } : { command: 'RemoveStyle', operationId }),
+    commit: (operationId) => sendStyleCommand({ command: 'CommitComposition', operationId }),
+  };
+
+  // S4.2: the one-batch transaction — the runtime's only mutation path (I03:
+  // the legacy dispatcher remains the only OTHER mutation owner until the
+  // plan/19 cutover disables it).
+  const tokens = createTokenScope(document);
+  const transaction = createTransaction({
     doc: document,
-    epoch: () => core.routeEpoch(),
+    targets,
+    tokens,
+    content: createContentCreator(document),
+    routeEpoch: () => core.routeEpoch(),
+    documentKey: () => core.documentKey(),
     now: () => Date.now(),
     randomId: randomInstanceId,
+    installationId,
+    styleClient,
+    settle: () =>
+      new Promise<void>((resolve) => {
+        let done = false;
+        const finish = (): void => {
+          if (!done) {
+            done = true;
+            resolve();
+          }
+        };
+        requestAnimationFrame(() => requestAnimationFrame(finish));
+        setTimeout(finish, 250); // bounded even when rAF never fires
+      }),
   });
 
   const INSPECT_PAYLOAD = decodeRecord(
@@ -360,6 +444,23 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
   const EXPAND_PAYLOAD = decodeRecord(
     { command: decodeLiteral(['Expand']), cursor: decodeString({ max: 256, pattern: /^[A-Za-z0-9._:-]+$/ }) },
     { maxDepth: 8 },
+  );
+
+  const ID_FIELD = decodeString({ max: 128, pattern: /^[A-Za-z0-9._:-]+$/ });
+  const APPLY_BATCH_PAYLOAD = decodeRecord(
+    {
+      command: decodeLiteral(['ApplyBatch']),
+      batch: decodeRecord(
+        {
+          batchId: ID_FIELD,
+          customizationId: ID_FIELD,
+          revisionId: ID_FIELD,
+          operations: (ov: unknown, opath = 'operations') => decodeOperationBatch(ov, opath),
+        },
+        { maxDepth: 32 },
+      ),
+    },
+    { maxDepth: 32 },
   );
 
   const register = async (): Promise<boolean> => {
@@ -467,10 +568,14 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
       return false;
     }
     if (command === 'GetOperation') {
-      // S2.1 retains no operation receipts yet: answer honestly that the id
-      // resolves to nothing here (plan/06 §4 — an unknown id is never
-      // executed blindly).
+      // S4.2: the runtime retains operation receipts — a lost Apply reply is
+      // reconciled by receipt lookup, never by re-execution (plan/06 §4).
       const operationId = (envelope.payload as Record<string, unknown>).operationId;
+      const retained = typeof operationId === 'string' ? transaction.receiptFor(operationId) : undefined;
+      if (retained) {
+        sendResponse({ ok: true, kind: 'receipt', receipt: retained });
+        return false;
+      }
       sendResponse({
         ok: false,
         kind: 'error',
@@ -483,6 +588,30 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
         },
       });
       return false;
+    }
+
+    // S4.2: one proposal is one ordered batch — it runs through the serial
+    // queue at apply priority, fenced and cancellable at every await.
+    if (command === 'ApplyBatch') {
+      const p = APPLY_BATCH_PAYLOAD(envelope.payload, 'payload');
+      if (!p.ok) {
+        sendResponse({ ok: false, kind: 'error', error: sessionError('invalid-schema', `malformed ApplyBatch payload: ${p.issues[0].path}: ${p.issues[0].message}`) });
+        return false;
+      }
+      const batch = p.value.batch;
+      void queue
+        .submit(QUEUE_PRIORITY.apply, (signal) => transaction.applyBatch(batch, signal))
+        .then(
+          (receipt: BatchReceipt) => {
+            try { sendResponse({ ok: true, kind: 'receipt', receipt }); } catch { /* channel gone */ }
+          },
+          (err: unknown) => {
+            try {
+              sendResponse({ ok: false, kind: 'error', error: sessionError('internal', `apply failed: ${err instanceof Error ? err.message : String(err)}`) });
+            } catch { /* channel gone */ }
+          },
+        );
+      return true; // async response
     }
 
     // S3.1 observation commands run through the serial queue at observation

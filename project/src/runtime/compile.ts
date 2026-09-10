@@ -466,7 +466,7 @@ export function compileStyleOperation(input: CompileStyleInput): CompileStyleRes
     return { ok: false, diagnostics: [{ path: 'sheet', code: 'unsupported-syntax', message: `generated sheet does not parse: ${(err as Error).message}` }] };
   }
 
-  const bytes = Buffer.byteLength(css, 'utf8');
+  const bytes = new TextEncoder().encode(css).length; // byte length without Node's Buffer (browser content world)
   if (bytes > LIMITS.maxSheetBytes) {
     return { ok: false, diagnostics: [{ path: 'sheet', code: 'bounds', message: `compiled sheet exceeds the ${LIMITS.maxSheetBytes}-byte ceiling` }] };
   }

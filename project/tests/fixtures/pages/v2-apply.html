@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>v2 apply fixture</title>
+  <style>
+    #leaf { color: #333; }
+  </style>
+  <script>
+    // Site-side state the runtime must preserve (I08): a native listener and
+    // an exact node identity marker, as a real site would own them.
+    window.addEventListener('load', () => {
+      const btn = document.getElementById('btn');
+      window.__btn = btn;
+      window.__clicks = 0;
+      btn.addEventListener('click', () => { window.__clicks += 1; });
+
+      // Framework-re-render simulation: #flaky replaces its own subtree on
+      // ANY childList mutation — a candidate that inserts there must fail
+      // verification and roll back deterministically.
+      const flaky = document.getElementById('flaky');
+      let rerenders = 0;
+      new MutationObserver(() => {
+        if (rerenders++ > 4) return; // bounded
+        flaky.innerHTML = '<p>Re-rendered by the site</p>';
+      }).observe(flaky, { childList: true });
+    });
+  </script>
+</head>
+<body>
+  <main>
+    <h1>Apply fixture</h1>
+    <p id="leaf">Original text</p>
+    <section id="host">
+      <button id="btn" type="button">Save changes</button>
+    </section>
+    <section id="flaky">
+      <p>Flaky container</p>
+    </section>
+  </main>
+</body>
+</html>

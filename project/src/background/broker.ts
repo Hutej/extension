@@ -29,6 +29,7 @@ import {
   senderMayInvoke,
   decodeEnvelope,
   decodeObject,
+  decodeOperationBatch,
   decodeRecord,
   decodeString,
   decodeLiteral,
@@ -79,7 +80,7 @@ const deny = (code: ErrorCode, phase: ErrorPhase, message: string, extra?: Param
 
 const ID = decodeString({ max: 128, pattern: /^[A-Za-z0-9._:-]+$/ });
 const COMMANDS_BY_TRANSPORT: Record<Envelope['kind'], readonly string[]> = {
-  'run-command': ['StartRun', 'CancelRun'],
+  'run-command': ['StartRun', 'CancelRun', 'ApplyBatch'],
   'observe-request': ['Observe', 'Inspect', 'Expand'],
   'style-delivery': ['StageStyle', 'RemoveStyle', 'CommitComposition'],
   control: ['RegisterDocument', 'GetOperation', 'RenewLease', 'SaveRevision', 'SetEnabled', 'RemoveCustomization'],
@@ -119,6 +120,22 @@ const START_RUN_PAYLOAD = decodeRecord(
     goal: decodeString({ max: LIMITS.maxSummaryChars }),
   },
   { maxDepth: 8 },
+);
+
+const APPLY_BATCH_PAYLOAD = decodeRecord(
+  {
+    command: decodeLiteral(['ApplyBatch']),
+    batch: decodeRecord(
+      {
+        batchId: ID,
+        customizationId: ID,
+        revisionId: ID,
+        operations: (ov: unknown, opath = 'operations') => decodeOperationBatch(ov, opath),
+      },
+      { maxDepth: LIMITS.maxJsonDepth },
+    ),
+  },
+  { maxDepth: LIMITS.maxJsonDepth },
 );
 
 const GET_OPERATION_PAYLOAD = decodeRecord(
@@ -370,6 +387,18 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
         record.run = null;
         await persist();
         return { ok: true, kind: 'run-cancelled', cancelled };
+      }
+
+      case 'ApplyBatch': {
+        // One proposal is one ordered batch, relayed to the registered
+        // runtime (plan/06 §1 ApplyBatch: workspace → broker → runtime).
+        // The envelope is relayed unchanged; the runtime re-validates and
+        // executes through its serial queue (I04 fence on both sides).
+        const resolved = resolveDocument(envelope);
+        if (!('record' in resolved)) return resolved;
+        const p = APPLY_BATCH_PAYLOAD(envelope.payload, 'payload');
+        if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        return relayToRuntime(deps, resolved.record.documentKey.tabId, envelope);
       }
 
       case 'GetOperation': {

@@ -567,3 +567,220 @@ test('S3.1/T05: Inspect resolves the exact observed node and refuses stale/unkno
   assert.ok(staleErr, 'a replaced node must not resolve');
   assert.equal(staleErr!.code, 'stale-target', 'the exact-node ref goes stale, never re-resolves to a lookalike');
 });
+
+// ── S4.2: one-batch transactions and generic element insertion (real path) ──
+
+const applyBatchEnvelope = (
+  documentKey: CapturedState['documentKey'],
+  expectedRouteEpoch: number,
+  batch: Record<string, unknown>,
+): Record<string, unknown> => ({
+  protocolVersion: 1,
+  requestId: `ws-${Math.random().toString(36).slice(2, 10)}`,
+  kind: 'run-command',
+  documentKey,
+  expectedRouteEpoch,
+  deadlineAt: Date.now() + 10_000,
+  payload: { command: 'ApplyBatch', batch },
+});
+
+interface AppliedReceipt {
+  batchId: string;
+  payloadDigest?: string;
+  status: string;
+  resourceIds?: string[];
+  error?: { code: string; message: string };
+}
+
+async function applyBatch(
+  ws: Page,
+  state: CapturedState,
+  batch: Record<string, unknown>,
+): Promise<AppliedReceipt> {
+  const reply = await workspaceSend(ws, applyBatchEnvelope(state.documentKey, state.routeEpoch!, batch));
+  assert.equal(reply.ok, true, `ApplyBatch must be relayed: ${JSON.stringify(reply).slice(0, 400)}`);
+  const inner = (reply.receipt as Record<string, unknown>) ?? {};
+  assert.equal(inner.kind, 'receipt', `the runtime must answer with a receipt: ${JSON.stringify(reply).slice(0, 400)}`);
+  return inner.receipt as AppliedReceipt;
+}
+
+async function refsOf(ws: Page, state: CapturedState): Promise<Record<string, string>> {
+  const reply = await workspaceSend(ws, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
+  const snapshot = (reply as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt?.snapshot;
+  assert.ok(snapshot, 'observe must deliver a snapshot');
+  const byText = async (needle: string): Promise<string> => {
+    const region = snapshot!.regions.find((r) => r.textSample?.includes(needle) || r.semantics.nameApprox?.includes(needle));
+    assert.ok(region, `no region matches "${needle}" in ${JSON.stringify(snapshot!.regions.map((r) => r.textSample ?? r.semantics.nameApprox))}`);
+    return region!.targetRef;
+  };
+  const section = snapshot!.regions.find((r) => r.semantics.tag === 'section');
+  assert.ok(section, 'the host section is observed');
+  // The flaky ANCHOR is the section, not the paragraph inside it: use the
+  // paragraph's observed parentRef (document-order regions carry parents).
+  const flakyP = snapshot!.regions.find((r) => r.textSample?.includes('Flaky container'));
+  const flakyParent = snapshot!.regions.find((r) => r.targetRef === ((flakyP as { parentRef?: string } | undefined)?.parentRef ?? ''));
+  assert.ok(flakyParent, 'the flaky section is observed as the paragraph parent');
+  return {
+    leaf: await byText('Original text'),
+    btn: await byText('Save changes'),
+    host: section!.targetRef,
+    flaky: flakyParent!.targetRef,
+  };
+}
+
+test('S4.2/T31: insertUI card + same-batch local styling accepts on the real path; native controls are accessible and placed exactly', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, tabId } = await openFixture('v2-apply.html');
+  const state = await capturedState(workspace, tabId);
+  const refs = await refsOf(workspace, state);
+
+  const receipt = await applyBatch(workspace, state, {
+    batchId: 'browser-b1',
+    customizationId: 'cards',
+    revisionId: 'cards-r1',
+    operations: [
+      {
+        kind: 'insertUI',
+        target: { targetRef: refs.host },
+        position: 'last-child',
+        nodes: [
+          { localId: 'panel', tag: 'div', children: [
+            { tag: 'h2', text: 'Notes' },
+            { tag: 'label', text: 'Search', labelFor: 'nameField' },
+            { localId: 'nameField', tag: 'input', attributes: { type: 'search', placeholder: 'Filter' } },
+            { tag: 'button', text: 'Go' },
+          ] },
+        ],
+      },
+      {
+        kind: 'style',
+        rules: [{
+          target: { localRef: 'panel' },
+          declarations: [{ property: 'background-color', value: 'rebeccapurple', priority: 'important' }],
+        }],
+      },
+    ],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 400));
+
+  const dom = await page.evaluate(() => {
+    const panel = document.querySelector('#host > div');
+    const label = panel?.querySelector('label');
+    const input = panel?.querySelector('input');
+    return {
+      panelExists: panel !== null,
+      heading: panel?.querySelector('h2')?.textContent,
+      buttonType: panel?.querySelector('button')?.getAttribute('type'),
+      inputType: input?.getAttribute('type'),
+      forAttr: label?.getAttribute('for'),
+      inputId: input?.id,
+      background: panel ? getComputedStyle(panel).backgroundColor : '',
+      token: panel?.getAttribute('data-rv2-ns'),
+    };
+  });
+  assert.equal(dom.panelExists, true, 'the owned card is inserted at the anchor');
+  assert.equal(dom.heading, 'Notes');
+  assert.equal(dom.buttonType, 'button', 'owned buttons are always type=button');
+  assert.equal(dom.inputType, 'search');
+  assert.ok(dom.forAttr && dom.inputId && dom.forAttr === dom.inputId, 'the label references the runtime-generated input id');
+  assert.ok(dom.inputId.startsWith('rv2-owned-'), `runtime-generated id, got "${dom.inputId}"`);
+  assert.equal(dom.background, 'rgb(102, 51, 153)', `same-batch local styling wins (USER-origin important): ${dom.background}`);
+  assert.ok(dom.token, 'the styled localRef node carries the composition token');
+
+  // Replay of the same batch id and payload: the prior receipt, no duplicate.
+  const replay = await applyBatch(workspace, state, {
+    batchId: 'browser-b1',
+    customizationId: 'cards',
+    revisionId: 'cards-r1',
+    operations: [
+      { kind: 'insertUI', target: { targetRef: refs.host }, position: 'last-child', nodes: [{ localId: 'panel', tag: 'div', children: [{ tag: 'h2', text: 'Notes' }, { tag: 'label', text: 'Search', labelFor: 'nameField' }, { localId: 'nameField', tag: 'input', attributes: { type: 'search', placeholder: 'Filter' } }, { tag: 'button', text: 'Go' }] }] },
+      { kind: 'style', rules: [{ target: { localRef: 'panel' }, declarations: [{ property: 'background-color', value: 'rebeccapurple', priority: 'important' }] }] },
+    ],
+  });
+  assert.equal(replay.status, 'accepted', 'the prior receipt replays');
+  assert.equal(replay.payloadDigest, receipt.payloadDigest, 'the prior receipt replays (same payload digest, no re-execution)');
+  assert.equal(await page.evaluate(() => document.querySelectorAll('#host > div').length), 1, 'replay creates no duplicate widget');
+
+  // T08: GetOperation reconciles the applied batch by its retained receipt.
+  const getOp = await workspaceSend(workspace, getOperationEnvelope(state.documentKey, state.routeEpoch!, 'browser-b1'));
+  assert.equal(getOp.ok, true, JSON.stringify(getOp).slice(0, 200));
+  const got = ((getOp.receipt as Record<string, unknown>).receipt as Record<string, unknown>) ?? {};
+  assert.equal(got.status, 'accepted', 'the lost-apply reply is reconciled by receipt lookup, never re-execution');
+
+  // A different payload under the same id never executes.
+  const forged = await applyBatch(workspace, state, {
+    batchId: 'browser-b1',
+    customizationId: 'cards',
+    revisionId: 'cards-r1',
+    operations: [{ kind: 'insertUI', target: { targetRef: refs.host }, position: 'last-child', nodes: [{ tag: 'p', text: 'altered' }] }],
+  });
+  assert.equal(forged.status, 'not-applied');
+  assert.equal(forged.error!.code, 'duplicate-id');
+  assert.equal(await page.evaluate(() => document.querySelectorAll('#host > div').length), 1);
+});
+
+test('S4.2/T09: replaceText keeps the native node and its listener; the whole candidate rolls back on a site re-render', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, tabId } = await openFixture('v2-apply.html');
+  const state = await capturedState(workspace, tabId);
+  const refs = await refsOf(workspace, state);
+
+  // T09 live: the text change keeps the exact node; the site listener survives.
+  const textReceipt = await applyBatch(workspace, state, {
+    batchId: 'browser-b2',
+    customizationId: 'labels',
+    revisionId: 'labels-r1',
+    operations: [{ kind: 'replaceText', target: { targetRef: refs.btn }, text: 'Translated button label' }],
+  });
+  assert.equal(textReceipt.status, 'accepted', JSON.stringify(textReceipt).slice(0, 300));
+  const afterText = await page.evaluate(async () => {
+    const w = window as unknown as { __btn: Element; __clicks: number };
+    document.getElementById('btn')?.dispatchEvent(new MouseEvent('click', { bubbles: true }));
+    await new Promise((r) => setTimeout(r, 10));
+    return {
+      sameNode: document.getElementById('btn') === w.__btn,
+      clicks: w.__clicks,
+      text: document.getElementById('btn')?.textContent,
+    };
+  });
+  assert.equal(afterText.text, 'Translated button label');
+  assert.equal(afterText.sameNode, true, 'no clone/innerHTML replacement');
+  assert.equal(afterText.clicks, 1, 'the site listener survived the Revueon write');
+
+  // A candidate inserting into the framework-re-rendered container fails
+  // verification and rolls the WHOLE candidate back (all-or-nothing).
+  const rolled = await applyBatch(workspace, state, {
+    batchId: 'browser-b3',
+    customizationId: 'flaky-insert',
+    revisionId: 'flaky-r1',
+    operations: [
+      { kind: 'insertUI', target: { targetRef: refs.flaky }, position: 'last-child', nodes: [{ tag: 'p', text: 'Injected' }] },
+      { kind: 'replaceText', target: { targetRef: refs.leaf }, text: 'This write must roll back' },
+    ],
+  });
+  assert.ok(['rolled-back', 'conflicted'].includes(rolled.status), `the re-rendered candidate must not accept: ${JSON.stringify(rolled).slice(0, 300)}`);
+  const afterRollback = await page.evaluate(() => ({
+    leaked: document.querySelectorAll('[data-rv2-ns], #flaky p:last-child').length,
+    injected: [...document.querySelectorAll('#flaky p')].some((p) => p.textContent === 'Injected'),
+    leafText: document.getElementById('leaf')?.textContent,
+    btnText: document.getElementById('btn')?.textContent,
+  }));
+  assert.equal(afterRollback.injected, false, 'the candidate tree is removed on rollback');
+  assert.equal(afterRollback.leafText, 'Original text', 'the same-batch text write rolled back with the candidate');
+  assert.equal(afterRollback.btnText, 'Translated button label', 'independent accepted work survives the rollback');
+
+  // A batch referencing a node the site replaced is refused before side effects.
+  await page.evaluate(() => {
+    const leaf = document.getElementById('leaf')!;
+    const fresh = leaf.cloneNode(true) as Element;
+    leaf.replaceWith(fresh);
+  });
+  const stale = await applyBatch(workspace, state, {
+    batchId: 'browser-b4',
+    customizationId: 'labels',
+    revisionId: 'labels-r2',
+    operations: [{ kind: 'replaceText', target: { targetRef: refs.leaf }, text: 'never written' }],
+  });
+  assert.equal(stale.status, 'not-applied');
+  assert.equal(stale.error!.code, 'stale-target', 'a replaced node never re-resolves to a lookalike');
+});
