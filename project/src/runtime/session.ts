@@ -48,6 +48,7 @@ import { createTargetRegistry } from './targets.ts';
 import { createTokenScope } from './styles.ts';
 import { createContentCreator } from './content.ts';
 import { createTransaction, type BatchReceipt, type StyleClient, type StyleOutcome } from './transaction.ts';
+import { createVerifier, probeCanonicalOf } from './verify.ts';
 
 // ── serial queue (plan/06 §2 boundary 1) ─────────────────────────────────
 
@@ -408,6 +409,17 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     commit: (operationId) => sendStyleCommand({ command: 'CommitComposition', operationId }),
   };
 
+  // S4.3: the mandatory structured verifier — acceptance is impossible
+  // without its report (I11). Read-only measurements; no window resize (I22).
+  const verifier = createVerifier({
+    doc: document,
+    now: () => Date.now(),
+    computedOf: (el, pseudo) => window.getComputedStyle(el, pseudo ?? undefined),
+    canonicalOf: probeCanonicalOf(document),
+    rectOf: (el) => el.getBoundingClientRect(),
+    recheckWait: () => new Promise((resolve) => setTimeout(resolve, 60)),
+  });
+
   // S4.2: the one-batch transaction — the runtime's only mutation path (I03:
   // the legacy dispatcher remains the only OTHER mutation owner until the
   // plan/19 cutover disables it).
@@ -423,6 +435,7 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     randomId: randomInstanceId,
     installationId,
     styleClient,
+    verify: verifier,
     settle: () =>
       new Promise<void>((resolve) => {
         let done = false;

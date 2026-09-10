@@ -1,15 +1,12 @@
 /**
  * core/config — model + loop settings for the agent.
  *
- * Production Revueon uses EXACTLY ONE model: GLM 5.2 (reasoning, 262K ctx).
- * Vision (screenshots → a vision model) is TEST/QA infrastructure only and
- * lives in tests/, never in production src/ — production never sends a
- * screenshot to a vision model. See CORE MEMORY / CLAUDE.md image rule.
+* Production Revueon uses EXACTLY ONE model: eepseek v4 flash.
  */
 
 export const AI_CONFIG = {
   // The ONE production model. Cloudflare Workers AI, OpenAI-compatible.
-  strongModel: process.env.RV_MODEL_STRONG ?? '@cf/zai-org/glm-5.3-flash',
+  strongModel: process.env.RV_MODEL_STRONG ?? '@cf/deepseek-ai/deepseek-v4-flash-0731',
 
   // Consent gate (Phase 6 launch requirement). Enforced in BOTH the popup UI
   // (shows the disclosure) and the background's runLoop handler (the single

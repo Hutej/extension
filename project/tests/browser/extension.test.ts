@@ -590,6 +590,12 @@ interface AppliedReceipt {
   status: string;
   resourceIds?: string[];
   error?: { code: string; message: string };
+  report?: {
+    status: string;
+    counts: Record<string, number>;
+    coverage: { checks: number; rechecked: boolean; preExistingBroken: number };
+    issues: Array<{ key: string; status: string; detail?: string }>;
+  };
 }
 
 async function applyBatch(
@@ -656,12 +662,21 @@ test('S4.2/T31: insertUI card + same-batch local styling accepts on the real pat
         kind: 'style',
         rules: [{
           target: { localRef: 'panel' },
-          declarations: [{ property: 'background-color', value: 'rebeccapurple', priority: 'important' }],
+          declarations: [
+            { property: 'background-color', value: 'rebeccapurple', priority: 'important' },
+            { property: 'color', value: '#ffffff', priority: 'important' },
+          ],
         }],
       },
     ],
   });
   assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 400));
+  // S4.3: the acceptance gate ships the structured report for THIS revision.
+  const report = (receipt as unknown as { report?: { status: string; coverage: { checks: number }; issues: unknown[] } }).report;
+  assert.ok(report, 'the accepted receipt carries the exact-revision VerificationReport');
+  assert.equal(report!.status, 'pass');
+  assert.ok(report!.coverage.checks > 0, 'effect checks were actually measured');
+  assert.equal(report!.issues.length, 0);
 
   const dom = await page.evaluate(() => {
     const panel = document.querySelector('#host > div');
@@ -694,7 +709,7 @@ test('S4.2/T31: insertUI card + same-batch local styling accepts on the real pat
     revisionId: 'cards-r1',
     operations: [
       { kind: 'insertUI', target: { targetRef: refs.host }, position: 'last-child', nodes: [{ localId: 'panel', tag: 'div', children: [{ tag: 'h2', text: 'Notes' }, { tag: 'label', text: 'Search', labelFor: 'nameField' }, { localId: 'nameField', tag: 'input', attributes: { type: 'search', placeholder: 'Filter' } }, { tag: 'button', text: 'Go' }] }] },
-      { kind: 'style', rules: [{ target: { localRef: 'panel' }, declarations: [{ property: 'background-color', value: 'rebeccapurple', priority: 'important' }] }] },
+      { kind: 'style', rules: [{ target: { localRef: 'panel' }, declarations: [{ property: 'background-color', value: 'rebeccapurple', priority: 'important' }, { property: 'color', value: '#ffffff', priority: 'important' }] }] },
     ],
   });
   assert.equal(replay.status, 'accepted', 'the prior receipt replays');
@@ -783,4 +798,78 @@ test('S4.2/T09: replaceText keeps the native node and its listener; the whole ca
   });
   assert.equal(stale.status, 'not-applied');
   assert.equal(stale.error!.code, 'stale-target', 'a replaced node never re-resolves to a lookalike');
+});
+
+
+test('S4.3/T22: owned text below the WCAG AA floor fails verification and rolls the whole candidate back', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, tabId } = await openFixture('v2-apply.html');
+  const state = await capturedState(workspace, tabId);
+  const refs = await refsOf(workspace, state);
+  const receipt = await applyBatch(workspace, state, {
+    batchId: 'browser-v3a',
+    customizationId: 'contrast',
+    revisionId: 'contrast-r1',
+    operations: [
+      { kind: 'insertUI', target: { targetRef: refs.host }, position: 'last-child', nodes: [
+        { localId: 'panel', tag: 'div', children: [{ localId: 'copy', tag: 'p', text: 'Low contrast note' }] },
+      ] },
+      { kind: 'style', rules: [
+        { target: { localRef: 'panel' }, declarations: [{ property: 'background-color', value: '#ffffff', priority: 'important' }] },
+        { target: { localRef: 'copy' }, declarations: [{ property: 'color', value: '#eeeeee', priority: 'important' }] },
+      ] },
+    ],
+  });
+  assert.equal(receipt.status, 'rolled-back', `low-contrast owned text must fail: ${JSON.stringify(receipt).slice(0, 400)}`);
+  assert.equal(receipt.report!.status, 'fail');
+  assert.ok(receipt.report!.issues.some((i: { key: string }) => i.key.startsWith('contrast:owned')), 'the structured contrast key is in the report');
+  const gone = await page.evaluate(() => document.querySelectorAll('#host > div').length);
+  assert.equal(gone, 0, 'the failing candidate tree is removed');
+});
+
+test('S4.3/T13: a normal-priority declaration that loses the real cascade fails verification (no silent lose)', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, tabId } = await openFixture('v2-apply.html');
+  const state = await capturedState(workspace, tabId);
+  const refs = await refsOf(workspace, state);
+  // The fixture styles #leaf { color: #333 } at author normal — a user-NORMAL
+  // red loses to it; the effect check must catch the lose, not claim success.
+  const receipt = await applyBatch(workspace, state, {
+    batchId: 'browser-v3b',
+    customizationId: 'normal-red',
+    revisionId: 'normal-red-r1',
+    operations: [
+      { kind: 'style', rules: [{ target: { targetRef: refs.leaf }, declarations: [{ property: 'color', value: 'red', priority: 'normal' }] }] },
+    ],
+  });
+  assert.equal(receipt.status, 'rolled-back', JSON.stringify(receipt).slice(0, 400));
+  assert.equal(receipt.report!.status, 'fail');
+  assert.ok(receipt.report!.issues.some((i: { key: string; status: string }) => i.key.startsWith('effect:style:') && i.status === 'fail'), 'the effect fail key is in the report');
+  const color = await page.evaluate(() => {
+    const leaf = document.getElementById('leaf')!;
+    return { computed: getComputedStyle(leaf).color, token: leaf.getAttribute('data-rv2-ns') };
+  });
+  assert.equal(color.computed, 'rgb(51, 51, 51)', 'the site color was never overwritten');
+  assert.equal(color.token, null, 'the candidate rolled back — no token remains');
+});
+
+test('S4.3/T13: an authorized hide accepts, hides its target, and reports the exemption', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, tabId } = await openFixture('v2-apply.html');
+  const state = await capturedState(workspace, tabId);
+  const refs = await refsOf(workspace, state);
+  const receipt = await applyBatch(workspace, state, {
+    batchId: 'browser-v3c',
+    customizationId: 'hide-leaf',
+    revisionId: 'hide-leaf-r1',
+    operations: [{ kind: 'hide', target: { targetRef: refs.leaf } }],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 400));
+  assert.equal(receipt.report!.status, 'pass');
+  const after = await page.evaluate(() => ({
+    display: getComputedStyle(document.getElementById('leaf')!).display,
+    hostVisible: getComputedStyle(document.getElementById('host')!).display,
+  }));
+  assert.equal(after.display, 'none', 'the hide took effect');
+  assert.equal(after.hostVisible, 'block', 'ancestors/siblings are untouched');
 });

@@ -21,6 +21,7 @@ import {
   type Transaction,
   type TransactionDeps,
 } from '../../src/runtime/transaction.ts';
+import type { Verifier, VerificationReport, VerifyPlan } from '../../src/runtime/verify.ts';
 import type { DocumentKey, Operation } from '../../src/contracts.ts';
 
 const DK: DocumentKey = { tabId: 1, frameId: 0, browserDocumentId: 'd1', runtimeInstanceId: 'ri' };
@@ -146,6 +147,57 @@ interface World {
   setRemove: (outcome: 'removed' | 'refused') => void;
   onStage?: () => void;
   epoch: { value: number };
+  verifyMode: 'pass' | 'fail' | 'unknown' | 'empty';
+  verifyCalls: number;
+}
+
+/** Semi-real stub verifier: re-checks the same primitives the S4.2 inline
+ *  checks covered (text values, insert placement, token membership) so the
+ *  settle-mutation scenarios exercise the rollback paths; explicit modes
+ *  force fail/unknown/empty reports for the T13 gate tests. */
+function makeStubVerifier(w: World): Verifier {
+  const outcome = (key: string, status: 'pass' | 'fail' | 'unknown', section: 'delivery' | 'effect' | 'integrity', detail?: string) =>
+    ({ key, section, status, ...(detail ? { detail } : {}) });
+  return {
+    captureBaseline: () => ({ ok: true as const, baseline: { viewportOverflowX: 0, els: new Map() } }),
+    verify: async (plan: VerifyPlan): Promise<VerificationReport> => {
+      w.verifyCalls += 1;
+      const outcomes: Array<{ key: string; section: 'delivery' | 'effect' | 'integrity'; status: 'pass' | 'fail' | 'unknown'; detail?: string }> = [];
+      outcomes.push(outcome('delivery:css', 'pass', 'delivery'));
+      for (const t of plan.texts) {
+        const ok = t.node.isConnected && t.node.nodeValue === t.installed;
+        outcomes.push(outcome(t.key, ok ? 'pass' : 'fail', 'effect', ok ? undefined : 'text value does not hold'));
+      }
+      for (const ins of plan.inserts) {
+        const ok = ins.roots.every((r) => r.isConnected);
+        outcomes.push(outcome(ins.key, ok ? 'pass' : 'fail', 'effect', ok ? undefined : 'not connected'));
+      }
+      for (const t of plan.tokenChecks) {
+        const ok = t.el.isConnected && t.el.getAttribute(TOKEN_ATTRIBUTE) === t.ns;
+        outcomes.push(outcome(t.key, ok ? 'pass' : 'fail', 'delivery', ok ? undefined : 'token lost'));
+      }
+      if (w.verifyMode === 'fail') outcomes.push(outcome('forced:fail', 'fail', 'integrity', 'forced by test'));
+      if (w.verifyMode === 'unknown') outcomes.push(outcome('forced:unknown', 'unknown', 'integrity', 'forced by test'));
+      if (w.verifyMode === 'empty') outcomes.length = 0;
+      const fail = outcomes.some((o) => o.status === 'fail');
+      const unknown = outcomes.some((o) => o.status === 'unknown');
+      const counts = {
+        pass: outcomes.filter((o) => o.status === 'pass').length,
+        satisfied: 0,
+        fail: outcomes.filter((o) => o.status === 'fail').length,
+        unknown: outcomes.filter((o) => o.status === 'unknown').length,
+      };
+      return {
+        revisionId: plan.revisionId,
+        batchId: plan.batchId,
+        epoch: plan.entryEpoch,
+        status: fail ? 'fail' : unknown ? 'unknown' : outcomes.length === 0 ? 'unknown' : 'pass',
+        issues: outcomes.filter((o) => o.status !== 'pass') as VerificationReport['issues'],
+        counts,
+        coverage: { protectedTargets: plan.protectedEls.length, sentinels: plan.sentinels.length, combinedRevisions: plan.combined.length, checks: outcomes.length, unmeasuredDecls: plan.unmeasuredDecls, preExistingBroken: 0, rechecked: false },
+      };
+    },
+  };
 }
 
 function makeWorld(): World {
@@ -186,6 +238,18 @@ function makeWorld(): World {
         : { ok: true, state: 'removed' };
     },
   };
+  const world: World = {
+    doc,
+    deps: {} as TransactionDeps,
+    txn: {} as Transaction,
+    calls,
+    epoch,
+    verifyMode: 'pass',
+    verifyCalls: 0,
+    setStage: (o) => { stageOutcome = o; },
+    setCommit: (o) => { commitOutcome = o; },
+    setRemove: (o) => { removeOutcome = o; },
+  };
   const deps: TransactionDeps = {
     doc: doc as unknown as Document,
     targets,
@@ -197,21 +261,13 @@ function makeWorld(): World {
     randomId: () => Math.random().toString(36).slice(2),
     installationId: () => 'testinst',
     styleClient,
+    verify: makeStubVerifier(world),
     settle: async () => {
-      world.settleHook?.();
+      (world as World & { settleHook?: () => void }).settleHook?.();
     },
   };
-  const txn = createTransaction(deps);
-  const world: World & { settleHook?: () => void } = {
-    doc,
-    deps,
-    txn,
-    calls,
-    epoch,
-    setStage: (o) => { stageOutcome = o; },
-    setCommit: (o) => { commitOutcome = o; },
-    setRemove: (o) => { removeOutcome = o; },
-  };
+  world.deps = deps;
+  world.txn = createTransaction(deps);
   return world;
 }
 
@@ -613,4 +669,52 @@ test('quota: a 65th new customization is refused before any side effect', async 
   const over = await w.txn.applyBatch(req('q64', 'c64', [styleOp(observe(w, h), 'color', 'red')]));
   assert.equal(over.status, 'not-applied');
   assert.equal(over.error!.code, 'quota-exceeded');
+});
+
+// ── S4.3: mandatory verification gates ──────────────────────────────────
+
+test('T13: a missing verifier refuses the batch before any side effect — a clean predecessor is untouched', async () => {
+  const w = makeWorld();
+  const h = el('h1');
+  const node = text('keep');
+  h.appendChild(node);
+  w.doc.appendChild(h);
+  const ref = observe(w, h);
+  // A transaction constructed WITHOUT the verifier (deps override).
+  const bare = createTransaction({ ...w.deps, verify: undefined });
+  const r = await bare.applyBatch(req('b1', 'c1', [textOp(ref, 'changed')]));
+  assert.equal(r.status, 'not-applied');
+  assert.match(r.error!.message, /verification is unavailable/);
+  assert.equal(node.nodeValue, 'keep', 'nothing was written without a verifier');
+  assert.equal(w.txn.receiptFor('b1'), undefined, 'the bare transaction retains its own receipts');
+});
+
+test('T13: a verifier report with zero measured checks can never pass', async () => {
+  const w = makeWorld();
+  const h = el('h1');
+  h.appendChild(text('keep'));
+  w.doc.appendChild(h);
+  const ref = observe(w, h);
+  w.verifyMode = 'empty';
+  const r = await w.txn.applyBatch(req('b1', 'c1', [textOp(ref, 'changed')]));
+  assert.ok(['rolled-back', 'conflicted'].includes(r.status), JSON.stringify(r));
+  assert.equal(r.error!.code, 'conflict');
+  assert.equal(r.report!.issues[0].key, 'verify:internal', 'the synthetic unknown is visible in the receipt');
+  assert.equal(node_value_of(h), 'keep');
+  w.verifyMode = 'pass';
+});
+const node_value_of = (h: StubNode): string => (h.childNodes[0] as StubNode).nodeValue ?? '';
+
+test('S4.3: an accepted receipt carries the exact-revision VerificationReport', async () => {
+  const w = makeWorld();
+  const h = el('h1');
+  h.appendChild(text('original'));
+  w.doc.appendChild(h);
+  const ref = observe(w, h);
+  const r = await w.txn.applyBatch(req('b1', 'c1', [textOp(ref, 'changed')]));
+  assert.equal(r.status, 'accepted');
+  assert.ok(r.report, 'the gating report ships with the accepted receipt');
+  assert.equal(r.report!.revisionId, 'b1-rev');
+  assert.equal(r.report!.status, 'pass');
+  assert.ok(r.report!.coverage.checks > 0);
 });

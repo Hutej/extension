@@ -42,6 +42,7 @@ import {
   compileStyleOperation,
   type HighImpactRisk,
 } from './compile.ts';
+import type { Verifier, VerificationReport, VerifyPlan } from './verify.ts';
 import type { ContentCreator } from './content.ts';
 import type { ResolvedTargetRegistry } from './targets.ts';
 import { TOKEN_ATTRIBUTE, type TokenScope } from './styles.ts';
@@ -87,6 +88,8 @@ export interface BatchReceipt {
   /** Predecessor-bundle cleanup failed: the bytes stay recorded and block
    *  another replacement until reconciled (plan/08 §3). */
   cleanupPending?: boolean;
+  /** S4.3: the exact-revision VerificationReport that gated acceptance. */
+  report?: VerificationReport;
 }
 
 export interface TransactionDeps {
@@ -101,6 +104,9 @@ export interface TransactionDeps {
   /** Persisted non-secret installation id (plan/08 §3 namespace component). */
   installationId(): string;
   styleClient: StyleClient;
+  /** S4.3: the mandatory structured verifier. A missing verifier refuses the
+   *  batch before any side effect — acceptance is impossible without a report. */
+  verify?: Verifier;
   /** Bounded settle wait between the write section and verification. */
   settle?(): Promise<void>;
 }
@@ -133,6 +139,9 @@ interface RevisionRecord {
   /** Elements this revision's fragment targets (token membership). */
   elements: Element[];
   highImpact: Array<{ property: string; value: string; risk: HighImpactRisk }>;
+  /** Bounded effect samples for the COMBINED revision verification (T30):
+   *  what this revision's fragment declares, on which exact element. */
+  decls: Array<{ el: Element; property: string; value: string }>;
 }
 
 /** plan/08 §3: up to 64 logical style fragments per document. */
@@ -173,6 +182,32 @@ const epochOf = (routeEpoch: number) => ({
 });
 
 const UNSUPPORTED_KINDS = new Set(['collapse', 'float', 'bindKey', 'localRule', 'projectCollection', 'relocate']);
+
+/** A verifier that throws or answers for a different revision is UNKNOWN —
+ *  never an accidental pass (T13). */
+const syntheticReport = (req: BatchRequest, detail: string): VerificationReport => ({
+  revisionId: req.revisionId,
+  batchId: req.batchId,
+  epoch: 0,
+  status: 'unknown',
+  issues: [{ key: 'verify:internal', section: 'integrity', status: 'unknown', detail }],
+  counts: { pass: 0, satisfied: 0, fail: 0, unknown: 1 },
+  coverage: { protectedTargets: 0, sentinels: 0, combinedRevisions: 0, checks: 1, unmeasuredDecls: 0, preExistingBroken: 0, rechecked: false },
+});
+
+/** Bounded owned-text sample collection for the WCAG AA contrast check. */
+const collectOwnedText = (roots: Element[]): Array<{ el: Element; sample: string }> => {
+  const out: Array<{ el: Element; sample: string }> = [];
+  const walk = (el: Element, depth: number): void => {
+    if (out.length >= 8 || depth > 12) return;
+    let t = '';
+    for (const c of el.childNodes) if (c.nodeType === 3) t += c.textContent ?? '';
+    if (t.trim()) out.push({ el, sample: t.slice(0, 200) });
+    for (const c of Array.from(el.children ?? [])) walk(c, depth + 1);
+  };
+  for (const r of roots) walk(r, 0);
+  return out;
+};
 
 export function createTransaction(deps: TransactionDeps): Transaction {
   const revisions = new Map<string, RevisionRecord>();
@@ -261,6 +296,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     droppedTexts: Array<{ node: Text; siteBaseline: string; predecessorInstalled: string }>;
     aggregateCss: string | null;
     replaces: RevisionRecord | undefined;
+    plan: VerifyPlan;
+    candidateDecls: Array<{ el: Element; property: string; value: string }>;
   }
 
   const prepare = (req: BatchRequest): { ok: true; prepared: PreparedBatch } | { ok: false; receipt: BatchReceipt } => {
@@ -296,8 +333,12 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     const inserts: PreparedBatch['inserts'] = [];
     const highImpact: PreparedBatch['highImpact'] = [];
     const newClaims = new Set<Text>();
+    const styleRuleEls: Element[][] = [];
+    const hideScope: Element[] = [];
+    const protectedMap = new Map<string, Element>();
+    const ownedTextSamples: Array<{ el: Element; sample: string }> = [];
 
-    const resolveTarget = (spec: { targetRef?: string; localRef?: string }, path: string): { ok: true; el: Element } | { ok: false; error: ErrorRecord } => {
+    const resolveTarget = (spec: { targetRef?: string; localRef?: string }, path: string): { ok: true; el: Element; key: string } | { ok: false; error: ErrorRecord } => {
       if (spec.targetRef !== undefined) {
         const r = deps.targets.resolve(spec.targetRef, epoch);
         if (!r.ok) {
@@ -307,13 +348,13 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         if (r.rootId !== 'document') {
           return { ok: false, error: err('unsupported-capability', 'validate', `${path}: the target lives in root "${r.rootId}"; document-root sheets do not reach shadow descendants (open-root sheets arrive with a later slice)`) };
         }
-        return { ok: true, el: r.node };
+        return { ok: true, el: r.node, key: spec.targetRef };
       }
       const el = batchLocal.get(spec.localRef!);
       if (!el) {
         return { ok: false, error: err('unknown-target', 'validate', `${path}: localRef "${spec.localRef}" names no node created by an earlier operation`) };
       }
-      return { ok: true, el };
+      return { ok: true, el, key: spec.localRef! };
     };
 
     const replaced = revisions.get(req.customizationId);
@@ -332,22 +373,37 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     for (const [i, op] of ops.entries()) {
       const path = `operations[${i}]`;
       switch (op.kind) {
-        case 'style':
+        case 'style': {
           // Every rule target resolves before any side effect — stale/missing
           // targets keep their exact error codes (no compile-diag laundering).
+          const ruleEls: Element[] = [];
           for (const [ri, rule] of op.rules.entries()) {
             const r = resolveTarget(rule.target, `${path}.rules[${ri}].target`);
             if (!r.ok) return { ok: false, receipt: refuse(req, digest, r.error) };
             styleTargets.set(rule.target.targetRef ?? rule.target.localRef ?? `${i}:${ri}`, r.el);
+            ruleEls.push(r.el);
+            for (const d of rule.declarations) {
+              const dp = d.property.toLowerCase();
+              const dv = d.value.trim().toLowerCase();
+              if ((dp === 'display' && dv === 'none') || (dp === 'visibility' && dv === 'hidden')) {
+                // The CSS equivalent of hide joins the authorized hide scope
+                // (same target/risk policy as the named operation, I17).
+                hideScope.push(r.el);
+              }
+            }
           }
           styleOps.push(op);
+          styleRuleEls.push(ruleEls);
           break;
+        }
         case 'hide': {
           // A hide IS a display fragment through the same compiled path
           // (plan/08 §1: same target/risk policy as style — I17).
           const hideTarget = resolveTarget(op.target, `${path}.target`);
           if (!hideTarget.ok) return { ok: false, receipt: refuse(req, digest, hideTarget.error) };
           styleTargets.set(op.target.targetRef ?? op.target.localRef ?? `${i}`, hideTarget.el);
+          hideScope.push(hideTarget.el);
+          styleRuleEls.push([hideTarget.el]);
           styleOps.push({
             kind: 'style',
             rules: [{
@@ -387,6 +443,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           const siteBaseline = predText ? predText.siteBaseline : node.nodeValue ?? '';
           const predecessorValue = predText ? predText.installed : null;
           textPreps.push({ node, installed: op.text, predecessorValue, siteBaseline, claimedNew: !predText });
+          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `${i}`, target.el);
           break;
         }
         case 'insertUI': {
@@ -410,6 +467,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           }
           for (const [localId, el] of built.byLocalId) batchLocal.set(localId, el);
           inserts.push({ anchor: anchorR.el, position: op.position, roots: built.roots });
+          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `${i}`, anchorR.el);
+          ownedTextSamples.push(...collectOwnedText(built.roots));
           break;
         }
       }
@@ -456,6 +515,103 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       }
     }
 
+    // ── S4.3 verification plan: delivery/effect/integrity/combined scope ──
+    const styleChecks: VerifyPlan['styles'] = [];
+    let unmeasured = 0;
+    const candidateDecls: RevisionRecord['decls'] = [];
+    for (const [i, op] of styleOps.entries()) {
+      for (const [ri, rule] of op.rules.entries()) {
+        const ruleEl = styleRuleEls[i]?.[ri];
+        if (!ruleEl) continue;
+        const pseudo = rule.surface === 'before' ? '::before' as const : rule.surface === 'after' ? '::after' as const : undefined;
+        for (const [k, d] of rule.declarations.entries()) {
+          if (d.property.startsWith('--')) { unmeasured += 1; continue; }
+          if (styleChecks.length < 32) {
+            styleChecks.push({ key: `effect:style:op${i}:rule${ri}:decl${k}:${d.property}`, el: ruleEl, property: d.property, value: d.value, ...(pseudo ? { pseudo } : {}) });
+          } else {
+            unmeasured += 1;
+          }
+          if (candidateDecls.length < 16) candidateDecls.push({ el: ruleEl, property: d.property, value: d.value });
+        }
+      }
+      for (const kf of op.keyframes ?? []) for (const f of kf.frames) unmeasured += f.declarations.length;
+    }
+    const protectedEls: VerifyPlan['protectedEls'] = [];
+    {
+      const seenKeys = new Set<string>();
+      for (const [key, el] of [...protectedMap, ...styleTargets]) {
+        if (seenKeys.has(key)) continue;
+        seenKeys.add(key);
+        protectedEls.push({ key, el });
+      }
+    }
+    const sentinels: VerifyPlan['sentinels'] = [];
+    {
+      const sentinelSeen = new Set<Element>(protectedEls.map((p) => p.el));
+      for (const p of protectedEls) {
+        if (sentinels.length >= 24) break;
+        const parentRaw = (p.el.parentElement ?? p.el.parentNode) as Element | null;
+        const parent = parentRaw && parentRaw.nodeType === 1 ? parentRaw : null;
+        if (parent && !sentinelSeen.has(parent)) {
+          sentinelSeen.add(parent);
+          sentinels.push({ key: `sentinel:${p.key}:parent`, el: parent });
+        }
+        if (!parent) continue;
+        const siblings = Array.from(parent.children ?? []);
+        const idx = siblings.indexOf(p.el);
+        for (const sib of [siblings[idx - 1], siblings[idx + 1]]) {
+          if (sib && !sentinelSeen.has(sib) && sentinels.length < 24) {
+            sentinelSeen.add(sib);
+            sentinels.push({ key: `sentinel:${p.key}:sibling`, el: sib });
+          }
+        }
+      }
+    }
+    const excluded = new Map<Element, Set<string>>();
+    for (const d of candidateDecls) {
+      const set = excluded.get(d.el) ?? new Set<string>();
+      set.add(d.property);
+      excluded.set(d.el, set);
+    }
+    const combined: VerifyPlan['combined'] = [];
+    for (const [cid, rev] of revisions) {
+      if (cid === req.customizationId) continue;
+      combined.push({
+        customizationId: cid,
+        revisionId: rev.revisionId,
+        checks: rev.decls
+          .filter((d) => !excluded.get(d.el)?.has(d.property))
+          .slice(0, 4)
+          .map((d, j) => ({ key: `combined:${cid}:${j}:${d.property}`, el: d.el, property: d.property, value: d.value })),
+        texts: rev.texts.filter((t) => !newClaims.has(t.node)).slice(0, 4).map((t, j) => ({ key: `combined:${cid}:text:${j}`, node: t.node, installed: t.installed })),
+        nodes: rev.ownedNodes.slice(0, 4).map((el, j) => ({ key: `combined:${cid}:node:${j}`, el })),
+      });
+    }
+    const verifyPlan: VerifyPlan = {
+      batchId: req.batchId,
+      revisionId: req.revisionId,
+      entryEpoch,
+      staged: false,
+      styles: styleChecks,
+      hides: hideScope,
+      texts: textPreps.map((t, j) => ({ key: `effect:text:${j}`, node: t.node, installed: t.installed })),
+      // before/after place beside the anchor (parent = its parent);
+      // first-child/last-child place INSIDE the anchor (parent = the anchor).
+      inserts: inserts.map((ins, j) => ({
+        key: `effect:insert:${j}`,
+        roots: ins.roots,
+        expectedParent: (ins.position === 'before' || ins.position === 'after'
+          ? ins.anchor.parentNode
+          : ins.anchor) as Element | null,
+      })),
+      protectedEls,
+      sentinels,
+      combined,
+      ownedText: ownedTextSamples,
+      tokenChecks: candidateElements.map((el, j) => ({ key: `delivery:token:${j}`, el, ns: nsNew })),
+      unmeasuredDecls: unmeasured,
+    };
+
     return {
       ok: true,
       prepared: {
@@ -471,6 +627,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         droppedTexts,
         aggregateCss,
         replaces: replaced,
+        plan: verifyPlan,
+        candidateDecls,
       },
     };
   };
@@ -525,6 +683,17 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     const prepared = preparedResult.prepared;
     const epochNow = () => deps.routeEpoch();
 
+    // S4.3: acceptance is gated on a structured VerificationReport for THIS
+    // revision (I11). A missing verifier refuses before any side effect (T13).
+    if (!deps.verify) {
+      return refuse(req, digest, err('conflict', 'verify', 'mandatory verification is unavailable; the batch was not applied', 'run with the verification runtime present'));
+    }
+    const verifier = deps.verify;
+    const captured = verifier.captureBaseline(prepared.plan);
+    if (!captured.ok) {
+      return refuse(req, digest, err('conflict', 'verify', `the mandatory baseline could not be measured: ${captured.detail}`, 're-observe and retry'));
+    }
+
     const stagedOpId = prepared.aggregateCss !== null ? `${req.batchId}:css` : null;
 
     // 2. Stage the inert candidate aggregate (intent before insert is the
@@ -557,6 +726,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         });
       }
     }
+
+    if (stagedOpId) prepared.plan.staged = true;
 
     // 3. Final identity re-check — no await between this and the writes.
     const stale = finalIdentityCheck(prepared);
@@ -601,22 +772,25 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       return rollbackCandidate(prepared, req, digest, oldNs, oldSet, newSet, stagedOpId, nsNew, conflicts, afterSettle.message);
     }
 
-    // 6. Verification (S4.2 scope: delivery, placement, token membership and
-    //    written values — S4.3 adds the measured effect/integrity report).
-    const verifyProblems: string[] = [];
-    for (const [i, t] of prepared.textPreps.entries()) {
-      if (!t.node.isConnected || t.node.nodeValue !== t.installed) verifyProblems.push(`text resource ${i} did not hold its installed value`);
+    // 6. S4.3 mandatory structured verification: delivery/effect/integrity
+    //    against the captured baseline, one bounded recheck of unknowns; the
+    //    aggregate gates acceptance (I11 — unknown is never accepted).
+    let report: VerificationReport;
+    try {
+      report = await verifier.verify(prepared.plan, captured.baseline);
+    } catch (e) {
+      report = syntheticReport(req, `the verifier failed: ${(e as Error).message}`);
     }
-    for (const [i, ins] of prepared.inserts.entries()) {
-      if (!ins.roots.every((r) => r.isConnected)) verifyProblems.push(`insertUI ${i} is not connected at its anchor`);
+    const counted = report.counts.pass + report.counts.satisfied + report.counts.fail + report.counts.unknown;
+    if (report.revisionId !== req.revisionId || !['pass', 'fail', 'unknown'].includes(report.status) || counted === 0) {
+      // A report with NO measured checks can never pass (T13: no empty-array
+      // fallback pass; a missing/empty verifier is unknown).
+      report = syntheticReport(req, 'the verifier returned no usable report for this revision');
     }
-    for (const el of prepared.candidateElements) {
-      if (el.isConnected && el.getAttribute(TOKEN_ATTRIBUTE) !== nsNew) {
-        verifyProblems.push('a candidate target lost its token membership (site interference or re-render)');
-      }
-    }
-    if (verifyProblems.length > 0) {
-      return rollbackCandidate(prepared, req, digest, oldNs, oldSet, newSet, stagedOpId, nsNew, conflicts, `verification failed: ${verifyProblems.join('; ')}`);
+    if (report.status !== 'pass') {
+      const keys = report.issues.slice(0, 3).map((i) => i.key).join(', ');
+      return rollbackCandidate(prepared, req, digest, oldNs, oldSet, newSet, stagedOpId, nsNew, conflicts,
+        `verification ${report.status}${keys ? `: ${keys}` : ''}`, report);
     }
 
     // 7. Acceptance: commit metadata FIRST (predecessor retained), recheck,
@@ -628,7 +802,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         // Late promotion compensation: the whole candidate reverses under the
         // SAME operation id; the predecessor is re-activated (I07/I12).
         const reason = late ? late.message : `commit metadata ack refused: ${commitReply.ok ? '' : commitReply.message}`;
-        return rollbackCandidate(prepared, req, digest, oldNs, oldSet, newSet, stagedOpId, nsNew, conflicts, `late promotion compensated: ${reason}`);
+        return rollbackCandidate(prepared, req, digest, oldNs, oldSet, newSet, stagedOpId, nsNew, conflicts, `late promotion compensated: ${reason}`, report);
       }
     }
 
@@ -669,6 +843,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       ownedNodes: prepared.inserts.flatMap((i) => i.roots),
       elements: prepared.candidateElements,
       highImpact: prepared.highImpact,
+      decls: prepared.candidateDecls,
     };
     revisions.set(req.customizationId, record);
 
@@ -684,6 +859,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       resourceIds,
       routeEpoch: epochNow(),
       ...(cleanupFailed ? { cleanupPending: true } : {}),
+      report,
     });
   };
 
@@ -725,6 +901,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     nsNew: string,
     conflicts: string[],
     reason: string,
+    report?: VerificationReport,
   ): Promise<BatchReceipt> => {
     // Disarm FIRST (I07): the candidate namespace can never reactivate.
     deps.tokens.revoke(nsNew);
@@ -749,6 +926,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       routeEpoch: deps.routeEpoch(),
       error: err('conflict', 'apply', reason, 'the whole candidate rolled back; earlier accepted revisions are untouched'),
       ...(conflicts.length ? { conflicts: conflicts.slice(0, 16) } : {}),
+      ...(report ? { report } : {}),
     });
   };
 
