@@ -5,10 +5,10 @@
 ## Current checkpoint
 
 - Current phase: **S6 — model independence, workspace and core cutover**.
-- Next task: **S6.1**.
+- Next task: **S6.2**.
 - Active task: none.
-- Completed: S0.1 through S5.2 (see `plan/progress.md`). S5 delivered durable continuity: S5.1 the persistent record owner (per-origin serialized writes, expected-revision gate, lastMutationId reconciliation, quotas, tombstones, legacy quarantine), S5.2 route-aware replay (`runtime/replay`: descriptor resolution, scope enforcement with discriminators, replay through the same transaction path, reconciliation with conflict pause, per-document enable/disable/remove broadcasts with acks) — saved intent survives compatible reload/SPA routes without a model.
-- Known baseline blockers: none. Residual: `npm run bench` references the absent old bench harness (deferred to S6.1); the legacy F05 recovery clause stays known-red until the plan/19 cutover deletes that path (its v2 equivalent — absent/empty/throwing verification is never pass — is enforced and tested in S4.3); reconciliation set-membership changes re-apply whole customizations (bounded by the conflict pause) until a task needs per-member ledger deltas.
+- Completed: S0.1 through S6.1 (see `plan/progress.md`). S5 delivered durable continuity (record owner + route-aware replay); S6.1 delivered `providers.ts` (bounded HTTP client with shared deadline/retry/backoff/byte-cap/redirect+credential policy, strict exactly-one-object extraction, OpenAI-chat + Anthropic adapters with recorded one-parameter downgrade) and `planning/controller.ts` (stable prompts, bounded disclosed context, ≤4 responses/≤2 evidence/≤1 shared correction, question pause/resume, consent gate, honest terminals) — exercised over mock HTTP only, no production wiring yet.
+- Known baseline blockers: none. Residual: `npm run bench` references the absent old bench harness (deferred); the legacy F05 recovery clause stays known-red until the plan/19 cutover deletes that path; streaming + capability-probe connection tests deferred from S6.1 (recorded); reconciliation set-membership changes re-apply whole customizations (bounded by the conflict pause).
 - Planning baseline: dirty `main` at `71263e0938e0a3d3a2a5e7a44d2175898b9e8c0b`; owner's changes preserved.
 - Evidence: `plan/progress.md` (one compact log).
 - Simplicity: follow consolidated physical files in document 02. Detailed module names below are logical responsibilities, not mandatory files/classes. One ordered batch per proposal; no subgroup DAG. Capability coverage including insertion/motion/canvas is in document 28.
@@ -183,15 +183,15 @@ Read: [persistence](13-persistence-and-replay.md), algorithms A6/A9, [migration]
 Read: [providers](11-model-providers.md), [UX](16-observability-and-ux.md), ADR02/09, [cutover](19-migration-and-deletion.md).
 
 - [ ] **S6 phase completed**
-  - [ ] **S6.1 — Implement provider adapters and bounded planning controller**
+  - [x] **S6.1 — Implement provider adapters and bounded planning controller**
     - Goal/inputs: S1 contracts, S3 evidence, S4 validation/receipts; adapter code can begin after S1 but integration needs S5.
     - Changes: OpenAI-chat/Anthropic/local profiles, exact endpoint auth, bounded streaming/nonstreaming client, schema decode, recent context and one shared correction budget; model calls in visible workspace.
     - Outputs: arbitrary compatible model selection without source edits; one-call common path, no provider dependency in runtime.
     - Invariants: I01/I02/I12/I18/I20.
-    - [ ] Tests: T02/T19/T20/T25 across mock strong/weak/text-only/malformed/slow providers.
-    - [ ] Validation: ≤4 responses/≤6 HTTP attempts, body deadline/Stop, explicit unsupported protocol; AC05.
-    - [ ] Completion: identical runtime safety results for all model profiles; evidence S6.1.
-    - Follow-up: workspace/user settings integration.
+    - [x] Tests: T02/T19/T20/T25 across mock strong/weak/text-only/malformed/slow providers.
+    - [x] Validation: ≤4 responses/≤6 HTTP attempts, body deadline/Stop, explicit unsupported protocol; AC05.
+    - [x] Completion: identical runtime safety results for all model profiles; evidence S6.1.
+    - Follow-up: workspace/user settings integration (streaming + capability probe deferred until a task needs them — recorded in progress S6.1).
   - [ ] **S6.2 — Build accessible shared workspace and truthful state management**
     - Goal/inputs: S6.1 controller, S5 records/live projections, security disclosures.
     - Changes: sidepanel + extension-tab fallback, exact target selector, provider settings/consent/opt-out, question/approval UX, always available Stop, customization list/undo/scope and diagnostic panel.

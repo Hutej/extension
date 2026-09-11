@@ -1,3 +1,11 @@
+import type {
+  ActionEntry, PageSnapshot, Region, RegionSemantics, SnapshotCoverage, SnapshotCursor,
+} from '../contracts.ts';
+
+export type {
+  RegionSemantics, RegionGeometry, Region, ActionEntry, SnapshotCoverage, PageSnapshot, SnapshotCursor,
+} from '../contracts.ts';
+
 /**
  * runtime/observe — bounded semantic snapshots (plan/03 `runtime/facts` +
  * `runtime/observe`, plan/07 §1, algorithm A1).
@@ -46,78 +54,6 @@ const SKIP_TAGS = new Set(['script', 'style', 'noscript', 'template', 'svg', 'he
 
 /** Form control types whose value/name context is private (T04). */
 const SENSITIVE_INPUT_TYPES = new Set(['password', 'email', 'tel', 'search', 'hidden']);
-
-// ── snapshot records (plan/04 §2) ────────────────────────────────────────
-
-export interface RegionSemantics {
-  tag: string;
-  /** Author-declared role when present; otherwise the landmark
-   *  approximation is labeled as such — never claimed as ARIA-tree parity. */
-  role?: string;
-  roleSource?: 'declared' | 'landmark-approximation';
-  /** Accessible-name approximation from aria-label/alt/placeholder/label
-   *  association; privacy-redacted. Labeled approximation. */
-  nameApprox?: string;
-  nameSource?: 'aria-label' | 'alt' | 'placeholder' | 'aria-labelledby' | 'title-attr' | 'button-text';
-}
-
-export interface RegionGeometry {
-  /** Quantized viewport-relative rect (CSS px, rounded to integers). */
-  x: number; y: number; w: number; h: number;
-  inViewport: boolean;
-  clipped?: boolean;
-}
-
-export interface Region {
-  targetRef: string;
-  rootRef: string;
-  parentRef?: string;
-  kind: 'element';
-  semantics: RegionSemantics;
-  textSample?: string;
-  textLength?: number;
-  geometry: RegionGeometry;
-  stability: 'session-only';
-  hidden: boolean;
-  /** Action catalog ids this region participates in. */
-  affordances?: string[];
-}
-
-export interface ActionEntry {
-  actionId: string;
-  kind: 'button' | 'link' | 'input' | 'select' | 'textarea' | 'submit';
-  targetRef: string;
-  /** Declared control type (input type attr) — never a value. */
-  controlType?: string;
-  disabled: boolean;
-}
-
-export interface SnapshotCoverage {
-  visitedNodes: number;
-  selectedRegions: number;
-  completed: boolean;
-  reason?: 'node-budget' | 'time-budget' | 'privacy' | 'unsupported-root' | 'unstable';
-  nextCursor?: string;
-}
-
-export interface PageSnapshot {
-  schemaVersion: 1;
-  snapshotId: string;
-  collectedAt: number;
-  viewport: { width: number; height: number };
-  documentMetadata: { origin: string; titleRedacted?: string };
-  roots: Array<{ rootId: string; kind: 'document' | 'shadow-root' }>;
-  regions: Region[];
-  actions: ActionEntry[];
-  coverage: SnapshotCoverage;
-}
-
-export interface SnapshotCursor {
-  snapshotId: string;
-  epoch: number;
-  offset: number;
-  expiresAt: number;
-}
 
 export interface ObservationDeps {
   doc: Document;
