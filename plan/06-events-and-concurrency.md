@@ -14,6 +14,8 @@ Every request uses [Envelope](04-data-contracts.md). Receivers verify sender rol
 | ValidateProposal | planner → runtime via broker | proposal + snapshot ID; diagnostics/approval requirements | Schema/policy validation in runtime |
 | ApplyBatch | planner → runtime via broker | validated proposal token/revision ID/grant ID; resource receipt | Current approval and epoch; one ordered batch, no subgroup scheduler |
 | GetOperation | workspace/broker → runtime | operation ID; current receipt | Resolve lost replies; no side effects |
+| ListDocuments | workspace → broker | none; registry snapshot | Read-only discovery for the exact-target picker (S6.2, ADR-14); no mutation authority |
+| GetState | workspace → registered runtime | none; live projection + seq | Read-only close/reopen resync (ADR-14); same document fence as every page-scoped command |
 | StageStyle / RemoveStyle | runtime → broker | exact compiled aggregate, composition revision, namespaces, operation ID; delivery receipt | Registered document, bounded validated resource contract, CSS policy independently checked |
 | CommitComposition | runtime → broker | verified candidate operation/composition IDs; session metadata acknowledgement | Current runtime/epoch; records promotion only, does not remove predecessor bundle |
 | RenewLease | owning workspace → runtime via broker | run ID and current provisional operation IDs | Owner identity verified; renewal cannot revive a revoked namespace |

@@ -16,6 +16,11 @@ export default defineBackground(() => {
   // MV3 keepalive — the loop's tool dispatchs keep this SW alive.
   chrome.runtime.onConnect.addListener(() => {});
 
+  // S6.2: the toolbar button opens the shared workspace side panel (Chrome
+  // 116+). Where the panel is unavailable, the same page runs as an extension
+  // tab (the in-page "Open this workspace in a tab" button).
+  chrome.sidePanel?.setPanelBehavior({ openPanelOnActionClick: true }).catch(() => undefined);
+
   // S2.1: the v2 document broker — synchronous listener + hydration barrier,
   // document registry with route-epoch fencing, one run owner per document.
   // It owns only envelope-shaped v2 messages (protocolVersion=1); the legacy

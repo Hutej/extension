@@ -103,6 +103,16 @@ Accumulated per-path journals are easy but unversioned/concurrent; server persis
 
 **Reversal conditions:** split files when actual complexity or lifecycle isolation justifies it; introduce a group dependency system only for a demonstrated requirement a linear batch cannot express, with its own tests and ADR. Do not add it for hypothetical extensibility. This owner-approved simplification changes target documentation only; no existing product implementation or schema has been migrated by this task.
 
+## ADR-14 — Workspace document discovery and state pull (ListDocuments / GetState)
+
+**Added 2026-09-09 (S6.2, plan/24 §5 protocol-addition record).**
+
+**Context/problem:** the workspace must pin an EXACT registered DocumentKey — a tab id alone never authorizes (I04) — and must resynchronize per-document live state after close/reopen (plan/06 RuntimeState: “missed sequence triggers snapshot”). RuntimeState pushes alone cannot do either: a freshly opened workspace has received no push, and it cannot address any runtime without a DocumentKey, which only the broker registry knows.
+
+**Options:** (a) keep only push projections — workspace cannot open mid-session or reconnect (violates S6.2 completion “close/reopen states correct” and T21 “user chooses exact target”); (b) let the workspace guess tab-derived keys or re-register runtimes from pages — violates I04/I03; (c) two read-only queries: `ListDocuments` (workspace → broker: registry snapshot) and `GetState` (workspace → registered runtime via the same document fence as every other page-scoped command).
+
+**Decision:** (c). Both commands are workspace-role only, read-only, and return data the workspace already receives via RuntimeState broadcasts (opaque DocumentKeys, epochs, origins, bounded live states) — no new mutation authority, no new trust surface. RuntimeState broadcasts now carry a monotonic `seq`; stale pushes are ignored, `GetState` is the resync pull. **Tests:** unit (stale-seq ignore, exact-target refusal, reopen resync) in `tests/unit/workspace.test.ts`; browser reopen in `tests/browser/workspace.test.ts`. **Consequences:** the plan/06 §1 protocol table gains the two rows. **Reversal:** if a subscription/port mechanism replaces polling pulls, remove both commands with a migration note; the sender allowlist and document fence stay.
+
 ## Decision change rules
 
 File naming, private helper extraction and purely internal iteration techniques may change with tests. Ownership, operation grammar, trust boundaries, provider execution host, persistence schema, fallback visibility and acceptance requirements require ADR amendment plus roadmap/test/traceability updates. Changes need evidence of a real failure or requirement; “the model performs better without guards” is not sufficient.

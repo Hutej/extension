@@ -288,8 +288,9 @@ const HANDSHAKE_RETRY_MS = 200;
 const RELAY_BUDGET_MS = 5000;
 
 /** Runtime-inbound command kinds: receipt lookup (S2.1), bounded observation
- *  (S3.1) and one-batch application (S4.2 — the runtime owns the transaction). */
-const RUNTIME_INBOUND_COMMANDS = new Set(['GetOperation', 'Observe', 'Inspect', 'Expand', 'ApplyBatch', 'SavedRevision', 'SetEnabled', 'RemoveCustomization']);
+ *  (S3.1), one-batch application (S4.2 — the runtime owns the transaction),
+ *  record relays (S5.2) and the S6.2 workspace state pull. */
+const RUNTIME_INBOUND_COMMANDS = new Set(['GetOperation', 'Observe', 'Inspect', 'Expand', 'ApplyBatch', 'SavedRevision', 'SetEnabled', 'RemoveCustomization', 'GetState']);
 
 function randomInstanceId(): string {
   // crypto.randomUUID needs a secure context; getRandomValues does not.
@@ -328,13 +329,31 @@ const ROUTE_CHANGED_PAYLOAD = decodeRecord(
   { maxDepth: 8 },
 );
 
+/** Monotonic projection sequence (plan/06 §4: increasing owner sequence; a
+ *  stale/missed push is ignored, a gap pulls via GetState). */
+let stateSeq = 0;
+
 /** Broadcast the bounded session projection to subscribed workspaces
  *  (plan/06 RuntimeState: owner → subscribed workspace). Fire-and-forget. */
 function broadcastState(core: SessionCore, customizations: ReplayEntry[] = []): void {
   if (core.lifecycle() === 'disposed') return;
+  const seq = ++stateSeq;
   void chrome.runtime
-    .sendMessage(envelopeOf('subscription', { command: 'RuntimeState', state: core.lifecycle(), routeEpoch: core.routeEpoch(), customizations }, core.documentKey() ?? undefined))
+    .sendMessage(envelopeOf('subscription', { command: 'RuntimeState', state: core.lifecycle(), routeEpoch: core.routeEpoch(), seq, customizations }, core.documentKey() ?? undefined))
     .catch(() => undefined); // no subscriber — fine
+}
+
+/** GetState reply — the CURRENT projection plus the next sequence number, so
+ *  a workspace that reopens can resynchronize without waiting for a change. */
+function stateReply(core: SessionCore, customizations: ReplayEntry[]): Record<string, unknown> {
+  return {
+    ok: true,
+    kind: 'state',
+    state: core.lifecycle(),
+    routeEpoch: core.routeEpoch(),
+    seq: ++stateSeq,
+    customizations,
+  };
 }
 
 /**
@@ -628,6 +647,13 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
           recoveryAction: 'obtain fresh state and a new reviewed operation',
         },
       });
+      return false;
+    }
+
+    // S6.2: the workspace's state pull (close/reopen resynchronization) — a
+    // read-only projection, answered from live replay state (never invented).
+    if (command === 'GetState') {
+      sendResponse(stateReply(core, replay.states()));
       return false;
     }
 

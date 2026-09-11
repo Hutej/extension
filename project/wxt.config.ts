@@ -5,8 +5,11 @@ export default defineConfig({
   manifest: {
     name: 'Revueon',
     description: 'An AI agent that lives in the browser',
-    permissions: ['activeTab', 'storage', 'scripting', 'webNavigation'],
+    permissions: ['activeTab', 'storage', 'scripting', 'webNavigation', 'sidePanel'],
     host_permissions: ['<all_urls>'],
+    action: {
+      default_title: 'Open the Revueon workspace',
+    },
   },
   vite: () => ({
     // Pass model envs through at build time. Without this, process.env is not

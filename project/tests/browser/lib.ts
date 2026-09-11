@@ -38,10 +38,62 @@ export function newestMtime(dir: string, extraFiles: string[]): number {
   return newest;
 }
 
-/** Ephemeral static file server for the fixture pages. */
+/** Ephemeral static file server for the fixture pages. POST
+ *  /v1/chat/completions is a CANNED local model: it reads the planner's
+ *  evidence block, finds the first h1 region and answers with a valid S1
+ *  proposal targeting it — a deterministic stand-in so workspace tests run
+ *  the full user workflow with zero live model and zero external network. */
 export function startFixtureServer(): Promise<{ server: Server; origin: string; close: () => Promise<void> }> {
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
+    if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
+      const chunks: Buffer[] = [];
+      for await (const chunk of req) chunks.push(chunk as Buffer);
+      const body = Buffer.concat(chunks).toString('utf8');
+      // The request body is a JSON chat envelope: evidence newlines live as
+      // \n escapes inside message strings — extract the plaintext first.
+      let evidenceText = body;
+      try {
+        const parsed = JSON.parse(body) as { messages?: Array<{ content?: string }> };
+        evidenceText = (parsed.messages ?? []).map((msg) => msg.content ?? '').join('\n');
+      } catch {
+        /* fall back to raw body matching */
+      }
+      const m = evidenceText.match(/^ {2}(t\d+) \| h1\b/m);
+      if (!m) console.log('[fixture-provider] no h1 match; evidence head:', evidenceText.slice(-2500).replace(/\s+/g, ' ').slice(0, 2500));
+      const targetRef = m ? m[1] : '';
+      const content = targetRef
+        ? JSON.stringify({
+            kind: 'proposal',
+            schemaVersion: 1,
+            summary: 'Color the main heading crimson',
+            operations: [
+              {
+                kind: 'style',
+                rules: [
+                  {
+                    target: { targetRef },
+                    surface: 'element',
+                    state: 'none',
+                    declarations: [{ property: 'color', value: 'crimson', priority: 'important' }],
+                    conditions: [],
+                  },
+                ],
+              },
+            ],
+          })
+        : JSON.stringify({ kind: 'cannotComplete', reason: `no heading evidence in the payload; got: ${evidenceText.slice(0, 4000).replace(/\s+/g, ' ')}` });
+      const payload = JSON.stringify({
+        id: 'chatcmpl-fixture',
+        object: 'chat.completion',
+        created: 0,
+        model: 'fixture-model',
+        choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+        usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+      });
+      res.writeHead(200, { 'content-type': 'application/json' }).end(payload);
+      return;
+    }
     const name = url.pathname === '/' ? 'index.html' : url.pathname.slice(1);
     const path = join(FIXTURES_DIR, name);
     if (!path.startsWith(FIXTURES_DIR)) {

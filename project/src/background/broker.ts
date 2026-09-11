@@ -61,6 +61,7 @@ export type BrokerReply =
   | { ok: true; kind: 'record-revision'; recordRevision: number }
   | { ok: true; kind: 'origin-record'; originRecord: Record<string, unknown> | null }
   | { ok: true; kind: 'quarantine'; entries: Array<{ key: string; reason: string; bytes: number }>; raw?: string }
+  | { ok: true; kind: 'documents'; documents: Array<{ documentKey: DocumentKey; tabId: number; frameId: number; routeEpoch: number; origin: string | null; runOwner: boolean; registeredAt: number }> }
   | { ok: false; kind: 'error'; error: ErrorRecord; conflict?: Record<string, unknown> };
 
 export function errorRecord(
@@ -92,7 +93,7 @@ const COMMANDS_BY_TRANSPORT: Record<Envelope['kind'], readonly string[]> = {
   'run-command': ['StartRun', 'CancelRun', 'ApplyBatch'],
   'observe-request': ['Observe', 'Inspect', 'Expand'],
   'style-delivery': ['StageStyle', 'RemoveStyle', 'CommitComposition'],
-  control: ['RegisterDocument', 'GetOperation', 'RenewLease', 'SaveRevision', 'SetEnabled', 'RemoveCustomization', 'GetOriginRecord', 'ExportQuarantine'],
+  control: ['RegisterDocument', 'GetOperation', 'RenewLease', 'SaveRevision', 'SetEnabled', 'RemoveCustomization', 'GetOriginRecord', 'ExportQuarantine', 'ListDocuments', 'GetState'],
   subscription: ['RuntimeState', 'RunProgress'], // runtime→workspace projections: never routed
 };
 
@@ -242,6 +243,16 @@ const GET_ORIGIN_RECORD_PAYLOAD = decodeRecord(
 
 const EXPORT_QUARANTINE_PAYLOAD = decodeRecord(
   { command: decodeLiteral(['ExportQuarantine']), key: decodeString({ max: 600, pattern: /^rv/ }) },
+  { maxDepth: 8 },
+);
+
+const LIST_DOCUMENTS_PAYLOAD = decodeRecord(
+  { command: decodeLiteral(['ListDocuments']) },
+  { maxDepth: 8 },
+);
+
+const GET_STATE_PAYLOAD = decodeRecord(
+  { command: decodeLiteral(['GetState']) },
   { maxDepth: 8 },
 );
 
@@ -702,6 +713,40 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
         const raw = await deps.store.exportQuarantined(p.value.key);
         if (raw === undefined) return deny('unknown-target', 'reconcile', 'no quarantined entry under that key');
         return { ok: true, kind: 'quarantine', entries: deps.store.quarantined(), raw };
+      }
+
+      case 'ListDocuments': {
+        const p = LIST_DOCUMENTS_PAYLOAD(envelope.payload, 'payload');
+        if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        // Read-only registry snapshot for the workspace's exact-target picker
+        // (plan/16 §1: the user pins a document explicitly — never a tab-id
+        // guess). The registry carries no page content: keys/epochs/origins
+        // only, exactly what broadcasts already expose.
+        return {
+          ok: true,
+          kind: 'documents',
+          documents: [...registry.values()].map((r) => ({
+            documentKey: r.documentKey,
+            tabId: r.documentKey.tabId,
+            frameId: r.documentKey.frameId,
+            routeEpoch: r.routeEpoch,
+            origin: r.origin,
+            runOwner: r.run !== null,
+            registeredAt: r.registeredAt,
+          })),
+        };
+      }
+
+      case 'GetState': {
+        const p = GET_STATE_PAYLOAD(envelope.payload, 'payload');
+        if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        // Relayed to the exact registered runtime (same fence as every
+        // page-scoped command): the runtime answers with its live projection.
+        // An unreachable runtime stays an explicit error — never a fabricated
+        // clean state (I10).
+        const resolved = resolveDocument(envelope);
+        if (!('record' in resolved)) return resolved;
+        return relayToRuntime(deps, resolved.record.documentKey.tabId, envelope);
       }
 
       default:

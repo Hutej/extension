@@ -1651,6 +1651,14 @@ const KIND_SENDER_ROLES: Readonly<Record<string, readonly SenderRole[]>> = {
   RemoveCustomization: ['workspace'],
   GetOriginRecord: ['workspace'],
   ExportQuarantine: ['workspace'],
+  // S6.2 workspace discovery/state pull: read-only queries. The workspace
+  // can never ADDRESS a document by tab id alone (I04) — it needs the broker
+  // registry to pin an exact registered DocumentKey, and a pull path for the
+  // per-document live projection after close/reopen (a missed push is not a
+  // guessable state). Both return data the workspace already receives via
+  // RuntimeState broadcasts; neither grants mutation authority.
+  ListDocuments: ['workspace'],
+  GetState: ['workspace'],
   // S5.2: broker-relayed record continuity (the broker forwards confirmed
   // record mutations to registered runtimes; a workspace may also address
   // its own document directly, as with ApplyBatch).
