@@ -37,6 +37,8 @@ import {
   decodeLiteral,
   decodeArray,
   decodeFiniteNumber,
+  decodeBoolean,
+  decodeCustomization,
   optional,
   type DocumentKey,
   type Envelope,
@@ -48,6 +50,8 @@ import { createTargetRegistry } from './targets.ts';
 import { createTokenScope } from './styles.ts';
 import { createContentCreator } from './content.ts';
 import { createTransaction, type BatchReceipt, type StyleClient, type StyleOutcome } from './transaction.ts';
+import { createReplay, type ReplayCore, type ReplayEntry } from './replay.ts';
+import type { Customization } from '../contracts.ts';
 import { createVerifier, probeCanonicalOf } from './verify.ts';
 
 // ── serial queue (plan/06 §2 boundary 1) ─────────────────────────────────
@@ -285,7 +289,7 @@ const RELAY_BUDGET_MS = 5000;
 
 /** Runtime-inbound command kinds: receipt lookup (S2.1), bounded observation
  *  (S3.1) and one-batch application (S4.2 — the runtime owns the transaction). */
-const RUNTIME_INBOUND_COMMANDS = new Set(['GetOperation', 'Observe', 'Inspect', 'Expand', 'ApplyBatch']);
+const RUNTIME_INBOUND_COMMANDS = new Set(['GetOperation', 'Observe', 'Inspect', 'Expand', 'ApplyBatch', 'SavedRevision', 'SetEnabled', 'RemoveCustomization']);
 
 function randomInstanceId(): string {
   // crypto.randomUUID needs a secure context; getRandomValues does not.
@@ -326,10 +330,10 @@ const ROUTE_CHANGED_PAYLOAD = decodeRecord(
 
 /** Broadcast the bounded session projection to subscribed workspaces
  *  (plan/06 RuntimeState: owner → subscribed workspace). Fire-and-forget. */
-function broadcastState(core: SessionCore): void {
+function broadcastState(core: SessionCore, customizations: ReplayEntry[] = []): void {
   if (core.lifecycle() === 'disposed') return;
   void chrome.runtime
-    .sendMessage(envelopeOf('subscription', { command: 'RuntimeState', state: core.lifecycle(), routeEpoch: core.routeEpoch() }, core.documentKey() ?? undefined))
+    .sendMessage(envelopeOf('subscription', { command: 'RuntimeState', state: core.lifecycle(), routeEpoch: core.routeEpoch(), customizations }, core.documentKey() ?? undefined))
     .catch(() => undefined); // no subscriber — fine
 }
 
@@ -450,6 +454,18 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
       }),
   });
 
+  // S5.2: route-aware replay + same-document reconciliation of saved intent
+  // (plan/13 §4/§5) — the SAME transaction path as an initial apply (I14).
+  const replay: ReplayCore = createReplay({
+    doc: document,
+    targets,
+    transaction,
+    href: () => location.href,
+    now: () => Date.now(),
+    randomId: randomInstanceId,
+    onStatesChanged: (entries) => broadcastState(core, entries),
+  });
+
   const INSPECT_PAYLOAD = decodeRecord(
     { command: decodeLiteral(['Inspect']), targetRef: decodeString({ max: 64, pattern: /^[A-Za-z0-9._-]+$/ }), fields: optional(decodeArray(decodeString({ max: 32 }), 16)) },
     { maxDepth: 8 },
@@ -487,8 +503,13 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
           (reply as Record<string, unknown>).ok === true &&
           (reply as Record<string, unknown>).kind === 'registered'
         ) {
-          const r = reply as { documentKey: DocumentKey; routeEpoch: number };
+          const r = reply as { documentKey: DocumentKey; routeEpoch: number; applicable?: Customization[] };
           core.registered(r.documentKey, r.routeEpoch);
+          // S5.2: the broker-verified applicable records replay through the
+          // serial queue at reconcile priority (boot is never a mutation).
+          if (r.applicable && r.applicable.length > 0) {
+            void queue.submit(QUEUE_PRIORITY.reconcile, () => replay.setApplicable(r.applicable!));
+          }
           return true;
         }
         return false; // deterministic broker refusal — do not spin
@@ -510,6 +531,7 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     if (disposed) return;
     disposed = true;
     queue.cancelPending('runtime disposing');
+    replay.dispose();
     core.dispose();
     for (const [target, type, fn] of domListeners) target.removeEventListener(type, fn);
     domListeners.length = 0;
@@ -526,6 +548,9 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     if (lastUrl !== location.href) {
       lastUrl = location.href;
       core.noteLocalNavigation();
+      // Local route change (popstate/hashchange): re-evaluate record scopes
+      // without waiting for the broker's RouteChanged (plan/06 §5).
+      void queue.submit(QUEUE_PRIORITY.reconcile, () => replay.onRouteChanged());
     }
   };
 
@@ -559,6 +584,9 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
         envelope.documentKey.browserDocumentId === own.browserDocumentId
       ) {
         core.adoptRouteEpoch(p.value.routeEpoch);
+        // S5.2: the authoritative route epoch moved — re-evaluate scope
+        // (out-of-scope tokens revoked before new activation, plan/13 §4).
+        void queue.submit(QUEUE_PRIORITY.reconcile, () => replay.onRouteChanged());
       }
       return false;
     }
@@ -601,6 +629,56 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
         },
       });
       return false;
+    }
+
+    // S5.2: broker-relayed record continuity — a trusted workspace record
+    // write was confirmed by the broker, which now targets THIS document.
+    // The runtime reconciles locally and answers with its own result (I10:
+    // missing acks stay visible broker-side).
+    if (command === 'SavedRevision' || command === 'SetEnabled' || command === 'RemoveCustomization') {
+      const p = decodeRecord(
+        {
+          command: decodeLiteral(['SavedRevision', 'SetEnabled', 'RemoveCustomization']),
+          origin: optional(decodeString({ max: 512 })),
+          // SavedRevision carries the whole validated customization instead.
+          customizationId: optional(ID_FIELD),
+          enabled: optional(decodeBoolean),
+          recordRevision: optional(decodeFiniteNumber({ integer: true, min: 0 })),
+          customization: optional((v: unknown, path = 'customization') => decodeCustomization(v, path)),
+        },
+        { maxDepth: 8 },
+      )(envelope.payload, 'payload');
+      if (!p.ok) {
+        sendResponse({ ok: false, kind: 'error', error: sessionError('invalid-schema', 'malformed record-relay payload') });
+        return false;
+      }
+      void queue
+        .submit(QUEUE_PRIORITY.reconcile, async () => {
+          if (p.value.command === 'SavedRevision') {
+            const customization = (envelope.payload as { customization?: Customization }).customization;
+            if (customization) await replay.setApplicable([customization]);
+            else throw new Error('SavedRevision relay carries no customization');
+          } else if (p.value.command === 'SetEnabled') {
+            if (p.value.customizationId === undefined) throw new Error('SetEnabled relay carries no customizationId');
+            await replay.setEnabled(p.value.customizationId, p.value.enabled === true);
+          } else {
+            if (p.value.customizationId === undefined) throw new Error('RemoveCustomization relay carries no customizationId');
+            await replay.removeCustomization(p.value.customizationId);
+          }
+          broadcastState(core, replay.states());
+          return { ok: true, kind: 'record-ack', customizationId: p.value.customizationId };
+        })
+        .then(
+          (ack) => {
+            try { sendResponse(ack); } catch { /* channel gone */ }
+          },
+          (err: unknown) => {
+            try {
+              sendResponse({ ok: false, kind: 'error', error: sessionError('internal', `record reconcile failed: ${err instanceof Error ? err.message : String(err)}`) });
+            } catch { /* channel gone */ }
+          },
+        );
+      return true; // async response
     }
 
     // S4.2: one proposal is one ordered batch — it runs through the serial

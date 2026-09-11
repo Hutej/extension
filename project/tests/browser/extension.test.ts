@@ -234,6 +234,7 @@ interface CapturedState {
   documentKey?: { tabId: number; frameId: number; browserDocumentId: string; runtimeInstanceId: string };
   routeEpoch?: number;
   state?: string;
+  customizations?: Array<{ customizationId: string; state: string; detail?: string }>;
 }
 
 /** Open an extension page as the trusted workspace sender (plan/06: workspace
@@ -247,12 +248,13 @@ async function openWorkspace(): Promise<Page> {
     const w = window as unknown as { __rv2States: CapturedState[] };
     w.__rv2States = [];
     chrome.runtime.onMessage.addListener((msg: unknown) => {
-      const m = msg as { protocolVersion?: number; kind?: string; payload?: { command?: string }; documentKey?: CapturedState['documentKey']; payloadState?: string };
+      const m = msg as { protocolVersion?: number; kind?: string; payload?: { command?: string; customizations?: Array<{ customizationId: string; state: string }> }; documentKey?: CapturedState['documentKey']; payloadState?: string };
       if (m && m.protocolVersion === 1 && m.kind === 'subscription' && m.payload?.command === 'RuntimeState') {
         w.__rv2States.push({
           documentKey: m.documentKey,
           routeEpoch: (m.payload as unknown as { routeEpoch?: number }).routeEpoch,
           state: (m.payload as unknown as { state?: string }).state,
+          ...(m.payload.customizations !== undefined ? { customizations: m.payload.customizations } : {}),
         });
       }
     });
@@ -891,7 +893,7 @@ const SAVE_REVISION = {
     continuityPolicy: 'stable-single',
   }],
   operations: [
-    { kind: 'style', rules: [{ target: { targetRef: 'r1' }, surface: 'element', state: 'none', declarations: [{ property: 'color', value: 'red', priority: 'important' }], conditions: [] }] },
+    { kind: 'style', rules: [{ target: { targetRef: 'd0' }, surface: 'element', state: 'none', declarations: [{ property: 'color', value: 'red', priority: 'important' }], conditions: [] }] },
   ],
   savedAt: 1,
   source: 'user-planned',
@@ -972,4 +974,146 @@ test('S5.1: a workspace save writes one complete v2 record; a stale save conflic
   const after = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { customizations: unknown[]; tombstones: unknown[] } }).originRecord!;
   assert.equal(after.customizations.length, 0);
   assert.equal(after.tombstones?.length, 1);
+});
+
+
+// ── S5.2: replay on the real path (T10/T11) ─────────────────────────────
+
+async function waitFor(ws: Page | null, predicate: () => Promise<boolean>, what: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    if (await predicate()) return;
+    if (Date.now() > deadline) {
+      let states = 'n/a';
+      try {
+        states = JSON.stringify(await ws!.evaluate(() => (window as unknown as { __rv2States: unknown[] }).__rv2States.filter((s) => (s as { customizations?: unknown[] }).customizations?.length)));
+      } catch { /* page gone */ }
+      throw new Error(`timed out waiting for ${what}; customization projections: ${states}`);
+    }
+    await sleep(200);
+  }
+}
+
+const REPLAY_REVISION = {
+  revisionId: 'replay-r1',
+  capabilityVersion: 1,
+  targetDescriptors: [{
+    descriptorVersion: 1,
+    rootPath: [],
+    selection: 'single',
+    anchor: { tag: 'p', stableId: 'leaf' },
+    relation: 'self',
+    matchBounds: { min: 1, max: 1 },
+    routeScopeRef: 'https://example.test',
+    continuityPolicy: 'stable-single',
+  }],
+  operations: [
+    { kind: 'style', rules: [{ target: { targetRef: 'd0' }, surface: 'element', state: 'none', declarations: [{ property: 'color', value: 'red', priority: 'important' }], conditions: [] }] },
+  ],
+  savedAt: 1,
+  source: 'user-planned',
+};
+
+test('S5.2/T10: apply → save → reload replays the saved intent without a model; disable persists', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, tabId } = await openFixture('v2-apply.html');
+  const fixtureUrl = new URL(page.url());
+  const origin = fixtureUrl.origin;
+  const state = await capturedState(workspace, tabId);
+
+  // 1. Save a descriptor-based customization (no prior apply needed — saved
+  // intent is self-contained and replays on any compatible document).
+  const saved = await workspaceSend(workspace, controlEnvelope({
+    command: 'SaveRevision',
+    origin,
+    customizationId: 'replay-1',
+    title: 'Replay theme',
+    scope: { mode: 'exactPath', path: fixtureUrl.pathname },
+    contentSensitivity: 'page-only',
+    grants: [],
+    revision: REPLAY_REVISION,
+    expectedRecordRevision: 0,
+    mutationId: 'replay-save-1',
+  }));
+  assert.equal((saved as { ok?: boolean; kind?: string }).ok, true, JSON.stringify(saved).slice(0, 300));
+
+  // 2. The save broadcast reaches THIS document: the runtime replays without
+  // any model call and the effect goes live.
+  await waitFor(workspace, async () => (await page.evaluate(() => getComputedStyle(document.getElementById('leaf')!).color)) === 'rgb(255, 0, 0)', 'live replay after save broadcast');
+  // RuntimeState projections (with customization states) arrive at the
+  // workspace page, which owns the subscription.
+  const replayStates = (await workspace.evaluate(() => (window as unknown as { __rv2States: Array<{ customizations?: Array<{ customizationId: string; state: string }> }> }).__rv2States)) as Array<{ customizations?: Array<{ customizationId: string; state: string }> }>;
+  const last = replayStates.filter((s) => s.customizations?.length).at(-1);
+  assert.equal(last?.customizations?.[0]?.state, 'applied', JSON.stringify(last));
+
+  // 3. Reload: the NEW runtime registers, receives the applicable record and
+  // replays through the same transaction path. No accumulating tokens.
+  await page.reload({ waitUntil: 'load' });
+  await waitFor(workspace, async () => (await page.evaluate(() => getComputedStyle(document.getElementById('leaf')!).color)) === 'rgb(255, 0, 0)', 'replay after reload');
+  const tokens = await page.evaluate(() => document.querySelectorAll('[data-rv2-ns]').length);
+  assert.equal(tokens, 1, 'one namespace token — no accumulation across reloads');
+
+  // 4. Disable: broadcast releases the local effect and persists enabled=false.
+  const record = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  const disabled = await workspaceSend(workspace, controlEnvelope({
+    command: 'SetEnabled', origin, customizationId: 'replay-1', enabled: false, expectedRecordRevision: record.recordRevision, mutationId: 'replay-disable-1',
+  }));
+  assert.equal((disabled as { ok?: boolean }).ok, true, JSON.stringify(disabled).slice(0, 300));
+  await waitFor(workspace, async () => (await page.evaluate(() => getComputedStyle(document.getElementById('leaf')!).color)) !== 'rgb(255, 0, 0)', 'disable releases locally');
+
+  // 5. Reload once more: the disabled customization does NOT replay.
+  await page.reload({ waitUntil: 'load' });
+  await sleep(1200); // registration + would-be replay window
+  const color = await page.evaluate(() => getComputedStyle(document.getElementById('leaf')!).color);
+  assert.notEqual(color, 'rgb(255, 0, 0)', 'disabled intent never replays');
+
+  // Cleanup: remove so later tests start clean.
+  const rec2 = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  await workspaceSend(workspace, controlEnvelope({
+    command: 'RemoveCustomization', origin, customizationId: 'replay-1', expectedRecordRevision: rec2.recordRevision, mutationId: 'replay-remove-1',
+  }));
+});
+
+test('S5.2/T11: an SPA route change out of scope revokes the effect; returning restores it once', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, tabId } = await openFixture('v2-apply.html');
+  const fixtureUrl = new URL(page.url());
+  const origin = fixtureUrl.origin;
+  // The origin record already exists from earlier tests — refresh first.
+  const current = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord;
+  const saved = await workspaceSend(workspace, controlEnvelope({
+    command: 'SaveRevision',
+    origin,
+    customizationId: 'route-1',
+    title: 'Route-bound theme',
+    scope: { mode: 'exactPath', path: fixtureUrl.pathname },
+    contentSensitivity: 'page-only',
+    grants: [],
+    revision: REPLAY_REVISION,
+    expectedRecordRevision: current?.recordRevision ?? 0,
+    mutationId: 'route-save-1',
+  }));
+  assert.equal((saved as { ok?: boolean }).ok, true, JSON.stringify(saved).slice(0, 300));
+  await waitFor(workspace, async () => (await page.evaluate(() => getComputedStyle(document.getElementById('leaf')!).color)) === 'rgb(255, 0, 0)', 'initial replay');
+
+  // pushState to another path on the same origin (SPA-style): the epoch
+  // fence moves and the out-of-scope customization is released.
+  await page.evaluate(() => history.pushState(null, '', '/elsewhere'));
+  await waitFor(workspace, async () => (await page.evaluate(() => getComputedStyle(document.getElementById('leaf')!).color)) !== 'rgb(255, 0, 0)', 'out-of-scope release');
+  const tokenCount = await page.evaluate(() => document.querySelectorAll('[data-rv2-ns]').length);
+  assert.equal(tokenCount, 0, 'out-of-scope tokens are revoked, not left live');
+
+  // Back to the in-scope path: the same intent re-applies — no model, no
+  // duplicate tokens.
+  await page.evaluate((path) => history.pushState(null, '', path), fixtureUrl.pathname);
+  await waitFor(workspace, async () => (await page.evaluate(() => getComputedStyle(document.getElementById('leaf')!).color)) === 'rgb(255, 0, 0)', 'in-scope restore');
+  const restored = await page.evaluate(() => document.querySelectorAll('[data-rv2-ns]').length);
+  assert.equal(restored, 1, 'exactly one namespace after A→B→A');
+
+  // Cleanup.
+  const rec = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  await workspaceSend(workspace, controlEnvelope({
+    command: 'RemoveCustomization', origin, customizationId: 'route-1', expectedRecordRevision: rec.recordRevision, mutationId: 'route-remove-1',
+  }));
+  void tabId;
 });

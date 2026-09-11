@@ -660,11 +660,13 @@ export function createTransaction(deps: TransactionDeps): Transaction {
   };
 
   const applyBatch = async (req: BatchRequest, signal?: { cancelled: boolean }): Promise<BatchReceipt> => {
-    // 1. Dedupe: the same operation id replays its receipt; a different
-    //    payload under the same id never executes (T14/T08).
+    // 1. Dedupe: the same operation id replays its receipt — but only while
+    //    that revision is still LIVE. releaseCustomization deletes the
+    //    revision record: a re-apply of released intent (route return,
+    //    re-enable, new set members) is fresh work, not a replay (T11).
     const digest = digestOf(JSON.stringify(req.operations));
     const prior = receipts.get(req.batchId);
-    if (prior) {
+    if (prior && revisions.has(req.customizationId)) {
       if (prior.digest === digest) return prior.receipt;
       // A different payload under the same id never executes and never
       // overwrites the recorded receipt for the original payload (T14).
@@ -694,7 +696,12 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       return refuse(req, digest, err('conflict', 'verify', `the mandatory baseline could not be measured: ${captured.detail}`, 're-observe and retry'));
     }
 
-    const stagedOpId = prepared.aggregateCss !== null ? `${req.batchId}:css` : null;
+    // The staged operation id is DOCUMENT- and GENERATION-scoped (plan/06
+    // §2: bundles are per-document deliveries; a re-applied revision after a
+    // release recomposes a new generation with a new namespace, so it is a
+    // new stage — never a digest collision in the broker's ledger).
+    const docScope = deps.documentKey()?.browserDocumentId ?? 'x';
+    const stagedOpId = prepared.aggregateCss !== null ? `${req.batchId}:d${docScope}:g${generation}:css` : null;
 
     // 2. Stage the inert candidate aggregate (intent before insert is the
     //    broker's job; a refused/unknown staging never reaches activation).

@@ -1578,6 +1578,10 @@ const KIND_SENDER_ROLES: Readonly<Record<string, readonly SenderRole[]>> = {
   RemoveCustomization: ['workspace'],
   GetOriginRecord: ['workspace'],
   ExportQuarantine: ['workspace'],
+  // S5.2: broker-relayed record continuity (the broker forwards confirmed
+  // record mutations to registered runtimes; a workspace may also address
+  // its own document directly, as with ApplyBatch).
+  SavedRevision: ['workspace', 'broker'],
   RuntimeState: ['workspace'],
   RunProgress: ['workspace'],
   RouteChanged: ['broker'],

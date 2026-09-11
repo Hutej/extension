@@ -4,11 +4,11 @@
 
 ## Current checkpoint
 
-- Current phase: **S5 — durable customization and continuity**.
-- Next task: **S5.2**.
+- Current phase: **S6 — model independence, workspace and core cutover**.
+- Next task: **S6.1**.
 - Active task: none.
-- Completed: S0.1 through S5.1 (see `plan/progress.md`). S4 delivered the reversible transformation vertical (compiler, one-batch transaction, mandatory verification); S5.1 delivered the persistent record owner (`background/store`: per-origin serialized writes, expected-revision gate, lastMutationId reconciliation, quotas, tombstones, legacy/unknown-schema quarantine, workspace-only record commands, route-discriminator scope DTOs).
-- Known baseline blockers: none. Residual: `npm run bench` references the absent old bench harness (deferred to S6.1); the legacy F05 recovery clause stays known-red until the plan/19 cutover deletes that path (its v2 equivalent — absent/empty/throwing verification is never pass — is enforced and tested in S4.3); record broadcast to runtimes and cross-document enable/disable/remove arrive with S5.2 replay.
+- Completed: S0.1 through S5.2 (see `plan/progress.md`). S5 delivered durable continuity: S5.1 the persistent record owner (per-origin serialized writes, expected-revision gate, lastMutationId reconciliation, quotas, tombstones, legacy quarantine), S5.2 route-aware replay (`runtime/replay`: descriptor resolution, scope enforcement with discriminators, replay through the same transaction path, reconciliation with conflict pause, per-document enable/disable/remove broadcasts with acks) — saved intent survives compatible reload/SPA routes without a model.
+- Known baseline blockers: none. Residual: `npm run bench` references the absent old bench harness (deferred to S6.1); the legacy F05 recovery clause stays known-red until the plan/19 cutover deletes that path (its v2 equivalent — absent/empty/throwing verification is never pass — is enforced and tested in S4.3); reconciliation set-membership changes re-apply whole customizations (bounded by the conflict pause) until a task needs per-member ledger deltas.
 - Planning baseline: dirty `main` at `71263e0938e0a3d3a2a5e7a44d2175898b9e8c0b`; owner's changes preserved.
 - Evidence: `plan/progress.md` (one compact log).
 - Simplicity: follow consolidated physical files in document 02. Detailed module names below are logical responsibilities, not mandatory files/classes. One ordered batch per proposal; no subgroup DAG. Capability coverage including insertion/motion/canvas is in document 28.
@@ -158,7 +158,7 @@ Read: [runtime](08-transformation-runtime.md), algorithms A3–A5/A7, [acceptanc
 
 Read: [persistence](13-persistence-and-replay.md), algorithms A6/A9, [migration](19-migration-and-deletion.md).
 
-- [ ] **S5 phase completed**
+- [x] **S5 phase completed**
   - [x] **S5.1 — Implement versioned origin records and canonical revisions**
     - Goal/inputs: S4 accepted receipts, S1 schema/grants.
     - Changes: serialized origin writer, expected revision/mutation ID, active/previous revisions, quotas, tombstones, scope/discriminator UI DTOs, legacy quarantine/import validation.
@@ -168,14 +168,14 @@ Read: [persistence](13-persistence-and-replay.md), algorithms A6/A9, [migration]
     - [x] Validation: one complete record write acknowledged; legacy records untouched/disabled; AC06/07.
     - [x] Completion: conflicting saves never overwrite silently; evidence S5.1.
     - Follow-up: S5.2 replay and UI customization management.
-  - [ ] **S5.2 — Implement route-aware local reconciliation and replay**
+  - [x] **S5.2 — Implement route-aware local reconciliation and replay**
     - Goal/inputs: S5.1 records + S3 descriptors + S4 transaction path.
     - Changes: dirty dependency index, missing/ambiguous/waiting/suspended state, set enrollment, route scope enforcement, permission revocation, disable/remove across registered documents.
     - Outputs: saved customization survives compatible reload/re-render without model; per-document cleanup receipts.
     - Invariants: I04/I07/I10/I14/I15/I23/I26.
-    - [ ] Tests: T10/T11/T14/T23; query/hash apps, BFCache, recycled items and disable pending style.
-    - [ ] Validation: repeated replay no duplicate widget/listener; mutation CPU within budget; no provider import/call.
-    - [ ] Completion: apply/refine/save/reload/undo/disable/remove sequence meets AC06; evidence S5.2.
+    - [x] Tests: T10/T11/T14/T23; query/hash apps, BFCache, recycled items and disable pending style.
+    - [x] Validation: repeated replay no duplicate widget/listener; mutation CPU within budget; no provider import/call.
+    - [x] Completion: apply/refine/save/reload/undo/disable/remove sequence meets AC06; evidence S5.2.
     - Follow-up: core product user integration.
 
 ## S6 — Model independence, workspace and core cutover

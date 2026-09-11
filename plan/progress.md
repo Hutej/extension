@@ -334,3 +334,34 @@ Next task: **S5.1 — Implement versioned origin records and canonical revisions
 | Tests added | `tests/unit/store.test.ts` 14 tests (save/confirm, revision trim, stale-revision conflict + disjoint merge, serialized concurrent writers, mutationId replay/forgery, customization quota with byte-identical record, pending-marker reconciliation confirmed/unsaved, legacy + unknown-schema + corrupt quarantine untouched, tombstone resurrection block + expiry, setEnabled gate, I13 order, T25 unknown-field credential rejection); `broker.test.ts` +4 (workspace save routing, runtime sender denied with store untouched, GetOriginRecord + conflict summary on error reply, ExportQuarantine raw bytes); `extension.test.ts` +1 real-path browser test (save → recordRevision 1, GetOriginRecord round-trip, stale save conflict with summary, remove tombstone blocks zombie save) |
 
 Next task: **S5.2 — Implement route-aware local reconciliation and replay** (plan/13 §4/§5, plan/19 cutover prep).
+
+## S5.2 — Implement route-aware local reconciliation and replay — `complete`
+
+- Date: 2026-09-09. Source: `main` `85b38d6` (S5.1 committed; owner's dirty `core/config/index.ts` model-name edit preserved untouched).
+- New module `project/src/runtime/replay.ts` — continuity core (plan/03 `runtime/reconcile`, plan/13 §2/§4/§5/§6):
+  - **Route scope semantics** (plan/13 §2, exported pure): exactPath default (query/hash ignored), pathPrefix with slash boundary, origin-wide; user-approved query/hash **discriminators** are exact alternatives — any match admits the route, never a wildcard over all query values.
+  - **Descriptor resolution** (plan/04 §2): anchor predicates (tag/stableId/test-attribute/role/label) locate the anchor; semantic guards constrain the target; relations self/direct-child/sibling/descendant within a verified parent; rootPath shadow-host hops report closed/absent roots as explicit `unsupported` (I26 — never a light-DOM guess). Missing → `waiting`; ambiguous → `suspended`; a hash is never identity (I15). Resolved nodes register into the shared target registry; the saved revision's `d<i>` descriptor refs are rewritten to fresh session refs.
+  - **Replay through the SAME transaction path** (I14): each enabled, in-scope customization becomes one batch (`replay:<custId>:<revId>`) run through `transaction.applyBatch` — same validation, staging, activation, mandatory verification and rollback as an initial apply. No provider call, no historical action replay, no page refresh (I23). Per-customization live state is explicit and broadcast: `applied | waiting | suspended | out-of-scope | paused | disabled | conflicted` — never full success with missing coverage.
+  - **Same-document reconciliation** (plan/13 §5): a MutationObserver (coalesced 100ms quiet / 500ms max) revalidates applied customizations against the live document; all members lost → release + `waiting`; membership change → release + one desired-state re-apply; per-pass budget (32 customizations) with honest partial coverage; a group pauses after two conflict cycles within 10s and stays visible until an explicit user/route action.
+- Transaction fix (`runtime/transaction.ts`): batch receipt dedupe now replays only while the revision is still LIVE — after `releaseCustomization`, re-applying the same intent is fresh work (route return / re-enable), not a stale-receipt replay (T11). Staged operation ids are document- and generation-scoped (`<batchId>:d<docId>:g<gen>:css`) so two documents replaying one saved revision are separate deliveries and a re-apply after release is a new stage, never a digest collision in the broker's ledger (plan/06 §2 per-document bundles).
+- Broker: `DocumentRecord` gains the browser-sender site origin; the **RegisterDocument reply carries the applicable validated records** (plan/06 §1; content never touches storage directly); `SaveRevision`/`SetEnabled`/`RemoveCustomization` **broadcast to every registered document of the origin** with per-document acks surfaced in the reply — missing acks stay visible (I10). Save-time validation: saved revisions must reference descriptor refs `d0..dn` (self-contained intent; stale session refs rejected at save). New workspace/broker-relay command `SavedRevision` (roles table).
+- Runtime session: registration replays applicable records at reconcile priority; local navigation (popstate/hashchange) and broker `RouteChanged` both re-evaluate scope (out-of-scope tokens revoked before new activation); `SavedRevision`/`SetEnabled`/`RemoveCustomization` relays reconcile locally and ack with the runtime's own result; RuntimeState projections now carry per-customization states.
+- Contracts: `SavedRevision: ['workspace', 'broker']` relay role; no schema changes (discriminators/tombstones already in S5.1).
+
+### Evidence (commands from `project/`)
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` | pass |
+| `npm run lint` | pass, 0 errors |
+| `npm run build` | pass — audit:env ✓, audit:wiring ✓, audit:imports ✓, wxt build ✓ (content 430.9 kB / total 673.3 kB) |
+| `npm test` (×2 consecutive) | exit 0 — unit: 261 tests, 259 passed, 2 known-red (F05 expected); browser: 23 tests, 20 passed, 3 known-red (expected); 0 unexpected |
+| Tests added | `tests/unit/replay.test.ts` 8 tests (T11 scope semantics incl. slash boundary + exact discriminators; I15 descriptor resolution missing/ambiguous + stable-id/test-attribute/sibling anchors; T10 replay through the transaction path with descriptor-ref rewrite + no re-apply of live intent; missing target waits with zero applies; rolled-back replay suspends with public detail; T11 route A→B→A release/restore; disable/enable/remove broadcasts; T23 conflict pause visible and not auto-retried); `tests/browser/extension.test.ts` +2 real-path tests: T10 apply→save→**reload replays saved intent without a model** (one namespace token — no accumulation), live replay after save broadcast, disable persists across reload, remove cleanup; T11 SPA pushState out-of-scope revokes tokens (0 remain), return restores exactly once (A→B→A) |
+
+### Notes / residual risks
+
+- Reconciliation release+reapply on set-membership change re-resolves the whole customization (one flicker frame) — bounded by the conflict pause; per-member incremental resource deltas would need ledger granularity beyond the one-batch contract and are deferred until a task needs them.
+- `bindKey`/`collapse`/`float`/`projectCollection` operations replay through the descriptor rewrite but their runtime executors are not task-owned yet (capability list stays honest — plan/19 workflow-breadth row).
+- The broker broadcast targets registered documents only; a document opened while the record changed receives intent at its next registration (cold load), which is the plan/13 §4 path.
+
+Next task: **S6.1 — Implement provider adapters and bounded planning controller** (plan/11, plan/03 §4; adapter code can begin after S1, integration needs S5 — now satisfied).

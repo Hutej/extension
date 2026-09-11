@@ -48,15 +48,16 @@ import {
 } from '../contracts.ts';
 import { createChromeStyleDelivery, type StyleDelivery, type StageOrder } from './styles.ts';
 import { createStore, type StoreCore, type StoreOutcome } from './store.ts';
+import type { Customization } from '../contracts.ts';
 
 // ── replies ──────────────────────────────────────────────────────────────
 
 export type BrokerReply =
-  | { ok: true; kind: 'registered'; documentKey: DocumentKey; routeEpoch: number }
+  | { ok: true; kind: 'registered'; documentKey: DocumentKey; routeEpoch: number; applicable?: Customization[] }
   | { ok: true; kind: 'run-started'; runId: string }
   | { ok: true; kind: 'run-cancelled'; cancelled: boolean }
   | { ok: true; kind: 'relayed'; receipt: Record<string, unknown> }
-  | { ok: true; kind: 'saved'; origin: string; recordRevision: number; mutationId: string }
+  | { ok: true; kind: 'saved'; origin: string; recordRevision: number; mutationId: string; delivery?: Record<string, unknown>[] }
   | { ok: true; kind: 'record-revision'; recordRevision: number }
   | { ok: true; kind: 'origin-record'; originRecord: Record<string, unknown> | null }
   | { ok: true; kind: 'quarantine'; entries: Array<{ key: string; reason: string; bytes: number }>; raw?: string }
@@ -268,6 +269,10 @@ export interface DocumentRecord {
   routeEpoch: number;
   registeredAt: number;
   run: { runId: string; startedAt: number } | null;
+  /** Site origin from the BROWSER sender at registration (S5.2: record
+   *  applicability and enable/disable/remove broadcast targeting). Null for
+   *  non-site documents (extension pages never register as runtimes). */
+  origin: string | null;
 }
 
 const registryKey = (tabId: number, frameId: number, browserDocumentId: string): string =>
@@ -287,6 +292,10 @@ export interface BrokerDeps {
   styles: StyleDelivery;
   /** Persistent record owner (plan/03 background/store) — S5.1. */
   store: StoreCore;
+  /** Deliver a message to a tab's document runtime. Rejects when no receiver. */
+  sendToTab(tabId: number, message: unknown): Promise<unknown>;
+  /** Deliver to a specific frame of a tab (S5.2 broadcast targeting). */
+  sendToFrame(tabId: number, frameId: number, message: unknown): Promise<unknown>;
   /** Reconcile pending writes at startup; surfaced for diagnostics. */
   onStoreHydrated?(result: { quarantined: number; pending: Array<{ outcome: string }>; totalBytes: number }): void;
 }
@@ -295,6 +304,9 @@ export interface BrokerCore {
   /** Full vertical for one inbound message. Returns `undefined` for inbound
    *  projections (RuntimeState/RunProgress) that are not routed commands. */
   handleMessage(sender: SenderLike, raw: unknown): Promise<BrokerReply | undefined>;
+  /** Re-send an already-processed record mutation to every registered
+   *  document of the origin and collect per-document acks (S5.2 broadcast). */
+  broadcastRecordMutation(origin: string, payload: Record<string, unknown>): Promise<Record<string, unknown>[]>;
   /** webNavigation commit/history update: advance the route epoch for every
    *  registered document in the tab and notify its runtime. When the browser
    *  reports the new documentId (commit events), registry entries for other
@@ -332,6 +344,32 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
         });
     }
     return hydration;
+  };
+
+  /** S5.2: re-send a record mutation to every registered document of the
+   *  origin and collect per-document acks — missing acks stay visible
+   *  (I10), never a global clean result when one frame failed. */
+  const broadcastRecordMutation = async (origin: string, payload: Record<string, unknown>): Promise<Record<string, unknown>[]> => {
+    const results: Record<string, unknown>[] = [];
+    for (const record of registry.values()) {
+      if (record.origin !== origin) continue;
+      const envelope: Envelope = {
+        protocolVersion: 1,
+        requestId: deps.randomId(),
+        kind: 'control',
+        documentKey: record.documentKey,
+        expectedRouteEpoch: record.routeEpoch,
+        deadlineAt: deps.now() + 5000,
+        payload,
+      };
+      try {
+        const reply = await deps.sendToFrame(record.documentKey.tabId, record.documentKey.frameId, envelope);
+        results.push({ tabId: record.documentKey.tabId, frameId: record.documentKey.frameId, acked: true, reply: reply as Record<string, unknown> });
+      } catch (err) {
+        results.push({ tabId: record.documentKey.tabId, frameId: record.documentKey.frameId, acked: false, error: (err as Error).message.slice(0, 200) });
+      }
+    }
+    return results;
   };
 
   const resolveDocument = (env: Envelope): BrokerReply | { record: DocumentRecord } => {
@@ -432,10 +470,27 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
           routeEpoch: existing?.routeEpoch ?? 0,
           registeredAt: deps.now(),
           run: sameInstance ? existing.run : null,
+          // The site origin comes from the BROWSER sender only (plan/06 §1
+          // registration authority) — a payload can never name its origin.
+          origin: senderOriginOf(sender),
         };
         registry.set(key, record);
         await persist();
-        return { ok: true, kind: 'registered', documentKey: record.documentKey, routeEpoch: record.routeEpoch };
+        // S5.2: the registration reply carries the applicable saved intent —
+        // validated records only, filtered by the browser-reported origin
+        // (plan/06 §1 RegisterDocument; plan/13 §1 content obtains records
+        // through the broker, never storage directly).
+        let applicable: Customization[] = [];
+        const origin = record.origin;
+        if (origin !== null) {
+          try {
+            const rec = await deps.store.getRecord(origin);
+            applicable = rec?.customizations ?? [];
+          } catch {
+            applicable = []; // unreadable record stays quarantined; replay proceeds without it
+          }
+        }
+        return { ok: true, kind: 'registered', documentKey: record.documentKey, routeEpoch: record.routeEpoch, applicable };
       }
 
       case 'StartRun': {
@@ -579,19 +634,55 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
       case 'SaveRevision': {
         const p = SAVE_REVISION_PAYLOAD(envelope.payload, 'payload');
         if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
-        return storeReply(await deps.store.save({ ...p.value, revision: p.value.revision }));
+        // plan/04 §2: saved intent is self-contained — operations reference
+        // descriptor indexes (`d<i>`), never stale session observation refs.
+        const refProblem = checkDescriptorRefs(p.value.revision as unknown as { targetDescriptors: unknown[]; operations: Array<Record<string, unknown>> });
+        if (refProblem) return deny('invalid-schema', 'decode', refProblem, { fieldPath: 'revision' });
+        const reply = storeReply(await deps.store.save({ ...p.value, revision: p.value.revision }));
+        if (reply.ok) {
+          const delivery = await broadcastRecordMutation(p.value.origin, {
+            command: 'SavedRevision', origin: p.value.origin, recordRevision: (reply as { recordRevision: number }).recordRevision, customization: {
+              customizationId: p.value.customizationId,
+              title: p.value.title,
+              enabled: true,
+              scope: p.value.scope,
+              activeRevisionId: p.value.revision.revisionId,
+              revisions: [p.value.revision],
+              createdAt: deps.now(),
+              updatedAt: deps.now(),
+              contentSensitivity: p.value.contentSensitivity,
+              grants: p.value.grants,
+            },
+          });
+          return { ...reply, delivery } as BrokerReply;
+        }
+        return reply;
       }
 
       case 'SetEnabled': {
         const p = SET_ENABLED_PAYLOAD(envelope.payload, 'payload');
         if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
-        return storeReply(await deps.store.setEnabled(p.value));
+        const reply = storeReply(await deps.store.setEnabled(p.value));
+        if (reply.ok) {
+          const delivery = await broadcastRecordMutation(p.value.origin, {
+            command: 'SetEnabled', origin: p.value.origin, customizationId: p.value.customizationId, enabled: p.value.enabled,
+          });
+          return { ...reply, delivery } as BrokerReply;
+        }
+        return reply;
       }
 
       case 'RemoveCustomization': {
         const p = REMOVE_CUSTOMIZATION_PAYLOAD(envelope.payload, 'payload');
         if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
-        return storeReply(await deps.store.removeCustomization(p.value));
+        const reply = storeReply(await deps.store.removeCustomization(p.value));
+        if (reply.ok) {
+          const delivery = await broadcastRecordMutation(p.value.origin, {
+            command: 'RemoveCustomization', origin: p.value.origin, customizationId: p.value.customizationId,
+          });
+          return { ...reply, delivery } as BrokerReply;
+        }
+        return reply;
       }
 
       case 'GetOriginRecord': {
@@ -677,11 +768,54 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
     tabClosed,
     records: () => [...registry.values()],
     hydrated: hydrate,
+    broadcastRecordMutation,
   };
 }
 
 function stylesFor(deps: BrokerDeps): StyleDelivery {
   return deps.styles;
+}
+
+/** Site origin from the BROWSER sender only (plan/06 §1). Extension pages
+ *  have no site origin; http(s) tab senders do. */
+function senderOriginOf(sender: SenderLike): string | null {
+  const candidate = sender.origin ?? sender.tab?.url ?? sender.url ?? '';
+  if (!/^https?:\/\/[^/]+/.test(candidate)) return null;
+  try {
+    return new URL(candidate).origin;
+  } catch {
+    return null;
+  }
+}
+
+/** plan/04 §2: a saved revision is self-contained. Its operations reference
+ *  descriptor indexes (`d<i>` where i names targetDescriptors[i]) — stale
+ *  session observation refs are rejected at save time. */
+function checkDescriptorRefs(revision: { targetDescriptors: unknown[]; operations: Array<Record<string, unknown>> }): string | null {
+  const allowed = new Set(revision.targetDescriptors.map((_, i) => `d${i}`));
+  const localIds = new Set<string>();
+  const visit = (t: unknown): string | null => {
+    if (t === null || typeof t !== 'object') return null;
+    const targetRef = (t as Record<string, unknown>).targetRef;
+    const localRef = (t as Record<string, unknown>).localRef;
+    if (typeof localRef === 'string') localIds.add(localRef);
+    if (typeof targetRef === 'string' && !allowed.has(targetRef)) {
+      return `saved operations must reference descriptor refs d0..d${revision.targetDescriptors.length - 1}, got "${targetRef}"`;
+    }
+    return null;
+  };
+  for (const op of revision.operations) {
+    const kind = op.kind;
+    const problem =
+      kind === 'style'
+        ? (op.rules as Array<{ target?: unknown }>).map((r) => visit(r.target)).find(Boolean) ?? null
+        : kind === 'relocate'
+          ? visit(op.target) ?? visit(op.destination)
+          : visit(op.target);
+    if (problem) return problem;
+  }
+  void localIds;
+  return null;
 }
 
 /** Map a store outcome to a broker reply: explicit saved/conflict/unsaved —
@@ -804,6 +938,14 @@ export function installBroker(): void {
     sendToTab: (tabId, message) =>
       new Promise((resolve, reject) => {
         chrome.tabs.sendMessage(tabId, message as Record<string, unknown>, (reply) => {
+          const err = chrome.runtime.lastError;
+          if (err) reject(new Error(err.message ?? 'no receiver'));
+          else resolve(reply as unknown);
+        });
+      }),
+    sendToFrame: (tabId, frameId, message) =>
+      new Promise((resolve, reject) => {
+        chrome.tabs.sendMessage(tabId, message as Record<string, unknown>, { frameId }, (reply) => {
           const err = chrome.runtime.lastError;
           if (err) reject(new Error(err.message ?? 'no receiver'));
           else resolve(reply as unknown);
