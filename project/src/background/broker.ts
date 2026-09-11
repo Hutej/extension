@@ -34,6 +34,9 @@ import {
   decodeString,
   decodeLiteral,
   decodeArray,
+  decodeRevision,
+  decodeRouteScope,
+  decodeBoolean,
   optional,
   LIMITS,
   type DocumentKey,
@@ -44,6 +47,7 @@ import {
   type SenderLike,
 } from '../contracts.ts';
 import { createChromeStyleDelivery, type StyleDelivery, type StageOrder } from './styles.ts';
+import { createStore, type StoreCore, type StoreOutcome } from './store.ts';
 
 // ── replies ──────────────────────────────────────────────────────────────
 
@@ -52,7 +56,11 @@ export type BrokerReply =
   | { ok: true; kind: 'run-started'; runId: string }
   | { ok: true; kind: 'run-cancelled'; cancelled: boolean }
   | { ok: true; kind: 'relayed'; receipt: Record<string, unknown> }
-  | { ok: false; kind: 'error'; error: ErrorRecord };
+  | { ok: true; kind: 'saved'; origin: string; recordRevision: number; mutationId: string }
+  | { ok: true; kind: 'record-revision'; recordRevision: number }
+  | { ok: true; kind: 'origin-record'; originRecord: Record<string, unknown> | null }
+  | { ok: true; kind: 'quarantine'; entries: Array<{ key: string; reason: string; bytes: number }>; raw?: string }
+  | { ok: false; kind: 'error'; error: ErrorRecord; conflict?: Record<string, unknown> };
 
 export function errorRecord(
   code: ErrorCode,
@@ -83,7 +91,7 @@ const COMMANDS_BY_TRANSPORT: Record<Envelope['kind'], readonly string[]> = {
   'run-command': ['StartRun', 'CancelRun', 'ApplyBatch'],
   'observe-request': ['Observe', 'Inspect', 'Expand'],
   'style-delivery': ['StageStyle', 'RemoveStyle', 'CommitComposition'],
-  control: ['RegisterDocument', 'GetOperation', 'RenewLease', 'SaveRevision', 'SetEnabled', 'RemoveCustomization'],
+  control: ['RegisterDocument', 'GetOperation', 'RenewLease', 'SaveRevision', 'SetEnabled', 'RemoveCustomization', 'GetOriginRecord', 'ExportQuarantine'],
   subscription: ['RuntimeState', 'RunProgress'], // runtime→workspace projections: never routed
 };
 
@@ -183,6 +191,70 @@ const REMOVE_STYLE_PAYLOAD = decodeRecord(
   { maxDepth: 8 },
 );
 
+const CONTENT_SENSITIVITY = decodeLiteral(['page-only', 'includes-user-content']);
+
+// plan/13 §3: the workspace requests a save with the accepted revision, the
+// expected record revision and a unique mutation id. All fields validated.
+const SAVE_REVISION_PAYLOAD = decodeRecord(
+  {
+    command: decodeLiteral(['SaveRevision']),
+    origin: decodeString({ max: 512, pattern: /^https?:\/\/[^\s]+$/ }),
+    customizationId: ID,
+    title: decodeString({ max: LIMITS.maxTitleChars }),
+    scope: (v: unknown, p?: string) => decodeRouteScope(v, p ?? 'scope'),
+    contentSensitivity: CONTENT_SENSITIVITY,
+    grants: decodeArray(ID, 64),
+    revision: (v: unknown, p?: string) => decodeRevision(v, p ?? 'revision'),
+    expectedRecordRevision: decodeFiniteRecordInt('expectedRecordRevision'),
+    mutationId: ID,
+  },
+  { maxDepth: LIMITS.maxJsonDepth },
+);
+
+const SET_ENABLED_PAYLOAD = decodeRecord(
+  {
+    command: decodeLiteral(['SetEnabled']),
+    origin: decodeString({ max: 512, pattern: /^https?:\/\/[^\s]+$/ }),
+    customizationId: ID,
+    enabled: decodeBoolean,
+    expectedRecordRevision: decodeFiniteRecordInt('expectedRecordRevision'),
+    mutationId: ID,
+  },
+  { maxDepth: 8 },
+);
+
+const REMOVE_CUSTOMIZATION_PAYLOAD = decodeRecord(
+  {
+    command: decodeLiteral(['RemoveCustomization']),
+    origin: decodeString({ max: 512, pattern: /^https?:\/\/[^\s]+$/ }),
+    customizationId: ID,
+    expectedRecordRevision: decodeFiniteRecordInt('expectedRecordRevision'),
+    mutationId: ID,
+  },
+  { maxDepth: 8 },
+);
+
+const GET_ORIGIN_RECORD_PAYLOAD = decodeRecord(
+  { command: decodeLiteral(['GetOriginRecord']), origin: decodeString({ max: 512, pattern: /^https?:\/\/[^\s]+$/ }) },
+  { maxDepth: 8 },
+);
+
+const EXPORT_QUARANTINE_PAYLOAD = decodeRecord(
+  { command: decodeLiteral(['ExportQuarantine']), key: decodeString({ max: 600, pattern: /^rv/ }) },
+  { maxDepth: 8 },
+);
+
+/** Non-negative bounded integer field (record revisions, counts). */
+function decodeFiniteRecordInt(name: string) {
+  return (v: unknown, p?: string) => {
+    const path = p ?? name;
+    if (typeof v !== 'number' || !Number.isInteger(v) || v < 0 || v > Number.MAX_SAFE_INTEGER) {
+      return { ok: false as const, issues: [{ path, code: 'out-of-bounds' as const, message: `${name} must be a non-negative integer` }] };
+    }
+    return { ok: true as const, value: v };
+  };
+}
+
 function firstIssue(issues: { path: string; message: string }[]): string {
   const i = issues[0];
   return i ? `${i.path}: ${i.message}` : 'undecodable message';
@@ -213,6 +285,10 @@ export interface BrokerDeps {
   loadRegistry(): Promise<DocumentRecord[]>;
   /** Privileged CSS delivery (plan/03 background/styles) — S2.2. */
   styles: StyleDelivery;
+  /** Persistent record owner (plan/03 background/store) — S5.1. */
+  store: StoreCore;
+  /** Reconcile pending writes at startup; surfaced for diagnostics. */
+  onStoreHydrated?(result: { quarantined: number; pending: Array<{ outcome: string }>; totalBytes: number }): void;
 }
 
 export interface BrokerCore {
@@ -496,12 +572,46 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
       }
 
       case 'RenewLease':
-      case 'SaveRevision':
-      case 'SetEnabled':
-      case 'RemoveCustomization':
-        // Owners arrive with the store/controller tasks (S2.3/S4); refuse
-        // honestly instead of pretending to execute.
+        // Owners arrive with the controller task (S6); refuse honestly
+        // instead of pretending to execute.
         return deny('unsupported-capability', 'decode', `${command} has no owner yet; it arrives with a later roadmap task`);
+
+      case 'SaveRevision': {
+        const p = SAVE_REVISION_PAYLOAD(envelope.payload, 'payload');
+        if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        return storeReply(await deps.store.save({ ...p.value, revision: p.value.revision }));
+      }
+
+      case 'SetEnabled': {
+        const p = SET_ENABLED_PAYLOAD(envelope.payload, 'payload');
+        if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        return storeReply(await deps.store.setEnabled(p.value));
+      }
+
+      case 'RemoveCustomization': {
+        const p = REMOVE_CUSTOMIZATION_PAYLOAD(envelope.payload, 'payload');
+        if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        return storeReply(await deps.store.removeCustomization(p.value));
+      }
+
+      case 'GetOriginRecord': {
+        const p = GET_ORIGIN_RECORD_PAYLOAD(envelope.payload, 'payload');
+        if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        // The record is served to the trusted workspace only (roles table);
+        // it is plain validated JSON — structured-clone safe.
+        const record = await deps.store.getRecord(p.value.origin);
+        return { ok: true, kind: 'origin-record', originRecord: (record as unknown as Record<string, unknown> | null) ?? null };
+      }
+
+      case 'ExportQuarantine': {
+        const p = EXPORT_QUARANTINE_PAYLOAD(envelope.payload, 'payload');
+        if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
+        // Raw quarantined bytes for workspace review/export only — never
+        // decoded into a runtime, never executed (plan/13 §7).
+        const raw = await deps.store.exportQuarantined(p.value.key);
+        if (raw === undefined) return deny('unknown-target', 'reconcile', 'no quarantined entry under that key');
+        return { ok: true, kind: 'quarantine', entries: deps.store.quarantined(), raw };
+      }
 
       default:
         return deny('invalid-schema', 'decode', `unknown command "${command}"`);
@@ -572,6 +682,33 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
 
 function stylesFor(deps: BrokerDeps): StyleDelivery {
   return deps.styles;
+}
+
+/** Map a store outcome to a broker reply: explicit saved/conflict/unsaved —
+ *  a quota failure or unknown write never masquerades as saved (I21). */
+function storeReply(outcome: StoreOutcome<{ recordRevision: number; origin?: string; mutationId?: string }>): BrokerReply {
+  if (outcome.ok) {
+    return {
+      ok: true,
+      kind: outcome.value.mutationId !== undefined ? 'saved' : 'record-revision',
+      ...(outcome.value.origin !== undefined ? { origin: outcome.value.origin } : {}),
+      recordRevision: outcome.value.recordRevision,
+      ...(outcome.value.mutationId !== undefined ? { mutationId: outcome.value.mutationId } : {}),
+    } as BrokerReply;
+  }
+  return {
+    ok: false,
+    kind: 'error',
+    error: errorRecord(outcome.code, outcome.code === 'conflict' ? 'reconcile' : 'persist', outcome.message, {
+      ...(outcome.fieldPath !== undefined ? { fieldPath: outcome.fieldPath } : {}),
+      ...(outcome.code === 'conflict'
+        ? { recoveryAction: 'refresh the origin record (GetOriginRecord), merge disjoint customizations if wanted, then re-save with the current recordRevision' }
+        : outcome.code === 'quota-exceeded'
+          ? { recoveryAction: 'the applied work stays applied-unsaved on this document; export or delete saved data before retrying' }
+          : {}),
+    }),
+    ...(outcome.conflict !== undefined ? { conflict: outcome.conflict as unknown as Record<string, unknown> } : {}),
+  };
 }
 
 /** Deadline-bounded relay of a page-scoped command to the registered
@@ -680,11 +817,26 @@ export function installBroker(): void {
       return (stored[REGISTRY_KEY] as DocumentRecord[] | undefined) ?? [];
     },
     styles: createChromeStyleDelivery(),
+    store: createStore({
+      local: chrome.storage.local,
+      session: chrome.storage.session,
+      now: () => Date.now(),
+      byteSize: (s) => new TextEncoder().encode(s).length,
+    }),
   };
   const core = createBrokerCore(deps);
   // Startup reconciliation: exact-clean uncertain/staging intents before any
-  // new delivery (plan/03: recover uncertain intent by exact cleanup).
-  void core.hydrated().then(() => stylesFor(deps).reconcile());
+  // new delivery (plan/03: recover uncertain intent by exact cleanup), then
+  // reconcile pending record writes and quarantine legacy entries (T12/T26).
+  void core.hydrated().then(async () => {
+    await stylesFor(deps).reconcile();
+    const hydration = await deps.store.hydrate();
+    deps.onStoreHydrated?.({
+      quarantined: hydration.quarantined.length,
+      pending: hydration.pending,
+      totalBytes: hydration.totalBytes,
+    });
+  });
 
   chrome.runtime.onMessage.addListener((raw: unknown, sender, sendResponse) => {
     if (!isV2EnvelopeShape(raw)) return false; // legacy dispatcher owns these

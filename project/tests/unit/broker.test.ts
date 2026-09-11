@@ -12,6 +12,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { createBrokerCore, type BrokerDeps, type BrokerReply } from '../../src/background/broker.ts';
+import type { StoreCore } from '../../src/background/store.ts';
 import type { DocumentKey, SenderLike } from '../../src/contracts.ts';
 import type { DocumentRecord } from '../../src/background/broker.ts';
 import type { StageOrder, StyleDelivery } from '../../src/background/styles.ts';
@@ -36,6 +37,16 @@ function makeDeps(overrides: Partial<BrokerDeps> = {}): BrokerDeps {
     reconcile: async () => 0,
     intents: () => [],
   };
+  const store: StoreCore = {
+    hydrate: async () => ({ loaded: 0, quarantined: [], pending: [], totalBytes: 0 }),
+    save: async () => ({ ok: false, code: 'internal', message: 'no store in this test' }),
+    setEnabled: async () => ({ ok: false, code: 'internal', message: 'no store in this test' }),
+    removeCustomization: async () => ({ ok: false, code: 'internal', message: 'no store in this test' }),
+    getRecord: async () => null,
+    exportQuarantined: async () => undefined,
+    quarantined: () => [],
+    stats: () => ({ origins: 0, totalBytes: 0 }),
+  };
   return {
     ownExtensionId: OWN_ID,
     now: () => 10_000,
@@ -44,6 +55,7 @@ function makeDeps(overrides: Partial<BrokerDeps> = {}): BrokerDeps {
     persistRegistry: async () => {},
     loadRegistry: async () => [],
     styles,
+    store,
     ...overrides,
   };
 }
@@ -480,4 +492,114 @@ test('S2.2: GetOperation prefers the broker style ledger (lost-ack reconciliatio
   assert.ok(reply && reply.ok && reply.kind === 'relayed');
   const receipt = (reply as unknown as { receipt: { receipt: { status: string } } }).receipt.receipt;
   assert.equal(receipt.status, 'outcome-unknown', 'the ledger receipt answers without relaying to a possibly-dead runtime');
+});
+
+
+// ── S5.1: record-owner routing (T12/T26 broker slices) ──────────────────
+
+function recordingStore(): { store: StoreCore; calls: string[] } {
+  const calls: string[] = [];
+  const store: StoreCore = {
+    hydrate: async () => ({ loaded: 0, quarantined: [], pending: [], totalBytes: 0 }),
+    save: async (req) => {
+      calls.push(`save:${req.origin}:${req.customizationId}:${req.mutationId}`);
+      return { ok: true, value: { recordRevision: 1, origin: req.origin, mutationId: req.mutationId } };
+    },
+    setEnabled: async (req) => {
+      calls.push(`enable:${req.customizationId}:${String(req.enabled)}`);
+      return { ok: true, value: { recordRevision: 2 } };
+    },
+    removeCustomization: async (req) => {
+      calls.push(`remove:${req.customizationId}`);
+      return { ok: false, code: 'conflict', message: 'no such customization', fieldPath: 'customizationId', recordRevision: 3 };
+    },
+    getRecord: async (origin) => {
+      calls.push(`get:${origin}`);
+      return {
+        schemaVersion: 2,
+        origin,
+        recordRevision: 4,
+        lastMutationId: 'm',
+        customizations: [],
+        updatedAt: 1,
+      };
+    },
+    exportQuarantined: async (key) => {
+      calls.push(`export:${key}`);
+      return '{"legacy":true}';
+    },
+    quarantined: () => [{ key: 'rv_old', reason: 'legacy-v0', bytes: 10 }],
+    stats: () => ({ origins: 0, totalBytes: 0 }),
+  };
+  return { store, calls };
+}
+
+const savePayload = {
+  command: 'SaveRevision',
+  origin: 'https://site.test',
+  customizationId: 'cust-1',
+  title: 'T',
+  scope: { mode: 'exactPath', path: '/page' },
+  contentSensitivity: 'page-only',
+  grants: [],
+  revision: {
+    revisionId: 'rev-1',
+    capabilityVersion: 1,
+    targetDescriptors: [{
+      descriptorVersion: 1,
+      rootPath: [],
+      selection: 'single',
+      anchor: { tag: 'main' },
+      relation: 'self',
+      matchBounds: { min: 1, max: 1 },
+      routeScopeRef: 'https://site.test',
+      continuityPolicy: 'stable-single',
+    }],
+    operations: [{ kind: 'style', rules: [{ target: { targetRef: 'r1' }, declarations: [{ property: 'color', value: 'red', priority: 'important' }] }] }],
+    savedAt: 1,
+    source: 'user-planned',
+  },
+  expectedRecordRevision: 0,
+  mutationId: 'm-1',
+};
+
+test('S5.1: SaveRevision from the workspace reaches the store; the reply is an explicit saved state', async () => {
+  const { store, calls } = recordingStore();
+  const core = createBrokerCore(makeDeps({ store }));
+  const reply = await core.handleMessage(workspaceSender, envelope({ payload: savePayload }));
+  assert.ok(reply && reply.ok && reply.kind === 'saved', JSON.stringify(reply));
+  assert.equal((reply as { recordRevision: number }).recordRevision, 1);
+  assert.deepEqual(calls, ['save:https://site.test:cust-1:m-1']);
+});
+
+test('S5.1: content runtimes can never write records — SaveRevision from runtime is denied (plan/04 §4)', async () => {
+  const { store, calls } = recordingStore();
+  const core = createBrokerCore(makeDeps({ store }));
+  const reply = await core.handleMessage(runtimeSender(), envelope({ payload: savePayload }));
+  assert.equal(errCode(reply), 'denied');
+  assert.deepEqual(calls, [], 'the store was never touched by a runtime sender');
+});
+
+test('S5.1: GetOriginRecord serves the current record; conflicts carry the current summary', async () => {
+  const { store, calls } = recordingStore();
+  const core = createBrokerCore(makeDeps({ store }));
+  const got = await core.handleMessage(workspaceSender, envelope({ payload: { command: 'GetOriginRecord', origin: 'https://site.test' } }));
+  assert.ok(got && got.ok && got.kind === 'origin-record', JSON.stringify(got));
+  assert.equal((got as unknown as { originRecord: { recordRevision: number } }).originRecord.recordRevision, 4);
+  assert.deepEqual(calls, ['get:https://site.test']);
+
+  const failing: StoreCore = { ...store, removeCustomization: async () => ({ ok: false, code: 'conflict', message: 'moved', recordRevision: 9, conflict: { recordRevision: 9, customizations: [] } }) };
+  const core2 = createBrokerCore(makeDeps({ store: failing }));
+  const bad = await core2.handleMessage(workspaceSender, envelope({ payload: { command: 'RemoveCustomization', origin: 'https://site.test', customizationId: 'x', expectedRecordRevision: 0, mutationId: 'm-9' } }));
+  assert.ok(bad && !bad.ok);
+  assert.equal((bad as { conflict?: { recordRevision: number } }).conflict?.recordRevision, 9, 'the conflict summary rides the error reply for the merge UI');
+});
+
+test('S5.1: quarantined payloads export to the workspace only — raw bytes, never decoded', async () => {
+  const { store, calls } = recordingStore();
+  const core = createBrokerCore(makeDeps({ store }));
+  const reply = await core.handleMessage(workspaceSender, envelope({ payload: { command: 'ExportQuarantine', key: 'rv_https://site.test/wiki' } }));
+  assert.ok(reply && reply.ok && reply.kind === 'quarantine', JSON.stringify(reply));
+  assert.equal((reply as { raw?: string }).raw, '{"legacy":true}');
+  assert.deepEqual(calls, ['export:rv_https://site.test/wiki']);
 });

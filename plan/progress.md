@@ -306,3 +306,31 @@ Next task: **S4.3 — Implement mandatory structured verification and combined r
 - Integrity attribution is window-based: a site mutation racing the ~300ms candidate window is attributed to the candidate (conservative rollback) — the same trade-off the plan's preview window accepts.
 
 Next task: **S5.1 — Implement versioned origin records and canonical revisions** (plan/13, A9, plan/19). S4 phase box ticked (all three leaves complete with evidence).
+
+## S5.1 — Implement versioned origin records and canonical revisions — `complete`
+
+- Date: 2026-09-09. Source: `main` `7983823` (S4.3 committed; owner's dirty `core/config/index.ts` model-name edit preserved untouched).
+- New module `project/src/background/store.ts` — the persistent record owner (plan/03 `background/store`, plan/13 §1/§3/§6/§7, plan/04 §4):
+  - One OriginRecord per origin under `rv2:origin:<origin>`; the broker alone writes it. Guarantees come from ONE trusted writer with per-origin write serialization, an expected-recordRevision gate and lastMutationId reconciliation — never a fictitious storage CAS.
+  - Save protocol (plan/13 §3): workspace sends the accepted revision + expected recordRevision + unique mutationId → stale revision returns explicit `conflict` with the current record summary (UI may merge disjoint customization IDs after refreshing; concurrent edits to the same customization are never overwritten silently); the write is one complete record with new revision + lastMutationId, then a confirming RE-READ — anything unproven is reported unsaved, never a blind retry.
+  - Idempotency: same mutationId + same payload replays the stored outcome; same mutationId with a different payload is refused (plan/04 receipt identity).
+  - Quotas (plan/13 §1): per-customization 256 KiB, per-origin 2 MiB, total 6 MiB measured on serialized bytes BEFORE the write; oversize refused with the record byte-identical — applied work stays applied-unsaved (I21).
+  - Interruption (T12): a session pending marker is written before each record write; hydrate reconciles every marker by lastMutationId (`confirmed` proves the write, `unsaved` reports without proof) — worker death around a write is recoverable and honest.
+  - Tombstones (plan/13 §6): removal strips the customization and records a bounded tombstone (≤32, 5-minute stale deadline); stale-session saves of a removed ID are refused until expiry (T30 resurrection test).
+  - Revisions: active + previous kept per customization (trim to 2); the customization ARRAY order is the explicit canonical composition order and is never reordered by merges (I13).
+  - Quarantine (T26, plan/13 §7, plan/19): hydration loads recognized v2 records; unknown schemaVersion, corrupt JSON and legacy `rv_<origin+path>` journals are quarantined UNTOUCHED (byte-for-byte preserved, never replayed/decoded/executed); raw quarantined bytes are exportable to the trusted workspace for review only (`ExportQuarantine`), and saves against unreadable records refuse rather than overwrite.
+- Contracts (`src/contracts.ts`): `RouteDiscriminator` DTO (user-approved query key+value / hash value, no automatic wildcard — plan/13 §2) with optional `discriminators` on RouteScope (cap 8); `Tombstone` + optional `tombstones` on OriginRecord (still schemaVersion 2); LIMITS for the record budgets. Sender authority tightened per plan/04 ("content scripts cannot write it"): `SaveRevision`/`SetEnabled`/`RemoveCustomization` are now workspace-only (was workspace+runtime); added workspace-only `GetOriginRecord` and `ExportQuarantine`.
+- Broker: the three stub commands are real — payload decoders (per-command, unknown fields rejected), `storeReply` mapping store outcomes to explicit saved/record-revision/error replies with the conflict summary riding the error reply for the merge UI; `installBroker` builds the store over `chrome.storage.local`/`session` and reconciles pending writes + quarantine after the hydration barrier.
+- Legacy notes: `SaveRevision`/`SetEnabled`/`RemoveCustomization` are implemented at the RECORD level (S5.1 scope). Broadcasting new recordRevisions to runtimes and cross-document enable/disable/remove (plan/13 §6 first half) land with S5.2 replay, which is also when content runtimes first read sanitized records through the broker. Import of legacy journals into reviewed disabled drafts needs descriptor mapping from fresh observation — the review flow lands with the workspace cutover; quarantine/export is the honest S5.1 slice.
+
+### Evidence (commands from `project/`)
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` | pass |
+| `npm run lint` | pass, 0 errors |
+| `npm run build` | pass — audit:env ✓, audit:wiring ✓, audit:imports ✓, wxt build ✓ (content 658.7 kB: store now in the bundle) |
+| `npm test` (×2 consecutive) | exit 0 — unit: 253 tests, 251 passed, 2 known-red (F05 expected); browser: 21 tests, 18 passed, 3 known-red (expected); 0 unexpected |
+| Tests added | `tests/unit/store.test.ts` 14 tests (save/confirm, revision trim, stale-revision conflict + disjoint merge, serialized concurrent writers, mutationId replay/forgery, customization quota with byte-identical record, pending-marker reconciliation confirmed/unsaved, legacy + unknown-schema + corrupt quarantine untouched, tombstone resurrection block + expiry, setEnabled gate, I13 order, T25 unknown-field credential rejection); `broker.test.ts` +4 (workspace save routing, runtime sender denied with store untouched, GetOriginRecord + conflict summary on error reply, ExportQuarantine raw bytes); `extension.test.ts` +1 real-path browser test (save → recordRevision 1, GetOriginRecord round-trip, stale save conflict with summary, remove tombstone blocks zombie save) |
+
+Next task: **S5.2 — Implement route-aware local reconciliation and replay** (plan/13 §4/§5, plan/19 cutover prep).

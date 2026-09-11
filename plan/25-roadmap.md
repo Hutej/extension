@@ -5,10 +5,10 @@
 ## Current checkpoint
 
 - Current phase: **S5 — durable customization and continuity**.
-- Next task: **S5.1**.
+- Next task: **S5.2**.
 - Active task: none.
-- Completed: S0.1 through S4.3 (see `plan/progress.md`). S4 delivered the reversible transformation vertical: S4.1 parsed CSS/content compiler + policy (css-tree pinned), S4.2 one-batch transactions + generic insertUI (`runtime/transaction` + `runtime/content`, prepared ledger, same-node inverses, canonical aggregate composition), S4.3 mandatory structured verification (`runtime/verify`: delivery/effect/integrity report with structured keys, one bounded recheck, combined revision gate) gating acceptance on `pass`.
-- Known baseline blockers: none. Residual: `npm run bench` references the absent old bench harness (deferred to S6.1); the legacy F05 recovery clause stays known-red until the plan/19 cutover deletes that path (its v2 equivalent — absent/empty/throwing verification is never pass — is enforced and tested in S4.3); `releaseCustomization` is not yet a message command (S5).
+- Completed: S0.1 through S5.1 (see `plan/progress.md`). S4 delivered the reversible transformation vertical (compiler, one-batch transaction, mandatory verification); S5.1 delivered the persistent record owner (`background/store`: per-origin serialized writes, expected-revision gate, lastMutationId reconciliation, quotas, tombstones, legacy/unknown-schema quarantine, workspace-only record commands, route-discriminator scope DTOs).
+- Known baseline blockers: none. Residual: `npm run bench` references the absent old bench harness (deferred to S6.1); the legacy F05 recovery clause stays known-red until the plan/19 cutover deletes that path (its v2 equivalent — absent/empty/throwing verification is never pass — is enforced and tested in S4.3); record broadcast to runtimes and cross-document enable/disable/remove arrive with S5.2 replay.
 - Planning baseline: dirty `main` at `71263e0938e0a3d3a2a5e7a44d2175898b9e8c0b`; owner's changes preserved.
 - Evidence: `plan/progress.md` (one compact log).
 - Simplicity: follow consolidated physical files in document 02. Detailed module names below are logical responsibilities, not mandatory files/classes. One ordered batch per proposal; no subgroup DAG. Capability coverage including insertion/motion/canvas is in document 28.
@@ -159,14 +159,14 @@ Read: [runtime](08-transformation-runtime.md), algorithms A3–A5/A7, [acceptanc
 Read: [persistence](13-persistence-and-replay.md), algorithms A6/A9, [migration](19-migration-and-deletion.md).
 
 - [ ] **S5 phase completed**
-  - [ ] **S5.1 — Implement versioned origin records and canonical revisions**
+  - [x] **S5.1 — Implement versioned origin records and canonical revisions**
     - Goal/inputs: S4 accepted receipts, S1 schema/grants.
     - Changes: serialized origin writer, expected revision/mutation ID, active/previous revisions, quotas, tombstones, scope/discriminator UI DTOs, legacy quarantine/import validation.
     - Outputs: explicit saved/conflict/applied-unsaved state; no accumulated tool journal replay.
     - Invariants: I13/I18/I19/I21.
-    - [ ] Tests: T12/T25/T26/T30 concurrency, quota, interruption and old HTML records.
-    - [ ] Validation: one complete record write acknowledged; legacy records untouched/disabled; AC06/07.
-    - [ ] Completion: conflicting saves never overwrite silently; evidence S5.1.
+    - [x] Tests: T12/T25/T26/T30 concurrency, quota, interruption and old HTML records.
+    - [x] Validation: one complete record write acknowledged; legacy records untouched/disabled; AC06/07.
+    - [x] Completion: conflicting saves never overwrite silently; evidence S5.1.
     - Follow-up: S5.2 replay and UI customization management.
   - [ ] **S5.2 — Implement route-aware local reconciliation and replay**
     - Goal/inputs: S5.1 records + S3 descriptors + S4 transaction path.

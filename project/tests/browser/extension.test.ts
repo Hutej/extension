@@ -873,3 +873,103 @@ test('S4.3/T13: an authorized hide accepts, hides its target, and reports the ex
   assert.equal(after.display, 'none', 'the hide took effect');
   assert.equal(after.hostVisible, 'block', 'ancestors/siblings are untouched');
 });
+
+
+// ── S5.1: persistence on the real path — save/conflict/record/tombstone ──
+
+const SAVE_REVISION = {
+  revisionId: 'save-r1',
+  capabilityVersion: 1,
+  targetDescriptors: [{
+    descriptorVersion: 1,
+    rootPath: [],
+    selection: 'single',
+    anchor: { tag: 'main' },
+    relation: 'self',
+    matchBounds: { min: 1, max: 1 },
+    routeScopeRef: 'https://example.test',
+    continuityPolicy: 'stable-single',
+  }],
+  operations: [
+    { kind: 'style', rules: [{ target: { targetRef: 'r1' }, surface: 'element', state: 'none', declarations: [{ property: 'color', value: 'red', priority: 'important' }], conditions: [] }] },
+  ],
+  savedAt: 1,
+  source: 'user-planned',
+};
+
+const controlEnvelope = (payload: Record<string, unknown>): Record<string, unknown> => ({
+  protocolVersion: 1,
+  requestId: `ws-ctrl-${Math.random().toString(36).slice(2, 10)}`,
+  kind: 'control',
+  deadlineAt: Date.now() + 10_000,
+  payload,
+});
+
+test('S5.1: a workspace save writes one complete v2 record; a stale save conflicts; remove tombstones', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const origin = 'https://example.test';
+  const saved = await workspaceSend(workspace, controlEnvelope({
+    command: 'SaveRevision',
+    origin,
+    customizationId: 'persist-1',
+    title: 'Persisted theme',
+    scope: { mode: 'exactPath', path: '/page' },
+    contentSensitivity: 'page-only',
+    grants: [],
+    revision: SAVE_REVISION,
+    expectedRecordRevision: 0,
+    mutationId: 'browser-save-1',
+  }));
+  assert.equal((saved as { ok?: boolean; kind?: string }).ok, true, JSON.stringify(saved).slice(0, 300));
+  assert.equal((saved as { kind?: string }).kind, 'saved');
+  assert.equal((saved as { recordRevision?: number }).recordRevision, 1);
+
+  // The complete record is readable back (workspace refresh after conflict).
+  const record = await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin }));
+  const rec = (record as { originRecord?: { recordRevision: number; customizations: Array<{ customizationId: string; activeRevisionId: string; enabled: boolean }> } }).originRecord!;
+  assert.equal(rec.recordRevision, 1);
+  assert.equal(rec.customizations[0].customizationId, 'persist-1');
+  assert.equal(rec.customizations[0].activeRevisionId, 'save-r1');
+  assert.equal(rec.customizations[0].enabled, true);
+
+  // A stale concurrent save conflicts with the current summary — never a
+  // silent overwrite (T30/AC-06).
+  const stale = await workspaceSend(workspace, controlEnvelope({
+    command: 'SaveRevision',
+    origin,
+    customizationId: 'persist-1',
+    title: 'Stale tab',
+    scope: { mode: 'exactPath', path: '/page' },
+    contentSensitivity: 'page-only',
+    grants: [],
+    revision: SAVE_REVISION,
+    expectedRecordRevision: 0,
+    mutationId: 'browser-save-2',
+  }));
+  assert.equal((stale as { ok?: boolean }).ok, false);
+  const staleErr = (stale as { error?: { code?: string }; conflict?: { recordRevision: number } });
+  assert.equal(staleErr.error?.code, 'conflict');
+  assert.equal(staleErr.conflict?.recordRevision, 1);
+
+  // Removal tombstones the customization: a stale re-save is refused.
+  const removed = await workspaceSend(workspace, controlEnvelope({
+    command: 'RemoveCustomization', origin, customizationId: 'persist-1', expectedRecordRevision: 1, mutationId: 'browser-save-3',
+  }));
+  assert.equal((removed as { ok?: boolean }).ok, true, JSON.stringify(removed).slice(0, 300));
+  const zombie = await workspaceSend(workspace, controlEnvelope({
+    command: 'SaveRevision',
+    origin,
+    customizationId: 'persist-1',
+    title: 'Zombie',
+    scope: { mode: 'exactPath', path: '/page' },
+    contentSensitivity: 'page-only',
+    grants: [],
+    revision: SAVE_REVISION,
+    expectedRecordRevision: 2,
+    mutationId: 'browser-save-4',
+  }));
+  assert.equal((zombie as { ok?: boolean }).ok, false, 'the tombstone blocks stale resurrection');
+  const after = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { customizations: unknown[]; tombstones: unknown[] } }).originRecord!;
+  assert.equal(after.customizations.length, 0);
+  assert.equal(after.tombstones?.length, 1);
+});

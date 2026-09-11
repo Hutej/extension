@@ -52,6 +52,14 @@ export const LIMITS = {
   maxChordChars: 64,
   cursorTtlMs: 30_000, // plan/04 snapshot cursor validity
   maxSheetBytes: 262_144, // compiled sheet delivery ceiling (S2.2 styles/S4.1 compiler)
+  maxCustomizationBytes: 262_144, // plan/13 §1 per-customization storage budget
+  maxOriginRecordBytes: 2 * 1024 * 1024, // plan/13 §1 per-origin record budget
+  maxTotalRecordBytes: 6 * 1024 * 1024, // plan/13 §1 total customization data budget
+  maxRevisionsKept: 2, // plan/13 §1: active + previous accepted revision
+  maxTombstones: 32, // plan/13 §6 bounded removal tombstones per record
+  tombstoneStaleMs: 5 * 60_000, // plan/13 §6 stale-message deadline
+  maxRouteDiscriminators: 8, // plan/13 §2 user-approved query/hash discriminators
+  maxDiscriminatorValueChars: 256,
 } as const;
 
 // ── 2. Decoder core ──────────────────────────────────────────────────────
@@ -1107,16 +1115,45 @@ export const ORIGIN_RECORD_SCHEMA_VERSION = 2;
 
 export type ScopeMode = 'exactPath' | 'pathPrefix' | 'origin';
 
+/** plan/13 §2: a route discriminator is a user-selected allowlisted query key
+ *  with its approved value, or an approved hash value. Stored values are the
+ *  exact approved strings — no automatic wildcard over all query values. */
+export type RouteDiscriminator =
+  | { kind: 'query'; key: string; value: string }
+  | { kind: 'hash'; value: string };
+
 export interface RouteScope {
   mode: ScopeMode;
   path?: string; // required for exactPath/pathPrefix
+  discriminators?: RouteDiscriminator[]; // optional, user-approved at save time
 }
+
+const DISCRIMINATOR = (v: unknown, path = 'discriminator'): DecodeResult<RouteDiscriminator> => {
+  const r = decodeRecord(
+    {
+      kind: decodeLiteral(['query', 'hash']),
+      key: optional(decodeString({ max: 128, pattern: /^[^\s&=#]+$/ })),
+      value: decodeString({ max: LIMITS.maxDiscriminatorValueChars, pattern: /^[^\s]+$/ }),
+    },
+    { maxDepth: LIMITS.maxJsonDepth },
+  )(v, path);
+  if (!r.ok) return r;
+  const d = r.value;
+  if (d.kind === 'query' && d.key === undefined) {
+    return fail(`${path}.key`, 'missing', 'a query discriminator requires its allowlisted key');
+  }
+  if (d.kind === 'hash' && d.key !== undefined) {
+    return fail(`${path}.key`, 'unknown-value', 'a hash discriminator carries no query key');
+  }
+  return ok(d as RouteDiscriminator);
+};
 
 export const decodeRouteScope: Decoder<RouteScope> = (v, path = 'scope') => {
   const r = decodeRecord(
     {
       mode: decodeLiteral(['exactPath', 'pathPrefix', 'origin']),
       path: optional(decodeString({ max: 2048, pattern: /^\/.*$/ })),
+      discriminators: optional(decodeArray(DISCRIMINATOR, LIMITS.maxRouteDiscriminators)),
     },
     { maxDepth: LIMITS.maxJsonDepth },
   )(v, path);
@@ -1232,6 +1269,15 @@ export interface OriginRecord {
   lastMutationId: string;
   customizations: Customization[];
   updatedAt: number;
+  /** plan/13 §6: bounded removal tombstones — a stale session cannot
+   *  resurrect a removed customizationId until the stale deadline passes. */
+  tombstones?: Tombstone[];
+}
+
+export interface Tombstone {
+  customizationId: string;
+  mutationId: string;
+  at: number;
 }
 
 const ID = decodeString({ max: 128, pattern: /^[A-Za-z0-9._:-]+$/ });
@@ -1284,6 +1330,15 @@ export const decodeOriginRecord: Decoder<OriginRecord> = (v, path = 'record') =>
       lastMutationId: ID,
       customizations: decodeArray(decodeCustomization, 256),
       updatedAt: decodeFiniteNumber({ integer: true, min: 0 }),
+      tombstones: optional(
+        decodeArray(
+          decodeRecord(
+            { customizationId: ID, mutationId: ID, at: decodeFiniteNumber({ integer: true, min: 0 }) },
+            { maxDepth: LIMITS.maxJsonDepth },
+          ),
+          LIMITS.maxTombstones,
+        ),
+      ),
     },
     { maxDepth: LIMITS.maxJsonDepth },
   )(v, path);
@@ -1516,9 +1571,13 @@ const KIND_SENDER_ROLES: Readonly<Record<string, readonly SenderRole[]>> = {
   RemoveStyle: ['runtime'],
   CommitComposition: ['runtime'],
   RenewLease: ['workspace'],
-  SaveRevision: ['workspace', 'runtime'],
-  SetEnabled: ['workspace', 'runtime'],
-  RemoveCustomization: ['workspace', 'runtime'],
+  // plan/04 §4: the broker alone writes OriginRecords — content runtimes can
+  // never save/enable/remove, whatever a page asks them to forward.
+  SaveRevision: ['workspace'],
+  SetEnabled: ['workspace'],
+  RemoveCustomization: ['workspace'],
+  GetOriginRecord: ['workspace'],
+  ExportQuarantine: ['workspace'],
   RuntimeState: ['workspace'],
   RunProgress: ['workspace'],
   RouteChanged: ['broker'],
