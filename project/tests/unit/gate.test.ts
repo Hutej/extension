@@ -94,7 +94,9 @@ test('T29: type-only imports are exempt from boundary and cycle rules', () => {
 
 test('T29: the real src graph is clean (boundaries respected, no runtime cycles)', () => {
   const graph = buildGraph(`${REPO}src`);
-  assert.ok(graph.files.length >= 40, `unexpectedly small src graph: ${graph.files.length}`);
+  // S6.3 cutover floor: the v2 source inventory (plan/19 §4 ledger). A drop
+  // below this count means v2 source was lost, not legacy code deleted.
+  assert.ok(graph.files.length >= 20, `unexpectedly small src graph: ${graph.files.length}`);
   const violations = auditGraph(graph);
   assert.deepEqual(violations, [], `src graph violations: ${JSON.stringify(violations)}`);
 });

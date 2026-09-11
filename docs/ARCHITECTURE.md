@@ -1,5 +1,13 @@
 # Revueon — Architecture
 
+> **Historical document — not current architecture.** The S6.3 cutover
+> (plan/19) deleted the system this file describes (the agent loop, tool
+> registry, legacy persistence and their live paths). It is preserved for
+> archaeology only. Current authority: `plan/` (architecture) and
+> `plan/progress.md` (implementation state). Do not follow anything here.
+
+
+
 *Complete specification of the live system. Rebuilt 31 Aug 2026 from source
 after R0/R1/R2. Every number in this file is verified against code — when code
 changes, this file changes in the same commit (stale-doc drift was the T0

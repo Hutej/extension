@@ -1,15 +1,16 @@
 /**
- * Browser characterization suite (S0.1) — the BUILT extension under Playwright,
- * driven through the real production message path: background service worker →
- * chrome.tabs.sendMessage → content script → registered tools. No test-only
- * injection into the page; the content script under test is the shipped one.
+ * Browser suite for the S6.3 cutover state — the BUILT extension under
+ * Playwright, driven through the real v2 production message path: workspace
+ * extension page → broker (verified sender + document fence) → the one
+ * document runtime. No test-only injection into the page; the content script
+ * under test is the shipped one (I27/I28).
  *
- * Cases marked [KNOWN-RED] assert desired behavior that today's code does not
- * deliver; their names are recorded in tests/browser/known-red.json and the
- * gate fails if they start passing (the defect was fixed — flip them into
- * plain regressions). Defect-characterization cases document current behavior
- * and MUST be revisited by the task that changes the behavior (F02 fencing in
- * S2.1); their names say so.
+ * The S0.1 legacy-dispatch characterization tests (toolCall/resetTxn/undoLast
+ * and their F02/F05/F06/T05 known-red markers) died with the legacy
+ * dispatcher they characterized — plan/19 §3.2 removes the old live path and
+ * §6 requires "no legacy action dispatcher" to be PROVEN, which the smoke
+ * test now asserts directly. The historical regression knowledge lives in
+ * Git history and plan/01, not in live old architecture.
  */
 
 import { test, before, after } from 'node:test';
@@ -23,6 +24,7 @@ const EXT_PATH = join(REPO, '.output', 'chrome-mv3');
 const sleep = (ms: number) => new Promise<void>((r) => setTimeout(r, ms));
 
 let context: BrowserContext | null = null;
+let workspace: Page | null = null;
 let sw: Worker | null = null;
 let fixtures: Awaited<ReturnType<typeof startFixtureServer>> | null = null;
 
@@ -66,166 +68,48 @@ async function tabIdFor(page: Page): Promise<number> {
   return match.id as number;
 }
 
+async function tabIdOf(page: Page): Promise<number> {
+  const tabId = await tabIdFor(page);
+  return tabId;
+}
+
 async function openFixture(name: string): Promise<{ page: Page; tabId: number }> {
   const page = await context!.newPage();
   await page.goto(`${fixtures!.origin}/${name}`, { waitUntil: 'load' });
   await page.bringToFront();
-  // Wait until the content script's onMessage listener answers (document_idle).
-  const deadline = Date.now() + 10_000;
-  for (;;) {
-    try {
-      const tabId = await tabIdFor(page);
-      const alive = await sw!.evaluate(
-        async ([id]) => chrome.tabs.sendMessage(id as number, { action: 'resetTxn' }).then(() => true, () => false),
-        [tabId],
-      );
-      if (alive) return { page, tabId };
-    } catch { /* SW not ready yet — retry */ }
-    if (Date.now() > deadline) throw new Error('content script never answered resetTxn within 10s');
-    await sleep(250);
-  }
+  const tabId = await tabIdOf(page);
+  // The v2 liveness signal: the runtime's VERIFIED registration reaches the
+  // broker registry (the legacy resetTxn handshake died with the dispatcher).
+  await registeredDocument(tabId);
+  return { page, tabId };
 }
 
-async function dispatch(tabId: number, message: Record<string, unknown>): Promise<Record<string, unknown>> {
-  const res = await sw!.evaluate(
-    ([id, msg]) => chrome.tabs.sendMessage(id as number, msg as unknown as Record<string, unknown>),
-    [tabId, message],
-  );
-  return res as Record<string, unknown>;
-}
+// ── smoke (cutover state) ─────────────────────────────────────────────────
 
-const setText = (selector: string, text: string): Record<string, unknown> =>
-  ({ action: 'toolCall', tool: 'setText', args: { selector, text, reason: 'translate' } });
-
-// ── smoke ────────────────────────────────────────────────────────────────
-
-test('smoke: built extension runs; content script answers on the production dispatch path', async () => {
-  const { page, tabId } = await openFixture('wrong-target.html');
-  assert.ok(tabId > 0);
+test('smoke: the one v2 runtime registers; the legacy action dispatcher is gone (plan/19 §6)', async () => {
+  workspace = await ensureWorkspace();
+  const { page, tabId } = await openFixture('v2-vertical.html');
   const manifest = await sw!.evaluate(() => chrome.runtime.getManifest());
   assert.equal(manifest.manifest_version, 3);
   assert.equal(manifest.name, 'Revueon');
-  // A registered observe tool answers through the same path the loop uses.
-  const res = await dispatch(tabId, { action: 'toolCall', tool: 'findElements', args: { selector: '#target' } });
-  assert.equal(res.ok, true, `findElements should resolve #target: ${JSON.stringify(res)}`);
-  assert.ok(page); // the fixture page is alive
-});
-
-// ── T05 wrong-target ─────────────────────────────────────────────────────
-
-test('T05: an ambiguous selector is refused — no first-match mutation', async () => {
-  const { page, tabId } = await openFixture('wrong-target.html');
-  const res = await dispatch(tabId, setText('.item', 'MUTATED'));
-  assert.equal(res.ok, false, 'setText on a 2-match selector must refuse');
-  assert.match(String(res.error), /not a unique identity|matched 2/);
-  const texts = await page.evaluate(() => [...document.querySelectorAll('.item')].map((e) => e.textContent));
-  assert.deepEqual(texts, ['Twin one', 'Twin two'], 'neither twin may be mutated');
-});
-
-test('T05 (characterizes current gap — revisit with S3.1 targeting): an unobserved selector re-mutates a replaced node', async () => {
-  const { page, tabId } = await openFixture('wrong-target.html');
-  // The real flow observes first — but describePage's targetable regions on
-  // this fixture do not include #target (only coarse regions are targetable),
-  // so the act takes the unverified branch and the identity store never
-  // protects this selector.
-  const obs = await dispatch(tabId, { action: 'toolCall', tool: 'describePage', args: {} });
-  assert.equal(obs.ok, true, 'describePage must succeed on the fixture');
-
-  // Act on the unobserved selector, replace the node (re-render), act again.
-  const first = await dispatch(tabId, setText('#target', 'Revueon v1'));
-  assert.equal(first.ok, true, `first act applies: ${JSON.stringify(first)}`);
-  await page.evaluate(() => {
-    const el = document.querySelector('#target')!;
-    const fresh = el.cloneNode(true) as Element;
-    fresh.textContent = 'Replaced by a re-render with entirely different content';
-    el.replaceWith(fresh);
-  });
-  const second = await dispatch(tabId, setText('#target', 'Revueon v2'));
-  const now = await page.evaluate(() => document.querySelector('#target')?.textContent);
-  assert.equal(second.ok, true, 'characterizes the gap: the unobserved selector still mutates');
-  assert.equal(now, 'Revueon v2',
-    'characterizes the gap: the REPLACED node (a different element than the first act mutated) is mutated anyway');
-});
-
-test('T05 [KNOWN-RED]: after observation, a selector whose node was replaced refuses to re-mutate', async () => {
-  const { page, tabId } = await openFixture('wrong-target.html');
-  const obs = await dispatch(tabId, { action: 'toolCall', tool: 'describePage', args: {} });
-  assert.equal(obs.ok, true);
-  const first = await dispatch(tabId, setText('#target', 'Revueon v1'));
-  assert.equal(first.ok, true, `first act applies: ${JSON.stringify(first)}`);
-  await page.evaluate(() => {
-    const el = document.querySelector('#target')!;
-    const fresh = el.cloneNode(true) as Element;
-    fresh.textContent = 'Replaced by a re-render with entirely different content';
-    el.replaceWith(fresh);
-  });
-  // Desired (S3.1 target registry): a selector that now resolves to a node the
-  // system never observed must refuse instead of mutating the wrong element.
-  const second = await dispatch(tabId, setText('#target', 'Revueon v2'));
-  assert.equal(second.ok, false, 'second act must refuse the replaced node');
-  const now = await page.evaluate(() => document.querySelector('#target')?.textContent);
-  assert.equal(now, 'Replaced by a re-render with entirely different content', 'the re-rendered node must stay untouched');
-});
-
-// ── F06 clone-restore (T09) ─────────────────────────────────────────────
-
-test('F06 [KNOWN-RED]: undo restores the SAME native node and its listener', async () => {
-  const { page, tabId } = await openFixture('clone-restore.html');
-  // Attach a listener in the page's main world, as the site itself would.
-  await page.evaluate(() => {
-    const btn = document.getElementById('btn')!;
-    (window as unknown as { __btn: Element; __clicks: number }).__btn = btn;
-    (window as unknown as { __clicks: number }).__clicks = 0;
-    btn.addEventListener('click', () => { (window as unknown as { __clicks: number }).__clicks += 1; });
-  });
-
-  const act = await dispatch(tabId, setText('#btn', 'Translated button label'));
-  assert.equal(act.ok, true, `setText must apply: ${JSON.stringify(act)}`);
-
-  const undo = await dispatch(tabId, { action: 'undoLast' });
-  assert.equal(undo.ok, true, `undoLast must run: ${JSON.stringify(undo)}`);
-
-  // Desired: the original node survives with its listener; a real click counts.
-  await page.click('#btn');
-  const state = await page.evaluate(() => {
-    const w = window as unknown as { __btn: Element; __clicks: number };
-    return { sameNode: document.getElementById('btn') === w.__btn, clicks: w.__clicks, text: document.getElementById('btn')?.textContent };
-  });
-  assert.equal(state.text, 'Save changes', 'undo must restore the original text');
-  assert.equal(state.sameNode, true, 'undo must NOT replace the native node with a clone');
-  assert.equal(state.clicks, 1, 'the site listener attached to the original node must survive undo');
-});
-
-// ── F02 late dispatch (T08) ─────────────────────────────────────────────
-
-test('F02 (characterizes current defect — revisit with S2.1 fencing): a dispatch whose caller stops waiting still mutates', async () => {
-  const { page, tabId } = await openFixture('late-dispatch.html');
-  // The caller "gives up" (timeout means unknown) — fire and forget.
-  await sw!.evaluate(
-    ([id, msg]) => { void chrome.tabs.sendMessage(id as number, msg as unknown as Record<string, unknown>).catch(() => {}); },
-    [tabId, setText('#late', 'MUTATED AFTER ABANDONMENT')],
+  assert.equal((manifest.action as Record<string, unknown> | undefined)?.default_popup, undefined,
+    'the S6.3 cutover removed the ephemeral popup — the workspace is a side panel/tab (AC-09)');
+  assert.ok(manifest.side_panel, 'the side panel hosts the shared workspace page');
+  // The registered document is the verified identity from ListDocuments.
+  const doc = await registeredDocument(tabId);
+  assert.equal(doc.documentKey.tabId, tabId, 'identity comes from the browser sender, not the payload');
+  assert.ok(doc.documentKey.browserDocumentId.length > 0, 'browser document id is authoritative');
+  // ONE mutation owner (I03): a legacy `action` message must produce NO
+  // result and mutate nothing — the old toolCall surface is deleted.
+  const legacyReply = await sw!.evaluate(
+    async ([id, msg]) => chrome.tabs
+      .sendMessage(id as number, msg as unknown as Record<string, unknown>)
+      .then((r: unknown) => ({ answered: r !== undefined }), () => ({ answered: false })),
+    [tabId, { action: 'toolCall', tool: 'setText', args: { selector: 'h1', text: 'HACKED BY LEGACY PATH' } }],
   );
-  await sleep(400);
-  const text = await page.evaluate(() => document.querySelector('#late')?.textContent);
-  assert.equal(text, 'MUTATED AFTER ABANDONMENT',
-    'characterizes F02: without document/run fencing, an abandoned dispatch still mutates the page');
-});
-
-test('F02 [KNOWN-RED]: a toolCall receipt carries reconcilable operation identity', async () => {
-  const { tabId } = await openFixture('late-dispatch.html');
-  const res = await dispatch(tabId, {
-    ...setText('#late', 'Any text'),
-    runId: 'run-fixture',
-    documentId: 'doc-fixture',
-    operationId: 'op-fixture',
-  });
-  assert.equal(res.ok, true);
-  // Desired: the response names the operation/document it executed, so a caller
-  // that timed out can reconcile a late acknowledgement (I04/I06).
-  const receipt = (res.receipt ?? (res.result as { receipt?: unknown })?.receipt) as Record<string, unknown> | undefined;
-  assert.ok(receipt, `toolCall response must carry a receipt with operation identity; got: ${JSON.stringify(res)}`);
-  assert.equal(receipt.operationId, 'op-fixture');
-  assert.equal(receipt.documentId, 'doc-fixture');
+  assert.equal(legacyReply.answered, false, 'no legacy dispatcher may answer');
+  const heading = await page.evaluate(() => document.querySelector('h1')?.textContent ?? '');
+  assert.notEqual(heading, 'HACKED BY LEGACY PATH', 'the deleted legacy path must not mutate the page');
 });
 
 // ── S2.1: v2 document broker/runtime vertical (real message paths) ──────
@@ -237,13 +121,15 @@ interface CapturedState {
   customizations?: Array<{ customizationId: string; state: string; detail?: string }>;
 }
 
-/** Open an extension page as the trusted workspace sender (plan/06: workspace
- *  → broker commands originate from extension pages) and subscribe to the
- *  runtime's RuntimeState projections. */
-async function openWorkspace(): Promise<Page> {
+/** Open the shared workspace page (sidepanel.html — the popup died with the
+ *  S6.3 cutover) as the trusted workspace sender (plan/06: workspace →
+ *  broker commands originate from extension pages) and subscribe to the
+ *  runtime's RuntimeState projections. Idempotent: one page per suite. */
+async function ensureWorkspace(): Promise<Page> {
+  if (workspace !== null) return workspace;
   const extId = await sw!.evaluate(() => chrome.runtime.id) as string;
   const ws = await context!.newPage();
-  await ws.goto(`chrome-extension://${extId}/popup.html`, { waitUntil: 'load' });
+  await ws.goto(`chrome-extension://${extId}/sidepanel.html`, { waitUntil: 'load' });
   await ws.evaluate(() => {
     const w = window as unknown as { __rv2States: CapturedState[] };
     w.__rv2States = [];
@@ -259,6 +145,7 @@ async function openWorkspace(): Promise<Page> {
       }
     });
   });
+  workspace = ws;
   return ws;
 }
 
@@ -271,6 +158,34 @@ async function capturedState(ws: Page, tabId: number, minInstanceGeneration = 0)
     if (Date.now() > deadline) {
       throw new Error(`no ready RuntimeState captured for tab ${tabId} (got ${JSON.stringify(states)})`);
     }
+    await sleep(200);
+  }
+}
+
+/** Poll ListDocuments (the S6.2 workspace discovery command) until the tab's
+ *  runtime has REGISTERED — the honest v2 liveness signal, on the real path. */
+async function registeredDocument(tabId: number): Promise<{
+  documentKey: { tabId: number; frameId: number; browserDocumentId: string; runtimeInstanceId: string };
+  routeEpoch: number;
+}> {
+  const ws = await ensureWorkspace();
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    const reply = (await workspaceSend(ws, {
+      protocolVersion: 1,
+      requestId: `probe-${Math.random().toString(36).slice(2, 10)}`,
+      kind: 'control',
+      deadlineAt: Date.now() + 10_000,
+      payload: { command: 'ListDocuments' },
+    })) as Record<string, unknown>;
+    const docs = (reply.documents ?? []) as Array<{
+      documentKey: { tabId: number; frameId: number; browserDocumentId: string; runtimeInstanceId: string };
+      tabId: number;
+      routeEpoch: number;
+    }>;
+    const mine = docs.filter((d) => d.tabId === tabId);
+    if (mine.length > 0) return { documentKey: mine[0].documentKey, routeEpoch: mine[0].routeEpoch };
+    if (Date.now() > deadline) throw new Error(`the document for tab ${tabId} never registered with the broker`);
     await sleep(200);
   }
 }
@@ -320,10 +235,8 @@ const replyError = (reply: Record<string, unknown>): Record<string, unknown> | u
   return undefined;
 };
 
-let workspace: Page | null = null;
-
 test('S2.1: the v2 vertical registers the document runtime with verified identity (T21)', async () => {
-  workspace = await openWorkspace();
+  workspace = await ensureWorkspace();
   const { page, tabId } = await openFixture('v2-vertical.html');
   const state = await capturedState(workspace, tabId);
   assert.ok(state.documentKey, `registration must carry a verified DocumentKey: ${JSON.stringify(state)}`);
@@ -333,13 +246,14 @@ test('S2.1: the v2 vertical registers the document runtime with verified identit
   assert.ok(state.documentKey!.runtimeInstanceId?.length);
   assert.equal(state.routeEpoch, 0, 'fresh document starts at route epoch 0');
 
-  // The runtime of the fixture page must have actually booted: the legacy
-  // dispatcher must still answer on the same document (coexistence check).
-  const legacyAlive = await sw!.evaluate(
-    async ([id]) => chrome.tabs.sendMessage(id as number, { action: 'resetTxn' }).then(() => true, () => false),
+  // The runtime of the fixture page booted on the one v2 path; the legacy
+  // dispatcher is DELETED (plan/19 §3.2/§6): its messages resolve with no
+  // result — the v2 listener ignores them, one mutation owner only (I03).
+  const legacyDead = await sw!.evaluate(
+    async ([id]) => chrome.tabs.sendMessage(id as number, { action: 'resetTxn' }).then((r: unknown) => r === undefined, () => false),
     [tabId],
   );
-  assert.equal(legacyAlive, true, 'the legacy dispatcher must remain reachable on its own path');
+  assert.equal(legacyDead, true, 'the legacy dispatcher is gone; its messages produce no result');
   void page;
 });
 

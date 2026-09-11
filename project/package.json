@@ -5,17 +5,14 @@
   "type": "module",
   "scripts": {
     "dev": "wxt",
-    "build": "node --experimental-strip-types scripts/audit-env.ts && node --experimental-strip-types scripts/audit-wiring.ts && node --experimental-strip-types scripts/audit-imports.ts && wxt build",
+    "build": "node --experimental-strip-types scripts/audit-imports.ts && wxt build",
     "compile": "tsc --noEmit",
     "typecheck": "tsc --noEmit",
     "lint": "eslint src/ --ext .ts",
-    "audit:wiring": "node --experimental-strip-types scripts/audit-wiring.ts",
-    "audit:env": "node --experimental-strip-types scripts/audit-env.ts",
     "audit:imports": "node --experimental-strip-types scripts/audit-imports.ts",
     "test": "node --experimental-strip-types scripts/test-gate.ts",
     "test:unit": "node --experimental-strip-types scripts/test-gate.ts --unit",
-    "test:browser": "node --experimental-strip-types scripts/test-gate.ts --browser",
-    "bench": "node --experimental-strip-types --env-file=.env tests/bench/wiki-bench.ts"
+    "test:browser": "node --experimental-strip-types scripts/test-gate.ts --browser"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",

@@ -4,11 +4,11 @@
 
 ## Current checkpoint
 
-- Current phase: **S6 — model independence, workspace and core cutover**.
-- Next task: **S6.3**.
+- Current phase: **S7 — behavior and keyboard-first workflows**.
+- Next task: **S7.1**.
 - Active task: none.
-- Completed: S0.1 through S6.2 (see `plan/progress.md`). S5 delivered durable continuity (record owner + route-aware replay); S6.1 delivered `providers.ts` and `planning/controller.ts`; S6.2 delivered the shared workspace (`ui/workspace.ts` + `diagnostics.ts` + sidepanel entrypoint with extension-tab fallback): exact target pinning with persisted revalidated selection, provider profiles + endpoint-scoped consent + real opt-out, question/approval UX, always-available Stop, truthful status projection, customization list (enable/disable/remove/undo-latest/scope), diagnostic panel, and the full apply→save→replay user workflow proven end-to-end against a canned local provider in the browser suite. Read-only workspace discovery added to the protocol (ListDocuments/GetState, ADR-14).
-- Known baseline blockers: none. Residual: `npm run bench` references the absent old bench harness (deferred); the legacy F05 recovery clause stays known-red until the plan/19 cutover deletes that path; streaming + capability-probe connection tests deferred from S6.1 (recorded); reconciliation set-membership changes re-apply whole customizations (bounded by the conflict pause); the legacy popup stays the toolbar default until the S6.3 cutover switches entrypoints (the v2 workspace is reachable as sidepanel + tab today); the legacy run overlay (a full-page blocker during legacy runs) is deleted with that cutover (I22).
+- Completed: S0.1 through S6.3 — **the S6 cutover is complete** (see `plan/progress.md`). One v2 runtime and the canonical provider/store/target paths ship; the legacy agent loop, tool registry, popup, work overlay and their live paths are DELETED (plan/19 §4 deletion record); the built manifest is popup-free with `minimum_chrome_version: 120`; legacy `rv_*` data stays quarantined untouched and the old per-tab CSS tracker is exact-removed once at startup; docs are pointers and `docs/CORE-PREVIEW.md` lists unavailable P2 features honestly.
+- Known baseline blockers: none. Residual: an actual Chrome 120 install run is not available in this environment (current-stable Chromium proven; floor declared in the manifest); streaming + capability-probe connection tests deferred from S6.1 (recorded); reconciliation set-membership changes re-apply whole customizations (bounded by the conflict pause); the workspace `scripts/` no longer contains audit-env/audit-wiring (retired with their subjects — build runs the resolved-import gate only).
 - Planning baseline: dirty `main` at `71263e0938e0a3d3a2a5e7a44d2175898b9e8c0b`; owner's changes preserved.
 - Evidence: `plan/progress.md` (one compact log).
 - Simplicity: follow consolidated physical files in document 02. Detailed module names below are logical responsibilities, not mandatory files/classes. One ordered batch per proposal; no subgroup DAG. Capability coverage including insertion/motion/canvas is in document 28.
@@ -182,7 +182,7 @@ Read: [persistence](13-persistence-and-replay.md), algorithms A6/A9, [migration]
 
 Read: [providers](11-model-providers.md), [UX](16-observability-and-ux.md), ADR02/09, [cutover](19-migration-and-deletion.md).
 
-- [ ] **S6 phase completed**
+- [x] **S6 phase completed**
   - [x] **S6.1 — Implement provider adapters and bounded planning controller**
     - Goal/inputs: S1 contracts, S3 evidence, S4 validation/receipts; adapter code can begin after S1 but integration needs S5.
     - Changes: OpenAI-chat/Anthropic/local profiles, exact endpoint auth, bounded streaming/nonstreaming client, schema decode, recent context and one shared correction budget; model calls in visible workspace.
@@ -201,14 +201,14 @@ Read: [providers](11-model-providers.md), [UX](16-observability-and-ux.md), ADR0
     - [x] Validation: no false success, arbitrary-tab fallback, implicit consent or dead opt-out; AC07/09.
     - [x] Completion: close/reopen and partial/unsaved/conflicted states correct; evidence S6.2.
     - Follow-up: production entrypoint cutover (the legacy popup remains the toolbar default until S6.3 removes it; the sidepanel page + tab fallback are the v2 workspace).
-  - [ ] **S6.3 — Cut over core runtime and remove legacy live paths**
+  - [x] **S6.3 — Cut over core runtime and remove legacy live paths**
     - Goal/inputs: S6.1/2 plus all S0–S5 gates; migration record.
     - Changes: switch WXT entrypoints; disable old loop/CSS/DOM replay/dispatch together; quarantine state; remove migrated legacy imports/files; legacy docs become pointers.
     - Outputs: one v2 runtime and canonical provider/store/target paths; core preview release explicitly lists unavailable P2 features.
     - Invariants: I03/I13/I27/I28.
-    - [ ] Tests: full deterministic core T01–T14/T19–T22/T25–T27/T29–T31 applicable, fresh build at min/current Chrome.
-    - [ ] Validation: no live legacy runtime/source path, no unsafe auto migration; AC01–10 applicable.
-    - [ ] Completion: deletion subset in migration ledger verified, evidence S6.3, next task S7.1 recorded.
+    - [x] Tests: full deterministic core T01–T14/T19–T22/T25–T27/T29–T31 applicable, fresh build at min/current Chrome. (Current-stable Chromium proven; the 120 floor is declared in the manifest — an actual Chrome 120 install run is not available in this environment, recorded as residual.)
+    - [x] Validation: no live legacy runtime/source path, no unsafe auto migration; AC01–10 applicable.
+    - [x] Completion: deletion subset in migration ledger verified, evidence S6.3, next task S7.1 recorded.
     - Follow-up: P2 capabilities build on stable product, not old stubs.
 
 ## S7 — Behavior and keyboard-first workflows

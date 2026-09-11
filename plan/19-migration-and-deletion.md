@@ -64,6 +64,20 @@ Delete **after** replacement gates, not before tests capture material failure mo
 
 `project/src/shared/color.ts` is **not** automatically deleted. Keep tested math with necessary corrections. No forced removal of installed dependencies merely because they are dev-only. No new graph/agent framework to replace deleted code.
 
+### S6.3 deletion record (verified 2026-09-09)
+
+The cutover executed the ledger above. Deleted, with the verification that proves no dependency remains:
+
+- `src/agent/` (loop, journal, prompt, budget, recover) and `src/tools/` (act/observe/verify/index) — the resolved import graph (`scripts/audit-imports.ts`, part of `npm run build`) is clean over the remaining 21 src files; no runtime module imports agent/tools.
+- `src/core/` except `sanitize/redact.ts` (the pure, tested credential-shape primitive this plan retains; kept for its suite, no production dependency). All identity/ops/persist/reason/config/perceive/sanitize-HTML paths are gone.
+- `src/entrypoints/popup/` — the built manifest has no `default_popup`; the toolbar action opens the side panel (Chrome 116+), the same `sidepanel.html` doubles as the extension-tab fallback.
+- Legacy live paths in `entrypoints/background.ts` and `entrypoints/content.ts`: rewritten to thin bootstraps (installBroker / bootRuntimeSession only). The browser suite proves on the real path that a legacy `action: 'toolCall'` message now produces **no result and no mutation** (smoke test) and that every v2 path (S2.1–S5.2 tests) works unchanged.
+- `scripts/audit-wiring.ts` and `scripts/audit-env.ts` — retired per this ledger (replaced by the resolved-import gate; the last browser env read died with `core/config`).
+- Legacy suites died with their subjects: unit `budget/digest/extract-json/known-defects` (+ the F05 known-red markers), browser `toolCall/resetTxn/undoLast` tests (+ the F02/F06/T05 known-red markers). Both known-red lists are now empty — no known defect remains in the shipped product.
+- §3.4 legacy CSS: the new background exact-removes the old per-tab USER-sheet tracker (`rv_insertedCssByTab`) once at startup, then clears it; a tab that is gone took its sheets with it.
+- §3.5 quarantine: unchanged from S5.1 — v0 `rv_*` journals are preserved byte-for-byte and never executed; v2 state is never down-converted.
+- Docs: `docs/{ARCHITECTURE,TOOLS,TESTING}.md` now carry an explicit not-current pointer header; `docs/CORE-PREVIEW.md` is the release note that lists available vs unavailable P2 capabilities.
+
 ## 5. User's pre-existing deletions
 
 Root obsolete plans, old screenshots/userscripts, `project/PROJECT.md`, `playwright.config.ts` and `prove.ts` are already deleted in baseline. Do not recreate them to satisfy stale comments. Preserve their Git history for archaeology, not product authority. Existing `.output`, `.wxt`, node_modules and lockfiles are tooling artifacts, not documentation deliverables; planning task leaves them unchanged.

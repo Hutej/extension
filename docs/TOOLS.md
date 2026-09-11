@@ -1,5 +1,13 @@
 # Revueon — Tool registry
 
+> **Historical document — not current architecture.** The S6.3 cutover
+> (plan/19) deleted the system this file describes (the agent loop, tool
+> registry, legacy persistence and their live paths). It is preserved for
+> archaeology only. Current authority: `plan/` (architecture) and
+> `plan/progress.md` (implementation state). Do not follow anything here.
+
+
+
 *Complete contract of every tool. The registry is `src/tools/index.ts`; tools
 execute in the content script, the background imports the registry to build
 the prompt, the loop dispatches via `chrome.tabs.sendMessage {action:'toolCall'}`.

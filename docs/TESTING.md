@@ -1,5 +1,13 @@
 # Revueon — Testing
 
+> **Historical document — not current architecture.** The S6.3 cutover
+> (plan/19) deleted the system this file describes (the agent loop, tool
+> registry, legacy persistence and their live paths). It is preserved for
+> archaeology only. Current authority: `plan/` (architecture) and
+> `plan/progress.md` (implementation state). Do not follow anything here.
+
+
+
 *The two-command system (rebuilt 6 Sep 2026, P1). The Session-0 cleanup
 archived the pre-fresh suites to `archive/tests-pre-fresh/`; this document
 describes the live suite. Zero src/ imports are mocked — the tests import the

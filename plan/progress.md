@@ -429,3 +429,32 @@ Next task: **S6.2 — Build accessible shared workspace and truthful state manag
 - StartRun busy offers cancel + user re-Start rather than one-click cancel-and-replace (explicit two-step, no implicit model spend).
 
 Next task: **S6.3 — Cut over core runtime and remove legacy live paths** (plan/19; all S0–S6.2 gates now pass).
+
+## S6.3 — Cut over core runtime and remove legacy live paths — `complete`
+
+- Date: 2026-09-09. Source: `main` `9c9d146` (S6.2 committed; clean tree).
+- **The plan/19 cutover**: the shipped extension now runs ONE runtime — the v2 broker + per-document runtime + workspace — with no legacy live path. The full deletion record with per-item verification is in plan/19 §4 ("S6.3 deletion record").
+- Deleted (12,650 lines): `src/agent/` (loop/journal/prompt/budget/recover), `src/tools/` (act/observe/verify/index), `src/core/` except `sanitize/redact.ts` (the pure tested credential-shape primitive this plan retains — no production dependency, kept for its suite), `src/entrypoints/popup/`, `scripts/audit-wiring.ts` + `scripts/audit-env.ts` (retired per the ledger — the resolved-import gate replaces them; the last browser env read died with `core/config`), the dead `bench` script, and the legacy suites that characterized the deleted code (unit: budget/digest/extract-json/known-defects + the two F05 known-red markers; browser: the toolCall/resetTxn/undoLast dispatch tests + the F02/F06/T05 known-red markers). **Both known-red lists are now empty.**
+- Entrypoints rewritten thin (plan/19 §3.2/§6): `background.ts` = installBroker + sidePanel behavior + a one-shot §3.4 migration that exact-removes the old per-tab USER-sheet tracker (`rv_insertedCssByTab`) and clears it; `content.ts` = `bootRuntimeSession()` only — no overlay, no history monkey patching, no legacy dispatcher.
+- Manifest: popup-free (`action` opens the side panel, Chrome 116+; `sidepanel.html` doubles as the tab fallback), `minimum_chrome_version: '120'` declared; the stale `process.env` vite defines removed with their deleted subject (`core/config`). Bundle: 419.4 kB total (was 745.4 kB).
+- Browser suite rewritten to the v2 surface: the smoke test now PROVES the cutover on the real path (the registered v2 document is listed via ListDocuments; a legacy `action: 'toolCall'` produces no result and no mutation — plan/19 §6 "no legacy action dispatcher"), `openFixture` waits for the verified v2 registration instead of the legacy resetTxn handshake, the workspace sender is `sidepanel.html` (one shared page), and the S2.1 coexistence check is inverted into the one-owner proof. All S2.1–S5.2 v2 verticals pass unchanged.
+- Docs: pointer headers on `docs/{ARCHITECTURE,TOOLS,TESTING}.md`; new `docs/CORE-PREVIEW.md` — the core preview release note listing available capabilities and the honestly-absent P2 set (bindKey/localRule/projectCollection executors, canvas, frames, journal import review, streaming/connection tests).
+
+### Evidence (commands from `project/`)
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` | pass |
+| `npm run lint` | pass, 0 errors |
+| `npm run build` | pass — audit:imports ✓ (21 files, boundaries respected, no cycles), wxt build ✓ — manifest: no `default_popup`, `side_panel.default_path` present, `minimum_chrome_version: 120`; 419.4 kB |
+| `npm test` (×2 consecutive) | exit 0 — unit: 291 tests, 291 passed, 0 known-red, 0 unexpected (18 suites, inventory complete); browser: 21 tests, 21 passed, 0 known-red, 0 unexpected (2 suites, inventory complete) |
+| Deletion verification | resolved import graph clean (no module imports agent/tools; `src/core` = the one retained primitive); source search clean (`toolCall`/`resetTxn`/`undoAll`/`runLoop`/`AI_CONFIG` exist only in tests that assert their absence); built manifest inspected programmatically (popup absent, side_panel present) |
+
+### Notes / residual risks
+
+- Chrome 120 is declared in the manifest but an actual minimum-version install run is not available in this environment — current-stable Chromium is what the browser suite proves. A store-style min-version verification belongs to a release checklist, not this repo's gate.
+- Tabs still carrying a pre-cutover content script answer nothing until their next navigation (MV3 cannot reach stale isolated worlds); the release note says "reload open tabs after update" (plan/19 §3.2 fallback — honest, not silent).
+- The §3.4 legacy-CSS exact-removal is best-effort by design (a dead tab's sheets died with it); the tracker is cleared unconditionally so the attempt never repeats.
+- `src/core/sanitize/redact.ts` remains as the retained pure primitive (its credential-shape suite is in the roadmap's stay-list); no production code imports it — noted here so it is not mistaken for a live path.
+
+Next task: **S7.1 — Install approved native action bindings** (plan/09, plan/28; the core product is stable at S6 — P2 capabilities now build on it, not on the deleted stubs).

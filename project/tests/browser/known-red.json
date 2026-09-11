@@ -1,5 +1,1 @@
-[
-  "F06 [KNOWN-RED]: undo restores the SAME native node and its listener",
-  "F02 [KNOWN-RED]: a toolCall receipt carries reconcilable operation identity",
-  "T05 [KNOWN-RED]: after observation, a selector whose node was replaced refuses to re-mutate"
-]
+[]

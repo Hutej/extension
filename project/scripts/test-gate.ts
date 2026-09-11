@@ -28,10 +28,7 @@ export const BROWSER_KNOWN_RED_FILE = join(fileURLToPath(new URL('.', import.met
  *  this list — that is the point: missing suites fail the gate (T01). */
 export const EXPECTED_UNIT_SUITES = [
   'color.test.ts',
-  'extract-json.test.ts',
-  'budget.test.ts',
   'redact.test.ts',
-  'digest.test.ts',
   'contracts.test.ts',
   'trust.test.ts',
   'broker.test.ts',
@@ -41,10 +38,9 @@ export const EXPECTED_UNIT_SUITES = [
   'targets.test.ts',
   'compile.test.ts',
   'gate.test.ts',
-  'known-defects.test.ts',
 ];
 
-export const EXPECTED_BROWSER_SUITES = ['extension.test.ts'];
+export const EXPECTED_BROWSER_SUITES = ['extension.test.ts', 'workspace.test.ts'];
 
 export function missingFromInventory(present: string[], expected: string[]): string[] {
   const have = new Set(present);
