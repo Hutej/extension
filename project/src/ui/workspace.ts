@@ -239,6 +239,10 @@ export function refsOfProposal(proposal: Proposal): string[] {
       case 'bindKey':
         note(op.target);
         break;
+      case 'projectCollection':
+        note(op.target);
+        refs.add(op.sourceSetRef);
+        break;
       default:
         note(op.target);
     }
@@ -274,6 +278,14 @@ function rewriteRefs(proposal: Proposal, refToIndex: Map<string, number>): Propo
         };
       case 'bindKey':
         return op.target ? { ...op, target: map(op.target) } : op;
+      case 'projectCollection': {
+        const setRef = refToIndex.get(op.sourceSetRef);
+        return {
+          ...op,
+          target: map(op.target),
+          ...(setRef !== undefined ? { sourceSetRef: `d${setRef}` } : {}),
+        };
+      }
       default:
         return { ...op, target: map(op.target) };
     }
@@ -1618,6 +1630,14 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
       }
       case 'collapse':
         return `add a disclosure toggle “${op.label}” ${op.placement ?? 'before'} ${firstRef(op.target)} (starts ${op.initialState ?? 'collapsed'}; you can always expand)`;
+      case 'projectCollection': {
+        // plan/09 §4: the review must say what the view shows, that moves are
+        // LOCAL only, and that hiding the original is explicit and reversible.
+        const base = `project a linked ${op.view} of the items in ${op.sourceSetRef} (${op.fields.map((f) => f.sourceField).join(', ')}) next to ${firstRef(op.target)} — arranging it changes your local view only, never the site`;
+        return op.showOriginal === false
+          ? `${base}; the original list will be hidden on the open page (undo restores it)`
+          : base;
+      }
       case 'localRule': {
         // plan/09 §3: the automatic trigger acts WITHOUT a gesture — the
         // review must say what will be clicked and that undo removes the

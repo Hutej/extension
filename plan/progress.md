@@ -514,3 +514,33 @@ Next task: **S7.2 — Implement collapse and finite local behavior rules** (plan
 - The fixture-side lesson (recorded for future fixtures): plain `<script>` fixtures must stay plain JavaScript — a TypeScript cast silently kills the whole block (caught because the rule's seed clicks "did nothing").
 
 Next task: **S8.1 — Implement linked list/grid/board projection** (plan/25 §S8; T17/T28, invariants I08/I14/I18/I25).
+
+## S8.1 — Implement linked list/grid/board projection — `complete`
+
+- Date: 2026-09-09. Source: `main` `e090a42` (S7.2 committed; clean tree).
+- **`projectCollection` operation (linked views, plan/03 runtime/projection, plan/09 §4)** — new `src/runtime/projection.ts`: a `list`/`grid`/`board` view of the OBSERVED items in one source container (the container's direct element children), inserted after its anchor as a neutral `div[role=region]` with a runtime-authored self-contained stylesheet (constant strings — no model CSS, no network values). Every rendered string/link is extracted at render time through the finite field catalog (`title` = the item's link text or own text; `label` = explicit accessible name; `link` = safe http(s) href; `category` = explicit `data-status|state|label|priority` marker on the item or a badge inside it), redacted through the shared evidence policy — never source innerHTML, never invented application state (I25/I18).
+- **Stable item keys** — origin-relative canonical link (sensitive query parameters and fragments stripped; cross-origin keeps the full URL; non-http(s) → null); items without a usable link fall back to a session identity. A recycled row is a NEW item: buckets follow the item key, never a DOM position.
+- **Local-only board organization** — columns = observed categories (source order) + `Unsorted` + user-created ones; moves happen by native drag-and-drop or a per-card `<select>` (keyboard accessible) and write ONLY the session organization map (keyed by customizationId; survives release/re-apply/re-enable — the S7.2 user-override rule applied to projections: a field change never re-buckets a user-moved item). The review labels it: "arranging it changes your local view only, never the site".
+- **Live updates in slices** — ONE MutationObserver on the source container (childList/characterData/attributes-filtered) batches work in a microtask: new children render (bounded), field changes re-extract and patch cards in place, a detached child marks its card stale ("source left the page", reveal disabled) — nothing is silently dropped. Duplicate source keys disable the key action (title becomes text) and mark all copies stale; the detached card keeps its (still-valid) link. Coverage line shows rendered/loaded with the 200 cap; "Show more" paginates 50 at a time before any virtualization.
+- **Source-visibility approval** — `showOriginal` defaults to true; proposing `false` hides the original set through the EXACT compiled hide path (same fragment/verification/restore machinery as the `hide` op) and is a consequential review line ("the original list will be hidden on the open page; undo restores it").
+- **Descriptor resolution excludes the runtime's own view** (`replay.ts`): anchors and relation targets skip `[data-rv2p-view]` subtrees — extension UI is never site evidence, so a projection can never destabilize reconciliation by joining a descriptor's match set (found as a real reconcile-churn/suspend loop in the browser before the fix).
+- **Integration** — transaction prepare/write/release/rollback/record via a `deps.projection` factory seam (transaction tests stub the view; the session binds the real document-bound creator); verify.ts measures connected-at-anchor + rendered count + coverage line + source-set presence; replay retargets `sourceSetRef` (d<i>); workspace saves both refs and previews the operation; planner vocabulary + rules added (container semantics, catalog-only fields, board needs `groupBy:"category"`, `showOriginal:false` is consequential). Decoder tightened: field catalog, ≥1 field, no duplicate fields, board/groupBy cross-check; the unused `maxCollectionGroups` LIMITS entry removed.
+
+### Evidence (commands from `project/`)
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` / `npm run lint` | pass / 0 errors |
+| `npm run build` | pass — audit:imports ✓ |
+| `npm test` (×2 consecutive) | exit 0 — unit: 341/341, 0 known-red, 0 unexpected (20 suites); browser: 33/33, 0 known-red, 0 unexpected (2 suites) |
+| T17 matrix (browser, real path) | board applied through ApplyBatch: 3 cards with observed titles + safe source links + observed category columns + coverage; "Show original" scrolls the live source item into view; a live status change moves the card to the Done column in a slice; a new source item gains a card; the drag moves the card while the source list HTML is byte-identical; the removed item's card goes stale with reveal disabled; a duplicated source key stales both copies and demotes their titles to text; save + SetEnabled(false) releases the view exactly with the source list untouched |
+| Unit additions | projection.test.ts (canonical keys, field extraction, column planning, session organization), transaction S8.1 (install/replace/release, refusals, showOriginal:false hide path + release restore), verify S8.1 (placed/items/coverage/source checks), workspace S8.1 (save descriptors + ref mapping), replay unaffected-by-view exclusion |
+
+### Notes / residual risks
+
+- The user's board arrangement is session state — a reload reconstructs the view in source order. Persisting the arrangement with stable keys is the recorded S8.1 follow-up (needs an owned record field; deliberately not built now).
+- Playwright cannot drive native HTML5 drag-and-drop in headless Chromium; the T17 drag dispatches the DOM drag sequence (dragstart/dragover/drop) against the shipped delegated listeners — the wiring under test is runtime-owned, so no trusted-gesture policy applies (no site control is activated).
+- Category extraction reads explicit `data-*` markers only; sites using aria-labels or images for status badges need the category field left unmapped (items land in Unsorted) — honest, never guessed.
+- `label` extraction is implemented but the view currently renders only title/link/category evidence; the field stays available for the planner.
+
+Next task: **S8.2 — Implement floating existing surfaces and gated relocation** (plan/25 §S8.2; T18/T22, invariants I08/I09/I23/I26).

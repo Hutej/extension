@@ -54,6 +54,7 @@ import { createReplay, type ReplayCore, type ReplayEntry } from './replay.ts';
 import type { Customization } from '../contracts.ts';
 import { createVerifier, probeCanonicalOf } from './verify.ts';
 import { createBehavior } from './behavior.ts';
+import { createProjection } from './projection.ts';
 
 // ── serial queue (plan/06 §2 boundary 1) ─────────────────────────────────
 
@@ -466,6 +467,7 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     installationId,
     styleClient,
     behavior,
+    projection: (spec, container) => createProjection({ doc: document }, spec, container),
     verify: verifier,
     settle: () =>
       new Promise<void>((resolve) => {

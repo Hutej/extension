@@ -1,0 +1,83 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Project tracker — T17 fixture</title>
+</head>
+<body>
+  <main>
+    <h1>Project tracker</h1>
+    <section id="issues-section">
+      <h2>Issues</h2>
+      <ul id="issues">
+        <li id="issue-1">
+          <a href="/issues/1">Fix login redirect</a>
+          <span data-status="Open">Open</span>
+        </li>
+        <li id="issue-2">
+          <a href="/issues/2">Dark mode for settings</a>
+          <span data-status="Open">Open</span>
+        </li>
+        <li id="issue-3">
+          <a href="/issues/3">Ship onboarding emails</a>
+          <span data-status="Done">Done</span>
+        </li>
+      </ul>
+      <p id="toolbelt">
+        <button id="mutate-title" type="button">Rename issue 1</button>
+        <button id="mutate-status" type="button">Move issue 2 to Done</button>
+        <button id="add-issue" type="button">Add issue 4</button>
+        <button id="remove-issue" type="button">Remove issue 3</button>
+        <button id="duplicate-issue" type="button">Duplicate issue 2</button>
+        <button id="strip-link" type="button">Strip issue 2's link</button>
+      </p>
+    </section>
+  </main>
+  <script>
+    var seq = 3;
+    document.getElementById('mutate-title').addEventListener('click', function () {
+      var link = document.querySelector('#issue-1 a');
+      link.textContent = 'Fix login redirect (renamed)';
+    });
+    document.getElementById('mutate-status').addEventListener('click', function () {
+      var badge = document.querySelector('#issue-2 [data-status]');
+      badge.setAttribute('data-status', 'Done');
+      badge.textContent = 'Done';
+    });
+    document.getElementById('add-issue').addEventListener('click', function () {
+      seq += 1;
+      var li = document.createElement('li');
+      li.id = 'issue-' + seq;
+      var a = document.createElement('a');
+      a.href = '/issues/' + seq;
+      a.textContent = 'New issue ' + seq;
+      var badge = document.createElement('span');
+      badge.setAttribute('data-status', 'Open');
+      badge.textContent = 'Open';
+      li.append(a, badge);
+      document.getElementById('issues').appendChild(li);
+    });
+    document.getElementById('remove-issue').addEventListener('click', function () {
+      document.getElementById('issue-3').remove();
+    });
+    document.getElementById('duplicate-issue').addEventListener('click', function () {
+      var li = document.createElement('li');
+      li.id = 'issue-2-clone';
+      var a = document.createElement('a');
+      a.href = '/issues/2';
+      a.textContent = 'Dark mode for settings';
+      var badge = document.createElement('span');
+      badge.setAttribute('data-status', 'Open');
+      badge.textContent = 'Open';
+      li.append(a, badge);
+      document.getElementById('issues').appendChild(li);
+    });
+    document.getElementById('strip-link').addEventListener('click', function () {
+      var a = document.querySelector('#issue-2 a');
+      var span = document.createElement('span');
+      span.textContent = a.textContent;
+      a.replaceWith(span);
+    });
+  </script>
+</body>
+</html>

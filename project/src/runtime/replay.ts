@@ -82,6 +82,15 @@ function matchesAnchor(el: Element, anchor: { tag?: string; stableId?: string; t
   return true;
 }
 
+/** Extension-owned projection views are runtime UI, never descriptor
+ *  evidence (S8.1): without this exclusion a projection's own nodes would
+ *  join descriptor match sets and destabilize reconciliation (I15/I16). */
+function isOwnView(el: Element): boolean {
+  // closest is duck-typed (unit stubs implement the minimal element seam).
+  const closest = (el as { closest?: (selector: string) => Element | null }).closest;
+  return typeof closest === 'function' && closest.call(el, '[data-rv2p-view]') !== null;
+}
+
 /** Resolve the anchor element(s) of one descriptor inside its root scope. */
 function resolveAnchors(scope: ParentNode, d: { anchor: { tag?: string; stableId?: string; testAttribute?: { name: string; value: string }; role?: string; accessibleLabel?: string } }): Element[] {
   const a = d.anchor;
@@ -91,10 +100,10 @@ function resolveAnchors(scope: ParentNode, d: { anchor: { tag?: string; stableId
   const quote = (v: string): string => v.replace(/[\\"]/g, '\\$&');
   if (a.stableId !== undefined) {
     const byId = scope.querySelector(`[id="${quote(a.stableId)}"]`);
-    return byId && matchesAnchor(byId, a) ? [byId] : [];
+    return byId && matchesAnchor(byId, a) && !isOwnView(byId) ? [byId] : [];
   }
   if (a.testAttribute) {
-    return [...scope.querySelectorAll(`[${a.testAttribute.name}="${quote(a.testAttribute.value)}"]`)].filter((el) => matchesAnchor(el, a)).slice(0, MAX_CANDIDATE_SCAN);
+    return [...scope.querySelectorAll(`[${a.testAttribute.name}="${quote(a.testAttribute.value)}"]`)].filter((el) => matchesAnchor(el, a) && !isOwnView(el)).slice(0, MAX_CANDIDATE_SCAN);
   }
   const selector = a.tag ?? '*';
   let candidates: Element[] = [];
@@ -104,7 +113,7 @@ function resolveAnchors(scope: ParentNode, d: { anchor: { tag?: string; stableId
     return [];
   }
   candidates = candidates.slice(0, MAX_CANDIDATE_SCAN);
-  return candidates.filter((el) => matchesAnchor(el, a));
+  return candidates.filter((el) => matchesAnchor(el, a) && !isOwnView(el));
 }
 
 /** Target-side constraint: semantic guards describe the TARGET (plan/04 §2);
@@ -151,15 +160,15 @@ export function resolveDescriptor(doc: Document, descriptor: { rootPath: string[
         found = [anchor];
         break;
       case 'direct-child':
-        found = [...anchor.children].filter((c) => matchesGuards(c, descriptor.semanticGuards));
+        found = [...anchor.children].filter((c) => matchesGuards(c, descriptor.semanticGuards) && !isOwnView(c));
         break;
       case 'sibling': {
         const parent = anchor.parentElement;
-        found = parent ? [...parent.children].filter((c) => c !== anchor && matchesGuards(c, descriptor.semanticGuards)) : [];
+        found = parent ? [...parent.children].filter((c) => c !== anchor && matchesGuards(c, descriptor.semanticGuards) && !isOwnView(c)) : [];
         break;
       }
       case 'descendant':
-        found = [...anchor.querySelectorAll('*')].slice(0, MAX_CANDIDATE_SCAN).filter((c) => matchesGuards(c, descriptor.semanticGuards));
+        found = [...anchor.querySelectorAll('*')].slice(0, MAX_CANDIDATE_SCAN).filter((c) => matchesGuards(c, descriptor.semanticGuards) && !isOwnView(c));
         break;
     }
     targets.push(...found);
@@ -306,9 +315,15 @@ export function createReplay(deps: ReplayDeps): ReplayCore {
         case 'float':
         case 'replaceText':
         case 'insertUI':
-        case 'projectCollection':
           retarget(clone.target);
           break;
+        case 'projectCollection': {
+          retarget(clone.target);
+          const mappedSet = refMap.get(clone.sourceSetRef);
+          if (mappedSet === undefined) throw new Error(`saved operation references unknown descriptor "${clone.sourceSetRef}"`);
+          clone.sourceSetRef = mappedSet;
+          break;
+        }
         case 'bindKey':
           retarget(clone.target);
           break;

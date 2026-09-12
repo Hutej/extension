@@ -36,6 +36,9 @@ interface StubNode {
   remove(): void;
   removeChild(child: StubNode): StubNode;
   matches(selector: string): boolean;
+  querySelectorAll(selector: string): StubNode[];
+  querySelector(selector: string): StubNode | null;
+  readonly textContent: string;
 }
 
 const FOCUS_TAGS = new Set(['button', 'input', 'select', 'textarea']);
@@ -98,6 +101,25 @@ function makeNode(nodeType: number, tagOrValue: string): StubNode {
         p = p.parentNode;
       }
       return false;
+    },
+    get textContent(): string {
+      return node.childNodes.filter((c) => c.nodeType === 3).map((c) => c.nodeValue ?? '').join('');
+    },
+    querySelectorAll(selector: string): StubNode[] {
+      const m = selector.match(/^\[([a-z0-9-]+)\]$/);
+      if (!m) return [];
+      const out: StubNode[] = [];
+      const walk = (n: StubNode): void => {
+        for (const c of n.children) {
+          if (c.attrs.has(m![1])) out.push(c);
+          walk(c);
+        }
+      };
+      walk(node);
+      return out;
+    },
+    querySelector(selector: string): StubNode | null {
+      return node.querySelectorAll(selector)[0] ?? null;
     },
     matches(selector: string): boolean {
       // Minimal matcher over the focusable selector's alternatives.
@@ -200,6 +222,7 @@ const basePlan = (overrides: Partial<VerifyPlan> = {}): VerifyPlan => ({
   staged: false,
   styles: [],
   hides: [],
+  projections: [],
   bindings: [],
   collapses: [],
   rules: [],
@@ -468,4 +491,45 @@ test('S4.3: baseline capture failure refuses before activation; skipped declarat
   w.doc.appendChild(healthy);
   const report = await w.verifier.verify(basePlan({ unmeasuredDecls: 3, tokenChecks: [{ key: 'delivery:token:0', el: healthy as unknown as Element, ns: 'ns' }] }), { viewportOverflowX: 0, els: new Map() });
   assert.equal(report.coverage.unmeasuredDecls, 3, 'skipped declarations are disclosed in coverage');
+});
+
+// ── S8.1: linked projection views ─────────────────────────────────────────
+
+test('S8.1: the projection view must sit connected at its anchor with the expected items and coverage', async () => {
+  const w = makeWorld();
+  const anchor = el('div');
+  const list = el('ul');
+  w.doc.appendChild(anchor);
+  w.doc.appendChild(list);
+
+  const view = el('section');
+  view.setAttribute('data-rv2p-view', '1');
+  for (let i = 0; i < 3; i++) view.appendChild(el('article')).setAttribute('data-rv2p-card', '1');
+  const cov = el('span');
+  cov.setAttribute('data-rv2p-coverage', '1');
+  cov.appendChild(text('Showing 3 of 3 items'));
+  view.appendChild(cov);
+  anchor.appendChild(view); // connected under the anchor
+
+  const captured = w.verifier.captureBaseline(basePlan());
+  assert.ok(captured.ok);
+
+  const good = await w.verifier.verify(basePlan({
+    projections: [{ key: 'effect:projection:0', root: view as unknown as Element, expectedParent: anchor as unknown as Element, expectedItems: 3, container: list as unknown as Element }],
+  }), captured.baseline);
+  assert.equal(good.status, 'pass', JSON.stringify(good.issues));
+
+  // A missing card or a detached view fails honestly.
+  const badItems = await w.verifier.verify(basePlan({
+    projections: [{ key: 'effect:projection:0', root: view as unknown as Element, expectedParent: anchor as unknown as Element, expectedItems: 5, container: list as unknown as Element }],
+  }), captured.baseline);
+  assert.equal(badItems.status, 'fail');
+  assert.match(badItems.issues[0].detail!, /renders 3 item\(s\), expected 5/);
+
+  view.remove();
+  const detached = await w.verifier.verify(basePlan({
+    projections: [{ key: 'effect:projection:0', root: view as unknown as Element, expectedParent: anchor as unknown as Element, expectedItems: 3, container: list as unknown as Element }],
+  }), captured.baseline);
+  assert.equal(detached.status, 'fail');
+  assert.match(detached.issues[0].detail!, /not connected at its validated anchor/);
 });

@@ -1484,3 +1484,164 @@ test('S7.2/T16: the owned collapse disclosure controls local presentation with e
   assert.ok(await page.evaluate(() => (document.querySelector('section#comments') as HTMLElement).offsetHeight > 0), 'the owned toggle expands exactly');
   void state;
 });
+
+// ── S8.1: linked projection views (T17, real path) ─────────────────────────
+
+test('S8.1/T17: a board projection renders observed items, stays local-only, updates in slices, marks stale keys, and releases exactly', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state } = await openRegistered('board.html');
+  const ws = workspace as Page;
+  const reply = await workspaceSend(ws, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
+  const snapshot = (reply as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt?.snapshot;
+  assert.ok(snapshot, 'observe must deliver a snapshot');
+  const section = snapshot!.regions.find((r) => r.semantics.tag === 'section');
+  const list = snapshot!.regions.find((r) => r.semantics.tag === 'ul');
+  assert.ok(section && list, `the section and list are observed: ${JSON.stringify(snapshot!.regions.map((r) => r.semantics.tag))}`);
+
+  const receipt = await applyBatch(ws, state, {
+    batchId: 'proj-b1',
+    customizationId: 'proj-board',
+    revisionId: 'proj-board-r1',
+    operations: [{
+      kind: 'projectCollection',
+      target: { targetRef: section!.targetRef },
+      sourceSetRef: list!.targetRef,
+      fields: [
+        { sourceField: 'title', label: 'Title' },
+        { sourceField: 'link', label: 'Link' },
+        { sourceField: 'category', label: 'Status' },
+      ],
+      view: 'board',
+      groupBy: 'category',
+    }],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 500));
+  assert.deepEqual(receipt.resourceIds, ['projection-0']);
+
+  // 1. The board renders the OBSERVED items: one card per issue, real
+  //    source links, observed category columns, coverage line.
+  await waitFor(ws, async () => (await page.locator('.rv2p-card').count()) === 3, 'three cards rendered');
+  assert.equal(await page.locator('.rv2p').count(), 1);
+  const cardHref = await page.locator('.rv2p-card a.rv2p-title').first().getAttribute('href');
+  assert.ok(cardHref!.endsWith('/issues/1'), `the card links the safe source link: ${cardHref}`);
+  assert.equal(await page.locator('.rv2p-card a.rv2p-title').first().textContent(), 'Fix login redirect');
+  const columnNames = await page.locator('.rv2p-col-name').allTextContents();
+  assert.deepEqual(columnNames, ['Open', 'Done', 'Unsorted'], `cards: ${(await page.evaluate(() => [...document.querySelectorAll('.rv2p-card')].map((c) => c.outerHTML).join(' | '))).slice(0, 700)}`);
+  const coverageText = await page.locator('[data-rv2p-coverage]').textContent();
+  assert.match(coverageText ?? '', /Showing 3 of 3 items/);
+
+  // 2. "Show original" reveals the live source item (reveal, not a clone).
+  await page.locator('.rv2p-card', { hasText: 'Ship onboarding emails' }).locator('button.rv2p-reveal').click();
+  await page.waitForTimeout(300);
+  const revealed = await page.evaluate(() => {
+    const r = document.getElementById('issue-3')!.getBoundingClientRect();
+    return r.top >= 0 && r.bottom <= window.innerHeight;
+  });
+  assert.equal(revealed, true, 'the source item scrolled into the viewport');
+
+  // 3. Live source update: issue 2 moves to Done — the card follows in a
+  //    bounded slice, without any model call.
+  await page.click('#mutate-status');
+  await waitFor(ws, async () => (await page
+    .locator('.rv2p-col[data-rv2p-col="Done"] .rv2p-card', { hasText: 'Dark mode for settings' })
+    .count()) === 1, 'the field update moved the card to Done');
+
+  // 4. A newly added source item gains a card (Open column).
+  await page.click('#add-issue');
+  await waitFor(ws, async () => (await page.locator('.rv2p-card').count()) === 4, 'the new item rendered');
+
+  // 5. Drag is LOCAL organization only: the card moves columns in the view
+  //    while the source list DOM stays byte-identical in order and state.
+  const sourceBefore = await page.evaluate(() => document.getElementById('issues')!.innerHTML);
+  // Playwright cannot drive native HTML5 drag-and-drop in headless Chromium;
+  // dispatch the DOM drag sequence against the shipped listeners instead —
+  // the wiring under test is the runtime's own delegated DnD, not a native
+  // site control (no trusted-gesture policy applies).
+  await page.evaluate(() => {
+    const card = [...document.querySelectorAll('.rv2p-card')].find((c) => c.textContent?.includes('Fix login redirect'))!;
+    const zone = document.querySelector('.rv2p-col[data-rv2p-col="Done"] .rv2p-col-cards')!;
+    const dt = new DataTransfer();
+    card.dispatchEvent(new DragEvent('dragstart', { bubbles: true, dataTransfer: dt }));
+    zone.dispatchEvent(new DragEvent('dragover', { bubbles: true, dataTransfer: dt, cancelable: true }));
+    zone.dispatchEvent(new DragEvent('drop', { bubbles: true, dataTransfer: dt, cancelable: true }));
+    card.dispatchEvent(new DragEvent('dragend', { bubbles: true, dataTransfer: dt }));
+  });
+  await waitFor(ws, async () => (await page
+    .locator('.rv2p-col[data-rv2p-col="Done"] .rv2p-card', { hasText: 'Fix login redirect' })
+    .count()) === 1, 'the drag moved the card to Done');
+  assert.equal(await page.evaluate(() => document.getElementById('issues')!.innerHTML), sourceBefore, 'the source list was never touched');
+
+  // 6. A source item that leaves the page marks its card stale and disables
+  //    the reveal action — it is never silently dropped.
+  await page.click('#remove-issue');
+  await waitFor(ws, async () => (await page.locator('.rv2p-card.rv2p-is-stale').count()) === 1, 'the detached card went stale');
+  const staleText = await page.locator('.rv2p-card.rv2p-is-stale .rv2p-stale-note').textContent();
+  assert.match(staleText!, /source left the page/);
+  assert.equal(await page.locator('.rv2p-card.rv2p-is-stale button.rv2p-reveal').isDisabled(), true);
+
+  // 7. A duplicated source key disables the key action and marks the cards.
+  await page.click('#duplicate-issue');
+  await waitFor(ws, async () => (await page.locator('.rv2p-card.rv2p-is-stale').count()) === 3, 'both duplicates went stale (plus the detached card)');
+  // Duplicate-key cards lose the key action (their title becomes text);
+  // the detached card keeps its link (the href is still data) with its
+  // reveal disabled.
+  const dupStaleLinks = await page
+    .locator('.rv2p-card.rv2p-is-stale', { hasText: 'duplicate source link' })
+    .locator('a.rv2p-title')
+    .count();
+  assert.equal(dupStaleLinks, 0, 'duplicate-key cards render their title as text, not a link');
+
+  // 8. Save + disable: the release removes the view exactly and the site
+  //    stays intact; the disabled intent never comes back this session.
+  const origin = new URL(page.url()).origin;
+  // Fixture pages share one origin: fetch the CURRENT record revision first
+  // (earlier tests in this suite already saved records on this origin).
+  const currentRec = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord;
+  const saved = await workspaceSend(ws, controlEnvelope({
+    command: 'SaveRevision',
+    origin,
+    customizationId: 'proj-board',
+    title: 'Issue board',
+    scope: { mode: 'exactPath', path: new URL(page.url()).pathname },
+    contentSensitivity: 'page-only',
+    grants: [],
+    revision: {
+      revisionId: 'proj-board-r1',
+      capabilityVersion: 1,
+      targetDescriptors: [
+        { descriptorVersion: 1, rootPath: [], selection: 'single', anchor: { tag: 'section' }, relation: 'self', matchBounds: { min: 1, max: 1 }, routeScopeRef: origin, continuityPolicy: 'stable-single' },
+        { descriptorVersion: 1, rootPath: [], selection: 'single', anchor: { tag: 'ul' }, relation: 'self', matchBounds: { min: 1, max: 1 }, routeScopeRef: origin, continuityPolicy: 'stable-single' },
+      ],
+      operations: [{
+        kind: 'projectCollection',
+        target: { targetRef: 'd0' },
+        sourceSetRef: 'd1',
+        fields: [
+          { sourceField: 'title', label: 'Title' },
+          { sourceField: 'link', label: 'Link' },
+          { sourceField: 'category', label: 'Status' },
+        ],
+        view: 'board',
+        groupBy: 'category',
+      }],
+      savedAt: Date.now(),
+      source: 'user-planned',
+    },
+    expectedRecordRevision: currentRec?.recordRevision ?? 0,
+    mutationId: 'proj-save-1',
+  }));
+  assert.equal((saved as { ok?: boolean }).ok, true, JSON.stringify(saved).slice(0, 400));
+  const rec = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  const disabled = await workspaceSend(ws, controlEnvelope({
+    command: 'SetEnabled', origin, customizationId: 'proj-board', enabled: false, expectedRecordRevision: rec.recordRevision, mutationId: 'proj-disable-1',
+  }));
+  assert.equal((disabled as { ok?: boolean }).ok, true, JSON.stringify(disabled).slice(0, 400));
+  await waitFor(ws, async () => (await page.locator('.rv2p').count()) === 0, 'disable released the projection view');
+  assert.equal(await page.locator('#issues li').count(), 4, 'the source list survives untouched');
+
+  // Cleanup so later tests start clean.
+  const rec2 = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  await workspaceSend(ws, controlEnvelope({
+    command: 'RemoveCustomization', origin, customizationId: 'proj-board', expectedRecordRevision: rec2.recordRevision, mutationId: 'proj-remove-1',
+  }));
+});

@@ -43,6 +43,7 @@ import {
   type HighImpactRisk,
 } from './compile.ts';
 import type { Verifier, VerificationReport, VerifyPlan } from './verify.ts';
+import type { ProjectionHandle, ProjectionSpec } from './projection.ts';
 import type { ContentCreator } from './content.ts';
 import type { ResolvedTargetRegistry } from './targets.ts';
 import { TOKEN_ATTRIBUTE, type TokenScope } from './styles.ts';
@@ -112,6 +113,10 @@ export interface TransactionDeps {
   /** S7.1: the per-document keyboard-binding executor (exact listener
    *  ownership; see runtime/behavior.ts). */
   behavior: BehaviorCore;
+  /** S8.1: the linked-view factory (runtime/projection). A factory seam so
+   *  transaction tests can stub the view while the session binds the real
+   *  document-bound creator. */
+  projection: (spec: ProjectionSpec, container: Element) => ProjectionHandle;
   /** S4.3: the mandatory structured verifier. A missing verifier refuses the
    *  batch before any side effect — acceptance is impossible without a report. */
   verify?: Verifier;
@@ -151,6 +156,8 @@ interface RevisionRecord {
   rules: Array<{ key: string; handle: { dispose(): void } }>;
   /** S7.2: owned collapse disclosures (toggle + state attribute baseline). */
   collapses: Array<{ target: Element; toggle: Element; attrBaseline: string | null; collapsed: boolean; wiring: CollapseWiring | null }>;
+  /** S8.1: linked projection views (the root joins ownedNodes). */
+  projections: Array<{ container: Element; wiring: ProjectionHandle }>;
   /** Elements this revision's fragment targets (token membership). */
   elements: Element[];
   highImpact: Array<{ property: string; value: string; risk: HighImpactRisk }>;
@@ -196,7 +203,7 @@ const epochOf = (routeEpoch: number) => ({
   viewportRevision: 0,
 });
 
-const UNSUPPORTED_KINDS = new Set(['float', 'projectCollection', 'relocate']);
+const UNSUPPORTED_KINDS = new Set(['float', 'relocate']);
 
 /** A verifier that throws or answers for a different revision is UNKNOWN —
  *  never an accidental pass (T13). */
@@ -320,6 +327,11 @@ export function createTransaction(deps: TransactionDeps): Transaction {
      *  copies (seed evaluation deferred to post-acceptance: an external
      *  click must never survive a rollback). */
     rulePreps: Array<{ spec: RuleSpec; seed: Element }>;
+    /** S8.1: linked projection views (built detached; connected in the
+     *  write section). */
+    projectionPreps: Array<{ anchor: Element; container: Element; handle: ProjectionHandle }>;
+    /** Handles created in the write section. */
+    projectionWiring: ProjectionHandle[];
     /** Handles created in the write section (empty until then). */
     collapseWiring: CollapseWiring[];
     ruleHandles: Array<{ dispose(): void }>;
@@ -365,6 +377,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     const batchChords = new Set<string>();
     const collapsePreps: PreparedBatch['collapsePreps'] = [];
     const rulePreps: PreparedBatch['rulePreps'] = [];
+    const projectionPreps: PreparedBatch['projectionPreps'] = [];
     const highImpact: PreparedBatch['highImpact'] = [];
     const newClaims = new Set<Text>();
     const styleRuleEls: Element[][] = [];
@@ -696,6 +709,67 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           });
           break;
         }
+        case 'projectCollection': {
+          // S8.1 (plan/09 §4, plan/03 runtime/projection): a linked view of
+          // OBSERVED source items. The source set ref names the CONTAINER of
+          // the repeating items; the view derives items from its direct
+          // element children. Everything rendered is extracted from the live
+          // items at render time — never invented application state (I25).
+          const anchorR = resolveTarget(op.target, `${path}.target`);
+          if (!anchorR.ok) return { ok: false, receipt: refuse(req, digest, anchorR.error) };
+          const setR = deps.targets.resolve(op.sourceSetRef, epoch);
+          if (!setR.ok) {
+            return { ok: false, receipt: refuse(req, digest, err(setR.reason === 'missing' ? 'unknown-target' : 'stale-target', 'validate', `${path}.sourceSetRef: ${setR.detail}`)) };
+          }
+          if (setR.rootId !== 'document') {
+            return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${path}.sourceSetRef: the source set lives in root "${setR.rootId}"; document-root views are the supported scope`)) };
+          }
+          if (op.view === 'board' && op.groupBy !== 'category') {
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.groupBy: a board groups by the observed "category" field`)) };
+          }
+          const handle = deps.projection(
+            {
+              customizationId: req.customizationId,
+              view: op.view,
+              fields: op.fields,
+              ...(op.groupBy !== undefined ? { groupBy: op.groupBy } : {}),
+              order: op.order ?? 'source',
+              showOriginal: op.showOriginal !== false,
+            },
+            setR.node,
+          );
+          // Exact placement validated before any side effect (plan/28 §2):
+          // the view inserts AFTER its anchor.
+          try {
+            deps.content.checkPlacement(anchorR.el, 'after', [handle.root]);
+          } catch (e) {
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.target: ${(e as Error).message}`)) };
+          }
+          projectionPreps.push({ anchor: anchorR.el, container: setR.node, handle });
+          // No composition token: the view's stylesheet is self-contained;
+          // its delivery is measured by the connected-at-anchor effect check.
+          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `proj:${i}`, anchorR.el);
+          protectedMap.set(`sourceSet:${i}`, setR.node);
+          if (op.showOriginal === false) {
+            // Hiding the original set is an explicit, consequential choice —
+            // the same compiled display:none path as the hide operation, so
+            // the fragment/verification/restore machinery is identical (I17).
+            styleTargets.set(op.sourceSetRef, setR.node);
+            hideScope.push(setR.node);
+            styleRuleEls.push([setR.node]);
+            styleOps.push({
+              kind: 'style',
+              rules: [{
+                target: { targetRef: op.sourceSetRef },
+                surface: 'element',
+                state: 'none',
+                declarations: [{ property: 'display', value: 'none', priority: 'important' }],
+                conditions: [],
+              }],
+            });
+          }
+          break;
+        }
       }
     }
 
@@ -851,6 +925,13 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         collapsed: c.collapsed,
       })),
       rules: rulePreps.map((_, j) => ({ key: `effect:rule:${j}`, ruleKey: req.customizationId })),
+      projections: projectionPreps.map((p, pj) => ({
+        key: `effect:projection:${pj}`,
+        root: p.handle.root,
+        expectedParent: (p.anchor.parentNode as Element | null),
+        expectedItems: p.handle.itemCount(),
+        container: p.container,
+      })),
       tokenChecks: candidateElements.map((el, j) => ({ key: `delivery:token:${j}`, el, ns: nsNew })),
       unmeasuredDecls: unmeasured,
     };
@@ -871,6 +952,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         bindHandles: [],
         collapsePreps,
         rulePreps,
+        projectionPreps,
+        projectionWiring: [],
         collapseWiring: [],
         ruleHandles: [],
         droppedTexts,
@@ -902,6 +985,10 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     }
     for (const prep of prepared.rulePreps) {
       if (!prep.seed.isConnected) return err('stale-target', 'apply', 'a behavior rule target left the document after CSS delivery', 'no activation on stale targets');
+    }
+    for (const p of prepared.projectionPreps) {
+      if (!p.anchor.isConnected) return err('stale-target', 'apply', 'a projection anchor left the document after CSS delivery', 'no activation on stale targets');
+      if (!p.container.isConnected) return err('stale-target', 'apply', 'a projection source set left the document after CSS delivery', 'no activation on stale targets');
     }
     for (const op of prepared.styleOps) {
       for (const rule of op.rules) {
@@ -1048,6 +1135,13 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       for (const prep of prepared.rulePreps) {
         prepared.ruleHandles.push(deps.behavior.installRule(prep.spec));
       }
+      // S8.1: the projection view inserts after its anchor and only then
+      // connects its source observer (a disconnected view never observes).
+      for (const p of prepared.projectionPreps) {
+        deps.content.insert(p.anchor, 'after', [p.handle.root]);
+        p.handle.connect();
+        prepared.projectionWiring.push(p.handle);
+      }
       // S7.1: bindings install AFTER all other native writes, in batch order —
       // exact registry entries under the transaction's ownership.
       for (const bind of prepared.bindPreps) prepared.bindHandles.push(deps.behavior.install(bind.spec));
@@ -1118,6 +1212,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       for (const c of prepared.replaces.collapses) {
         if (c.wiring) c.wiring.dispose();
       }
+      for (const p of prepared.replaces.projections) p.wiring.dispose();
     }
     }
     for (const t of prepared.textPreps) textClaims.set(t.node, req.customizationId);
@@ -1144,15 +1239,19 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       batchId: req.batchId,
       styleOps: prepared.styleOps,
       texts: prepared.textPreps.map((t) => ({ node: t.node, siteBaseline: t.siteBaseline, installed: t.installed })),
-      ownedNodes: prepared.inserts.flatMap((i) => i.roots),
+      ownedNodes: [...prepared.inserts.flatMap((i) => i.roots), ...prepared.projectionPreps.map((p) => p.handle.root)],
       bindings: prepared.bindHandles.map((handle, j) => ({ spec: prepared.bindPreps[j]!.spec, handle })),
-      rules: prepared.ruleHandles.map((handle, j) => ({ key: req.customizationId, handle, ruleKey: req.customizationId })),
+      rules: prepared.ruleHandles.map((handle) => ({ key: req.customizationId, handle, ruleKey: req.customizationId })),
       collapses: prepared.collapsePreps.map((c, j) => ({
         target: c.target,
         toggle: c.toggle,
         attrBaseline: c.attrBaseline,
         collapsed: c.collapsed,
         wiring: prepared.collapseWiring[j] ?? null,
+      })),
+      projections: prepared.projectionWiring.map((wiring, j) => ({
+        container: prepared.projectionPreps[j]!.container,
+        wiring,
       })),
       elements: prepared.candidateElements,
       highImpact: prepared.highImpact,
@@ -1178,6 +1277,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       ...prepared.bindPreps.map((_, i) => `bind-${i}`),
       ...prepared.collapsePreps.map((_, i) => `collapse-${i}`),
       ...prepared.rulePreps.map((_, i) => `rule-${i}`),
+      ...prepared.projectionPreps.map((_, i) => `projection-${i}`),
     ];
     return remember(req.batchId, digest, {
       batchId: req.batchId,
@@ -1246,6 +1346,10 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     // and the collapse wiring/attribute state reverse exactly.
     for (const h of [...prepared.ruleHandles].reverse()) h.dispose();
     for (const w of [...prepared.collapseWiring].reverse()) w.dispose();
+    for (const p of [...prepared.projectionWiring].reverse()) p.dispose();
+    for (const p of [...prepared.projectionPreps].reverse()) {
+      if (p.handle.root.isConnected) deps.content.remove([p.handle.root]);
+    }
     for (const c of prepared.collapsePreps) {
       if (c.collapsed) {
         if (c.attrBaseline === null) c.target.removeAttribute(COLLAPSED_ATTRIBUTE);
@@ -1307,6 +1411,9 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     // no replayed or inverse consequential action, plan/08 §1); owned
     // collapse disclosures restore the site's attribute baseline exactly.
     for (const r of rev.rules) r.handle.dispose();
+    // S8.1: the projection view is an owned node (removed above with the
+    // owned trees); its source observer disconnects exactly here.
+    for (const p of rev.projections) p.wiring.dispose();
     for (const c of rev.collapses) {
       if (c.wiring) c.wiring.dispose();
       if (c.attrBaseline === null) c.target.removeAttribute(COLLAPSED_ATTRIBUTE);

@@ -39,7 +39,6 @@ export const LIMITS = {
   maxLocalPredicates: 8,
   maxPredicateLiteralChars: 120,
   maxCollectionFields: 8,
-  maxCollectionGroups: 12,
   minQuestionOptions: 2,
   maxQuestionOptions: 4,
   maxSetBindingPass: 200, // plan/04 matchBounds per incremental binding pass
@@ -636,14 +635,26 @@ export interface LocalRuleOperation {
   actionId: string;
 }
 
+/**
+ * S8.1 (plan/09 §4): the finite sourceField catalog — every projection field
+ * is an OBSERVED fact of the source item (I25: linked presentation of
+ * observed data, never invented application state).
+ *   title    — the item's own text (redacted)
+ *   label    — the item's explicit accessible name (aria-label/title attr)
+ *   link     — the item's safe http(s) source link (resolved absolute)
+ *   category — an explicit site-declared marker attribute value
+ */
+export const PROJECTION_SOURCE_FIELDS = ['title', 'label', 'link', 'category'] as const;
+export type ProjectionSourceField = (typeof PROJECTION_SOURCE_FIELDS)[number];
+
 export interface ProjectCollectionOperation {
   kind: 'projectCollection';
   reason?: string;
   target: { targetRef?: string; localRef?: string };
   sourceSetRef: string;
-  fields: { sourceField: string; label: string }[];
+  fields: { sourceField: ProjectionSourceField; label: string }[];
   view: 'list' | 'grid' | 'board';
-  groupBy?: string;
+  groupBy?: 'category';
   order?: 'source' | 'manual';
   showOriginal?: boolean;
 }
@@ -918,25 +929,36 @@ function decodeOperation(v: unknown, path = 'operation'): DecodeResult<Operation
         },
         { maxDepth: LIMITS.maxJsonDepth },
       )(v, path) as DecodeResult<Operation>;
-    case 'projectCollection':
-      return decodeRecord(
+    case 'projectCollection': {
+      const fieldDecoder = decodeRecord(
+        { sourceField: decodeLiteral(PROJECTION_SOURCE_FIELDS), label: decodeString({ max: 120 }) },
+        { maxDepth: LIMITS.maxJsonDepth },
+      );
+      const r = decodeRecord(
         {
           kind: decodeLiteral(['projectCollection']), reason: REASON, target: decodeTargetSpec(),
           sourceSetRef: TARGET_REF,
-          fields: decodeArray(
-            decodeRecord(
-              { sourceField: decodeString({ max: 128 }), label: decodeString({ max: 120 }) },
-              { maxDepth: LIMITS.maxJsonDepth },
-            ),
-            LIMITS.maxCollectionFields,
-          ),
+          fields: decodeArray(fieldDecoder, LIMITS.maxCollectionFields),
           view: decodeLiteral(['list', 'grid', 'board']),
-          groupBy: optional(decodeString({ max: 128 })),
+          groupBy: optional(decodeLiteral(['category'])),
           order: optional(decodeLiteral(['source', 'manual'])),
           showOriginal: optional(decodeBoolean),
         },
         { maxDepth: LIMITS.maxJsonDepth },
-      )(v, path) as DecodeResult<Operation>;
+      )(v, path);
+      if (!r.ok) return r as DecodeResult<Operation>;
+      const op = r.value as unknown as ProjectCollectionOperation;
+      if (op.fields.length === 0) return fail(`${path}.fields`, 'out-of-bounds', 'a projection maps at least one field');
+      const seen = new Set<string>();
+      for (const f of op.fields) {
+        if (seen.has(f.sourceField)) return fail(`${path}.fields`, 'duplicate', `sourceField "${f.sourceField}" is mapped twice`);
+        seen.add(f.sourceField);
+      }
+      if (op.view === 'board' && op.groupBy !== 'category') {
+        return fail(`${path}.groupBy`, 'conflict', 'a board groups by the observed "category" field');
+      }
+      return ok(op as unknown as Operation);
+    }
     case 'relocate':
       return decodeRecord(
         {

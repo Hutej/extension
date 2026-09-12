@@ -362,6 +362,51 @@ test('S7.2: a localRule saves as a future-set instance descriptor with all refs 
   assert.equal(op.predicates.find((p) => p.type === 'member-of')!.targetRef, 'd2');
 });
 
+test('S8.1: a projectCollection saves with its source-set descriptor and both refs mapped', () => {
+  const region = (ref: string, tag: string, name?: string): PageSnapshot['regions'][number] => ({
+    targetRef: ref,
+    rootRef: 'document',
+    kind: 'element',
+    semantics: { tag, ...(name !== undefined ? { nameApprox: name, nameSource: 'button-text' as const } : {}) },
+    geometry: { x: 0, y: 0, w: 10, h: 10, inViewport: true },
+    stability: 'session-only',
+    hidden: false,
+  });
+  const evidence = new Map([
+    ['t1', region('t1', 'section', 'Issue list')],
+    ['t2', region('t2', 'ul')],
+  ]);
+  const result = buildSavedRevision({
+    proposal: {
+      summary: 'Project the issue list as a board',
+      operations: [
+        {
+          kind: 'projectCollection',
+          target: { targetRef: 't1' },
+          sourceSetRef: 't2',
+          fields: [{ sourceField: 'title', label: 'Title' }, { sourceField: 'category', label: 'Status' }],
+          view: 'board',
+          groupBy: 'category',
+          showOriginal: false,
+        },
+      ],
+    } as Proposal,
+    evidence,
+    origin: 'https://site-c.test',
+    revisionId: 'rev-proj',
+    savedAt: 7,
+  });
+  assert.ok(result.ok, JSON.stringify(result));
+  if (!result.ok) return;
+  const [anchor, sourceSet] = result.revision.targetDescriptors;
+  assert.equal(anchor.selection, 'single', 'the view anchor is a stable single node');
+  assert.equal(sourceSet.selection, 'single', 'the source set container is a stable single node');
+  assert.equal(sourceSet.anchor.tag, 'ul');
+  const op = result.revision.operations[0] as { target: { targetRef?: string }; sourceSetRef: string };
+  assert.equal(op.target.targetRef, 'd0');
+  assert.equal(op.sourceSetRef, 'd1');
+});
+
 test('refsOfProposal: style/hide/relocate/localRule refs are all collected', () => {
   const refs = refsOfProposal({
     ...PROPOSAL,
@@ -369,9 +414,10 @@ test('refsOfProposal: style/hide/relocate/localRule refs are all collected', () 
       PROPOSAL.operations[0],
       { kind: 'hide', target: { targetRef: 't2' } },
       { kind: 'relocate', target: { targetRef: 't1' }, destination: { targetRef: 't2' }, position: 'after' },
+      { kind: 'projectCollection', target: { targetRef: 't3' }, sourceSetRef: 't2', fields: [{ sourceField: 'title', label: 'T' }], view: 'list' },
     ] as Proposal['operations'],
   });
-  assert.deepEqual([...refs].sort(), ['t1', 't2']);
+  assert.deepEqual([...refs].sort(), ['t1', 't2', 't3']);
 });
 
 // ── T21: exact target selection — never a first-tab fallback ───────────────

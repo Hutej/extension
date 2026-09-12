@@ -201,6 +201,7 @@ interface World {
   /** S7.2: customization ids with a live rule. */
   ruleInstalls: string[];
   ruleDisposes: string[];
+  projectionDisposes: string[];
 }
 
 /** S7.1+S7.2: minimal in-memory behavior double — real conflict/cap semantics
@@ -271,6 +272,10 @@ function makeStubVerifier(w: World): Verifier {
       for (const ins of plan.inserts) {
         const ok = ins.roots.every((r) => r.isConnected);
         outcomes.push(outcome(ins.key, ok ? 'pass' : 'fail', 'effect', ok ? undefined : 'not connected'));
+      }
+      for (const p of plan.projections) {
+        const ok = (p.root as unknown as StubNode).isConnected;
+        outcomes.push(outcome(p.key, ok ? 'pass' : 'fail', 'effect', ok ? undefined : 'view not connected'));
       }
       for (const t of plan.tokenChecks) {
         const ok = t.el.isConnected && t.el.getAttribute(TOKEN_ATTRIBUTE) === t.ns;
@@ -350,6 +355,7 @@ function makeWorld(): World {
     bindDisposes: [],
     ruleInstalls: [],
     ruleDisposes: [],
+    projectionDisposes: [],
     setStage: (o) => { stageOutcome = o; },
     setCommit: (o) => { commitOutcome = o; },
     setRemove: (o) => { removeOutcome = o; },
@@ -366,6 +372,14 @@ function makeWorld(): World {
     installationId: () => 'testinst',
     styleClient,
     behavior: makeFakeBehavior(world),
+    projection: (spec, container) => ({
+      root: el('section') as unknown as HTMLElement,
+      connect: () => {},
+      dispose: () => { world.projectionDisposes.push(spec.customizationId); },
+      itemCount: () => container.children.length,
+      staleCount: () => 0,
+      coverageText: () => `Showing ${container.children.length} of ${container.children.length} items`,
+    }),
     verify: makeStubVerifier(world),
     settle: async () => {
       (world as World & { settleHook?: () => void }).settleHook?.();
@@ -1144,4 +1158,103 @@ test('S7.2: a collapsed instance joins the intentional hide scope (verification 
   assert.equal(r.status, 'accepted', JSON.stringify(r).slice(0, 400));
   assert.equal(r.report!.status, 'pass');
   assert.ok(r.report!.issues.every((i) => i.status === 'pass'), 'the intentional collapse is exempt from integrity failures');
+});
+
+// ── S8.1: linked projection views (T17 at the unit boundary) ──────────────
+
+const projectOp = (
+  targetRef: string,
+  sourceSetRef: string,
+  overrides: Partial<Extract<Operation, { kind: 'projectCollection' }>> = {},
+): Operation => ({
+  kind: 'projectCollection',
+  target: { targetRef },
+  sourceSetRef,
+  fields: [{ sourceField: 'title', label: 'Title' }, { sourceField: 'link', label: 'Link' }, { sourceField: 'category', label: 'Category' }],
+  view: 'board',
+  groupBy: 'category',
+  ...overrides,
+});
+
+test('S8.1: a board projection installs after its anchor, protects its source set, and releases exactly', async () => {
+  const w = makeWorld();
+  const list = el('ul');
+  const a = el('li');
+  const b = el('li');
+  list.appendChild(a);
+  list.appendChild(b);
+  const section = el('section');
+  w.doc.appendChild(section);
+  w.doc.appendChild(list);
+  const sectionRef = observe(w, section);
+  const listRef = observe(w, list);
+
+  const ok = await w.txn.applyBatch(req('proj-ok', 'proj', [projectOp(sectionRef, listRef)]));
+  assert.equal(ok.status, 'accepted', JSON.stringify(ok).slice(0, 400));
+  assert.deepEqual(ok.resourceIds, ['projection-0']);
+  // The stub view root sits after the anchor; the source container is
+  // protected (its release/dispose bookkeeping ran through the real path).
+  const root = section.nextSibling!;
+  assert.equal((root as StubNode).tagName, 'SECTION');
+
+  // A replacement revision (fresh batch id, same customization) retires the
+  // predecessor's wiring exactly.
+  const replacement = await w.txn.applyBatch(req('proj-ok2', 'proj', [projectOp(sectionRef, listRef, { view: 'list' })]));
+  assert.equal(replacement.status, 'accepted', JSON.stringify(replacement).slice(0, 400));
+  assert.deepEqual(w.projectionDisposes, ['proj'], 'the predecessor view uninstalled at acceptance');
+
+  const release = await w.txn.releaseCustomization('proj');
+  assert.equal(release.status, 'accepted');
+  assert.deepEqual(w.projectionDisposes, ['proj', 'proj'], 'release disposes the view exactly once more');
+  assert.equal(
+    w.doc.children.filter((c) => (c as StubNode).getAttribute('data-rv2p-view') !== null).length, 0,
+    'the owned view tree is removed with the owned nodes',
+  );
+});
+
+test('S8.1: projection refusals — board needs a group, the source set must resolve', async () => {
+  const w = makeWorld();
+  const section = el('section');
+  const list = el('ul');
+  w.doc.appendChild(section);
+  w.doc.appendChild(list);
+  const sectionRef = observe(w, section);
+  const listRef = observe(w, list);
+
+  const noGroup = await w.txn.applyBatch(req('proj-g', 'proj', [projectOp(sectionRef, listRef, { groupBy: undefined })]));
+  assert.equal(noGroup.status, 'not-applied');
+  assert.equal(noGroup.error!.code, 'invalid-schema');
+  assert.match(noGroup.error!.message, /board groups by/);
+
+  const missingSet = await w.txn.applyBatch(req('proj-s', 'proj', [projectOp(sectionRef, 'd999')]));
+  assert.equal(missingSet.status, 'not-applied');
+  assert.equal(missingSet.error!.code, 'unknown-target');
+
+  // No view is left behind by refusals: the document holds exactly the two
+  // observed elements and no disposal ever ran.
+  assert.deepEqual(w.projectionDisposes, []);
+  assert.equal(w.doc.children.filter((c) => (c as StubNode).getAttribute('data-rv2p-view') !== null).length, 0);
+});
+
+test('S8.1: showOriginal false hides the source set through the compiled hide path and restores on release', async () => {
+  const w = makeWorld();
+  const section = el('section');
+  const list = el('ul');
+  const item = el('li');
+  list.appendChild(item);
+  w.doc.appendChild(section);
+  w.doc.appendChild(list);
+  const sectionRef = observe(w, section);
+  const listRef = observe(w, list);
+
+  const ok = await w.txn.applyBatch(req('proj-hide', 'proj', [projectOp(sectionRef, listRef, { showOriginal: false })]));
+  assert.equal(ok.status, 'accepted', JSON.stringify(ok).slice(0, 400));
+  // The container carries the composition token (the hide fragment targets it).
+  assert.match(list.getAttribute(TOKEN_ATTRIBUTE) ?? '', /^rv2\.i.+\.g\d+$/, 'the source set joined the composition');
+  // The acceptance report measured the compiled display:none effect.
+  assert.ok((ok.report?.counts.pass ?? 0) > 0, 'the verifier measured the candidate');
+
+  const release = await w.txn.releaseCustomization('proj');
+  assert.equal(release.status, 'accepted');
+  assert.equal(list.getAttribute(TOKEN_ATTRIBUTE), null, 'the source set left the composition on release');
 });

@@ -76,7 +76,7 @@ test('T02 ok: every v1 operation kind decodes with its defaults', () => {
     insertPanel('panel'),
     { kind: 'bindKey', chord: 'g then h', actionIds: ['focus-main'] },
     { kind: 'localRule', target: { targetRef: 't1' }, trigger: 'target-appeared', actionId: 'collapse-once' },
-    { kind: 'projectCollection', target: { targetRef: 't1' }, sourceSetRef: 'set-1', view: 'board', fields: [{ sourceField: 'title', label: 'Title' }] },
+    { kind: 'projectCollection', target: { targetRef: 't1' }, sourceSetRef: 'set-1', view: 'board', groupBy: 'category', fields: [{ sourceField: 'title', label: 'Title' }] },
     { kind: 'relocate', target: { targetRef: 't1' }, destination: { targetRef: 't2' }, position: 'last-child', structuralGrant: true },
   ];
   const r = decodeOperationBatch(ops);

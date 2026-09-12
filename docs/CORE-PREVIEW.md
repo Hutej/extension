@@ -44,8 +44,18 @@ authority).
   disclosure (once per instance, sticky user-override, 500ms cooldown,
   review-approved as consequential); the owned collapse disclosure
   (`collapse`) is available as the manual mechanism.
-- **Linked alternative views / projections** (`projectCollection` — S8):
-  no board/list view of a site collection exists yet.
+- **Linked alternative views** (`projectCollection` — S8.1): a list, grid
+  or board view of the observed items in one source container, rendered
+  from observed facts only (title/label/link/category field catalog) with
+  safe source links, stable item keys (origin-relative canonical link,
+  sensitive query parameters stripped), local-only board buckets (drag or
+  native select — the site DOM is never touched, labeled "changes your
+  local view only"), "Show original" reveal, stale/duplicate-key marking
+  with disabled key actions, ≤200 rendered items with a coverage line and
+  pagination, and an explicit review when hiding the original list
+  (`showOriginal:false`). User bucket arrangement is session state that
+  survives disable/re-enable; cross-reload persistence of the arrangement
+  is not built yet.
 - **Owned Canvas 2D** (S8.4): no drawing capability yet.
 - **Frame-scoped runs** (P2): top documents only; frames have no separate
   runtime/permission path yet.

@@ -129,6 +129,9 @@ export interface VerifyPlan {
   collapses: Array<{ key: string; toggle: Element; expectedParent: Element | null; target: Element; collapsed: boolean }>;
   /** S7.2: the installed local rule — it must be live. */
   rules: Array<{ key: string; ruleKey: string }>;
+  /** S8.1: linked projection views — connected at the validated anchor with
+   *  the expected rendered count and a coverage line. */
+  projections: Array<{ key: string; root: Element; expectedParent: Element | null; expectedItems: number; container: Element }>;
   /** New extension-authored text (insertUI) for the WCAG AA contrast check. */
   ownedText: Array<{ el: Element; sample: string }>;
   tokenChecks: Array<{ key: string; el: Element; ns: string }>;
@@ -495,6 +498,27 @@ export function createVerifier(deps: VerifierDeps): Verifier {
       outcomes.push(deps.hasRule(r.ruleKey)
         ? { key: r.key, section: 'effect', status: 'pass' }
         : { key: r.key, section: 'effect', status: 'fail', detail: 'the behavior rule is not installed in the behavior registry' });
+    }
+    for (const p of plan.projections) {
+      if (!want(p.key)) continue;
+      const placed = p.root.isConnected && p.root.parentNode === p.expectedParent;
+      if (!placed) {
+        outcomes.push({ key: p.key, section: 'effect', status: 'fail', detail: 'the projection view is not connected at its validated anchor' });
+        continue;
+      }
+      const rendered = p.root.querySelectorAll('[data-rv2p-card]').length;
+      if (rendered !== p.expectedItems) {
+        outcomes.push({ key: `${p.key}:items`, section: 'effect', status: 'fail', detail: `the projection renders ${rendered} item(s), expected ${p.expectedItems}` });
+      } else {
+        outcomes.push({ key: `${p.key}:items`, section: 'effect', status: 'pass' });
+      }
+      const coverage = p.root.querySelector('[data-rv2p-coverage]');
+      outcomes.push(coverage !== null && (coverage.textContent ?? '').includes('Showing')
+        ? { key: `${p.key}:coverage`, section: 'effect', status: 'pass' }
+        : { key: `${p.key}:coverage`, section: 'effect', status: 'fail', detail: 'the projection coverage line is missing' });
+      if (!p.container.isConnected) {
+        outcomes.push({ key: `${p.key}:source`, section: 'integrity', status: 'fail', detail: 'the projection source set left the document' });
+      }
     }
 
     // INTEGRITY (baseline-relative; stable keys)
