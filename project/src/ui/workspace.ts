@@ -1616,8 +1616,14 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
         return `replace text of ${firstRef(op.target)} with “${op.text.slice(0, 40)}”`;
       case 'insertUI':
         return `insert UI ${op.position} ${firstRef(op.target)}`;
-      case 'relocate':
-        return `move ${firstRef(op.target)} relative to ${firstRef(op.destination)}`;
+      case 'relocate': {
+        const relocateBase = `move ${firstRef(op.target)} ${op.position} ${firstRef(op.destination)} — the same node with its listeners, new parent`;
+        return op.structuralGrant === true
+          ? `${relocateBase} — HIGH RISK: a framework replacement can break it; the site's position always wins and relocation suspends after two overrides`
+          : relocateBase;
+      }
+      case 'float':
+        return `float the existing surface at ${firstRef(op.target)} to the ${op.edge} corner (min: ${op.width ?? 'responsive 24rem'} × ${op.maxHeight ?? '50vh'}; minimize control included) — it is your page's own node, not a copy; undo returns it to normal flow`;
       case 'bindKey': {
         // plan/09 §1: generic activation is potentially consequential — the
         // review must show the exact target + actions and say plainly that
@@ -1650,7 +1656,8 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
         return `${base}, ${op.actionId}`;
       }
       default:
-        return `${op.kind} on ${firstRef('target' in op ? op.target : undefined)}`;
+        // Every v1 kind is covered above; this names any future kind honestly.
+        return `${(op as import('../contracts.ts').Operation).kind} (no preview yet)`;
     }
   };
 

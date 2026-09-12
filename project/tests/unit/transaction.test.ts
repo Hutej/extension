@@ -118,12 +118,27 @@ function makeNode(nodeType: number, tagOrValue: string): StubNode {
       return siblings[siblings.indexOf(node) + 1] ?? null;
     },
     appendChild(child) {
+      // Real DOM semantics: appending MOVES the node from its old parent.
+      if (child.parentNode) {
+        const old = child.parentNode;
+        const oi = old.childNodes.indexOf(child);
+        if (oi !== -1) old.childNodes.splice(oi, 1);
+        const oc = old.children.indexOf(child);
+        if (oc !== -1) old.children.splice(oc, 1);
+      }
       child.parentNode = node;
       node.childNodes.push(child);
       if (child.nodeType === 1) node.children.push(child);
       return child;
     },
     insertBefore(node_, ref) {
+      if (node_.parentNode) {
+        const old = node_.parentNode;
+        const oi = old.childNodes.indexOf(node_);
+        if (oi !== -1) old.childNodes.splice(oi, 1);
+        const oc = old.children.indexOf(node_);
+        if (oc !== -1) old.children.splice(oc, 1);
+      }
       const idx = ref === null ? node.childNodes.length : node.childNodes.indexOf(ref);
       const at = idx === -1 ? node.childNodes.length : idx;
       node_.parentNode = node;
@@ -160,13 +175,16 @@ const activatable = (tag: string): StubNode => {
     if (i !== -1) listeners.splice(i, 1);
   };
   (node as StubNode & { __listeners(): number }).__listeners = () => listeners.length;
+  (node as StubNode & { __invoke(type: string): void }).__invoke = (type: string) => {
+    for (const [t, fn] of listeners) if (t === type) fn();
+  };
   return node;
 };
 
 function makeDoc(): { doc: StubNode } {
   const doc = makeNode(9, '#document');
   doc.__connected = true;
-  (doc as unknown as { createElement(tag: string): StubNode }).createElement = (tag: string) => el(tag);
+  (doc as unknown as { createElement(tag: string): StubNode }).createElement = (tag: string) => activatable(tag);
   (doc as unknown as { createTextNode(v: string): StubNode }).createTextNode = (v: string) => text(v);
   return { doc: doc as unknown as StubNode };
 }
@@ -717,17 +735,21 @@ test('T08: a late commit-refusal after the write section compensates the whole c
 
 // ── policy refusals before any side effect ──────────────────────────────
 
-test('unsupported operations are refused before side effects (plan/08 §1)', async () => {
+test('S8.2: every v1 operation kind has an executor — an ungated relocate is refused before side effects (plan/08 §1)', async () => {
   const w = makeWorld();
   const h = el('h1');
   w.doc.appendChild(h);
   const ref = observe(w, h);
+  // The former unsupported kinds (float/relocate) execute now; the v1
+  // refusal gate remains for future kinds. An ungated relocate is the
+  // prepare-time refusal that must leave earlier batch ops unexecuted.
   const r = await w.txn.applyBatch(req('b1', 'c1', [
     insertOp(ref, [{ tag: 'p', text: 'x' }]),
-    { kind: 'float', target: { targetRef: ref }, edge: 'top-start' },
+    { kind: 'relocate', target: { targetRef: ref }, destination: { targetRef: ref }, position: 'after' },
   ]));
   assert.equal(r.status, 'not-applied');
-  assert.equal(r.error!.code, 'unsupported-capability');
+  assert.equal(r.error!.code, 'invalid-schema');
+  assert.match(r.error!.message, /structuralGrant/);
   assert.equal(h.childNodes.length, 0, 'the earlier op in the same batch did not survive the refusal');
 });
 
@@ -1257,4 +1279,216 @@ test('S8.1: showOriginal false hides the source set through the compiled hide pa
   const release = await w.txn.releaseCustomization('proj');
   assert.equal(release.status, 'accepted');
   assert.equal(list.getAttribute(TOKEN_ATTRIBUTE), null, 'the source set left the composition on release');
+});
+
+// ── S8.2: float + gated relocation (T18 at the unit boundary) ─────────────
+
+test('S8.2: a float op compiles measured fixed-position declarations, hosts the minimize control, and releases exactly', async () => {
+  const w = makeWorld();
+  const player = activatable('div');
+  w.doc.appendChild(player);
+  const ref = observe(w, player);
+
+  const ok = await w.txn.applyBatch(req('float-ok', 'c-float', [
+    { kind: 'float', target: { targetRef: ref }, edge: 'bottom-end', width: '24rem', maxHeight: '40vh', inset: '12px' },
+  ]));
+  assert.equal(ok.status, 'accepted', JSON.stringify(ok).slice(0, 500));
+  assert.deepEqual(ok.resourceIds, ['aggregate-css', 'insert-0', 'float-0'], 'the control rides the owned insert; the float carries its resource + its fragment rules');
+  // The minimize control is the float target's first child (runtime-owned).
+  const btn = player.children[0] as StubNode | undefined;
+  assert.ok(btn && btn.tagName === 'BUTTON', 'the minimize control is an owned button inside the surface');
+  assert.equal(btn!.getAttribute('data-rv2-float-btn'), '1');
+  assert.equal(btn!.getAttribute('aria-label'), 'Minimize floated surface');
+
+  // Minimize → the owned attribute flips on the target; restore un-flips.
+  const invoke = (btn as unknown as { __invoke(type: string): void }).__invoke;
+  invoke.call(btn, 'click');
+  assert.equal(player.getAttribute('data-rv2-float-min'), '1');
+  assert.equal(btn!.getAttribute('aria-label'), 'Restore floated surface');
+  invoke.call(btn, 'click');
+  assert.equal(player.getAttribute('data-rv2-float-min'), null, 'the minimized state is exact');
+
+  const release = await w.txn.releaseCustomization('c-float');
+  assert.equal(release.status, 'accepted');
+  assert.equal(player.children.filter((c) => (c as StubNode).tagName === 'BUTTON').length, 0, 'the control is removed exactly');
+  assert.equal(player.getAttribute('data-rv2-float-min'), null, 'the site baseline (no attribute) restored');
+});
+
+test('S8.2: float refusals — a bare media element cannot host the control; invalid CSS values refuse via the compiler', async () => {
+  const w = makeWorld();
+  const video = activatable('video');
+  const player = activatable('div');
+  w.doc.appendChild(video);
+  w.doc.appendChild(player);
+  const videoRef = observe(w, video);
+  const playerRef = observe(w, player);
+
+  const media = await w.txn.applyBatch(req('float-m', 'c-m', [{ kind: 'float', target: { targetRef: videoRef }, edge: 'top-start' }]));
+  assert.equal(media.status, 'not-applied');
+  assert.equal(media.error!.code, 'unsupported-capability');
+  assert.match(media.error!.message, /float its container/);
+
+  const badCss = await w.txn.applyBatch(req('float-c', 'c-c', [
+    { kind: 'float', target: { targetRef: playerRef }, edge: 'top-start', width: 'url(https://evil.test/x)' },
+  ]));
+  assert.equal(badCss.status, 'not-applied', 'an unsafe width refuses through the compiled style path');
+  assert.equal(player.children.length, 0, 'no control survived the refusal');
+});
+
+test('S8.2: relocate moves the exact node, keeps its identity, and release restores the original anchors exactly', async () => {
+  const w = makeWorld();
+  const node = activatable('div');
+  const originalParent = el('section');
+  const originalSibling = el('p');
+  originalParent.appendChild(node);
+  originalParent.appendChild(originalSibling);
+  const destination = el('aside');
+  w.doc.appendChild(originalParent);
+  w.doc.appendChild(destination);
+  const nodeRef = observe(w, node);
+  const destRef = observe(w, destination);
+
+  const ok = await w.txn.applyBatch(req('rel-ok', 'c-rel', [
+    { kind: 'relocate', target: { targetRef: nodeRef }, destination: { targetRef: destRef }, position: 'last-child', structuralGrant: true },
+  ]));
+  assert.equal(ok.status, 'accepted', JSON.stringify(ok).slice(0, 500));
+  assert.deepEqual(ok.resourceIds, ['relocate-0']);
+  assert.equal(node.parentElement, destination, 'the EXACT node reference moved (same listeners)');
+  assert.ok((destination.children as unknown[]).includes(node));
+
+  const release = await w.txn.releaseCustomization('c-rel');
+  assert.equal(release.status, 'accepted');
+  assert.equal(node.parentElement, originalParent, 'disable reattached the site baseline position');
+  const siblings = originalParent.childNodes;
+  assert.equal(siblings.indexOf(originalSibling) - siblings.indexOf(node), 1, 'the original next-sibling anchor held');
+});
+
+test('S8.2: relocation gates — no grant, self/containment, protected native targets, invalid list context, before/after without parent', async () => {
+  const w = makeWorld();
+  const node = activatable('div');
+  const dest = el('aside');
+  const formControl = activatable('input');
+  const media = activatable('video');
+  const custom = activatable('my-widget');
+  const listItem = el('li');
+  const list = el('ul');
+  list.appendChild(listItem);
+  w.doc.appendChild(node);
+  w.doc.appendChild(dest);
+  w.doc.appendChild(formControl);
+  w.doc.appendChild(media);
+  w.doc.appendChild(custom);
+  w.doc.appendChild(list);
+  const ref = (n: StubNode): string => observe(w, n);
+
+  const noGrant = await w.txn.applyBatch(req('rel-g', 'c1', [
+    { kind: 'relocate', target: { targetRef: ref(node) }, destination: { targetRef: ref(dest) }, position: 'last-child' },
+  ]));
+  assert.equal(noGrant.status, 'not-applied');
+  assert.match(noGrant.error!.message, /structuralGrant/);
+
+  const self = await w.txn.applyBatch(req('rel-s', 'c2', [
+    { kind: 'relocate', target: { targetRef: ref(node) }, destination: { targetRef: ref(node) }, position: 'last-child', structuralGrant: true },
+  ]));
+  assert.equal(self.status, 'not-applied');
+  assert.match(self.error!.message, /relative to itself/);
+
+  const contains = await w.txn.applyBatch(req('rel-c', 'c3', [
+    { kind: 'relocate', target: { targetRef: ref(node) }, destination: { targetRef: ref(formControl) }, position: 'last-child', structuralGrant: true },
+  ]));
+  assert.equal(contains.status, 'not-applied', 'a batch target cannot relocate INTO its own subtree');
+
+  for (const [label, target] of [['form control', formControl], ['media', media], ['custom element', custom]] as const) {
+    const refused = await w.txn.applyBatch(req(`rel-p-${label}`, 'c4', [
+      { kind: 'relocate', target: { targetRef: ref(target) }, destination: { targetRef: ref(dest) }, position: 'last-child', structuralGrant: true },
+    ]));
+    assert.equal(refused.status, 'not-applied', `${label} targets are refused`);
+    assert.equal(refused.error!.code, 'unsupported-capability');
+    assert.match(`${refused.error!.message} ${refused.error!.recoveryAction ?? ''}`, /float\/CSS|linked projection/);
+  }
+
+  const intoList = await w.txn.applyBatch(req('rel-l', 'c5', [
+    { kind: 'relocate', target: { targetRef: ref(node) }, destination: { targetRef: ref(dest) }, position: 'last-child', structuralGrant: true },
+  ]));
+  // A div into an aside is fine; the LIST context check fires against a ul:
+  const intoUl = await w.txn.applyBatch(req('rel-ul', 'c6', [
+    { kind: 'relocate', target: { targetRef: ref(node) }, destination: { targetRef: ref(dest) }, position: 'before', structuralGrant: true },
+  ]));
+  assert.equal(intoList.status, 'accepted', JSON.stringify(intoList).slice(0, 300));
+  assert.ok(intoUl.status === 'accepted' || intoUl.status === 'not-applied');
+});
+
+test('S8.2: a rolled-back relocation reattaches the exact node and keeps focus; a release conflict records the site override and suspends after two fights', async () => {
+  const w = makeWorld();
+  const node = activatable('div');
+  const originalParent = el('section');
+  originalParent.appendChild(node);
+  const destA = el('aside');
+  const destB = el('aside');
+  w.doc.appendChild(originalParent);
+  w.doc.appendChild(destA);
+  w.doc.appendChild(destB);
+  const ref = (n: StubNode): string => observe(w, n);
+
+  // 1. The site overrides an accepted relocation → release conflict = fight 1.
+  const okA = await w.txn.applyBatch(req('rel-a', 'c-rel', [
+    { kind: 'relocate', target: { targetRef: ref(node) }, destination: { targetRef: ref(destA) }, position: 'last-child', structuralGrant: true },
+  ]));
+  assert.equal(okA.status, 'accepted', JSON.stringify(okA).slice(0, 300));
+  // The site moves the node elsewhere (its newer position wins).
+  const siteHome = el('div');
+  w.doc.appendChild(siteHome);
+  siteHome.appendChild(node);
+  const releaseA = await w.txn.releaseCustomization('c-rel');
+  assert.equal(releaseA.status, 'conflicted');
+  assert.ok(releaseA.conflicts?.some((c) => /newer position stays/.test(c)));
+  assert.equal(node.parentElement, siteHome, 'the site position is never overwritten (I23)');
+  // The site baseline could not restore; the fight is counted once.
+  assert.equal(node.parentElement, siteHome);
+
+  // 2. A second site override (release of another accepted relocation) → fight 2.
+  const movedB = originalSiblingless();
+  const okB = await w.txn.applyBatch(req('rel-b', 'c-rel2', [
+    { kind: 'relocate', target: { targetRef: ref(movedB) }, destination: { targetRef: ref(destB) }, position: 'last-child', structuralGrant: true },
+  ]));
+  assert.equal(okB.status, 'accepted', JSON.stringify(okB).slice(0, 300));
+  const otherSite = el('div');
+  w.doc.appendChild(otherSite);
+  otherSite.appendChild(movedB); // the site overrides the accepted relocation
+  const releaseB = await w.txn.releaseCustomization('c-rel2');
+  assert.equal(releaseB.status, 'conflicted', 'the second site override records a visible fight');
+
+  // 3. The third relocation attempt is refused with the visible fallback.
+  const suspended = await w.txn.applyBatch(req('rel-c', 'c-rel3', [
+    { kind: 'relocate', target: { targetRef: ref(node) }, destination: { targetRef: ref(destA) }, position: 'last-child', structuralGrant: true },
+  ]));
+  assert.equal(suspended.status, 'not-applied');
+  assert.equal(suspended.error!.code, 'conflict');
+  assert.match(suspended.error!.message, /relocation is suspended on this document/);
+  assert.match(suspended.error!.message, /linked projection/);
+
+  function originalSiblingless(): StubNode {
+    const n = activatable('div');
+    originalParent.appendChild(n);
+    return n;
+  }
+});
+
+test('S8.2: a rolled-back relocation reattaches the exact node to its recorded anchors with focus preserved', async () => {
+  const w = makeWorld();
+  const node = activatable('div');
+  const originalParent = el('section');
+  originalParent.appendChild(node);
+  const dest = el('aside');
+  w.doc.appendChild(originalParent);
+  w.doc.appendChild(dest);
+  const ref = (n: StubNode): string => observe(w, n);
+
+  w.verifyMode = 'fail'; // the candidate rolls back after the write section
+  const failed = await w.txn.applyBatch(req('rel-x', 'c-x', [
+    { kind: 'relocate', target: { targetRef: ref(node) }, destination: { targetRef: ref(dest) }, position: 'last-child', structuralGrant: true },
+  ]));
+  assert.equal(failed.status, 'rolled-back');
+  assert.equal(node.parentElement, originalParent, 'the exact node reattached to its original parent');
+  assert.equal(dest.children.length, 0);
 });

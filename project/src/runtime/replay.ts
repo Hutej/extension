@@ -405,7 +405,7 @@ export function createReplay(deps: ReplayDeps): ReplayCore {
       return;
     }
     if (!scopeMatches(entry.customization.scope, deps.href())) {
-      if (entry.state === 'applied') await releaseEntry(entry);
+      await releaseIfLive(entry);
       entry.state = 'out-of-scope';
       entry.detail = undefined;
       emit();
@@ -456,13 +456,24 @@ export function createReplay(deps: ReplayDeps): ReplayCore {
     }
   };
 
+  /** Release whenever the transaction holds a live revision for this
+   *  customization — the transaction is the source of truth for live
+   *  resources (the replay state machine can drift behind: a descriptor
+   *  that went missing leaves the state 'waiting' while its earlier
+   *  command-path apply stays live; a disable/record-removal must still
+   *  release exactly — plan/13 §4.5, plan/08 §5). */
+  const releaseIfLive = async (entry: LiveEntry): Promise<void> => {
+    const holds = deps.transaction.revisions().some((r) => r.customizationId === entry.customization.customizationId);
+    if (entry.state === 'applied' || holds) await releaseEntry(entry);
+  };
+
   const replayAll = async (only?: string): Promise<void> => {
     for (const entry of live.values()) {
       if (disposed) return;
       if (only !== undefined && entry.customization.customizationId !== only) continue;
       if (entry.state === 'paused') continue; // visible pause needs a user/route action to clear
       if (!entry.customization.enabled) {
-        if (entry.state === 'applied') await releaseEntry(entry);
+        await releaseIfLive(entry);
         entry.state = 'disabled';
         continue;
       }
@@ -558,7 +569,7 @@ export function createReplay(deps: ReplayDeps): ReplayCore {
       // Records removed elsewhere: drop local state and release leftovers.
       for (const [id, entry] of live) {
         if (!seen.has(id)) {
-          if (entry.state === 'applied') await releaseEntry(entry);
+          await releaseIfLive(entry);
           live.delete(id);
         }
       }
@@ -577,8 +588,14 @@ export function createReplay(deps: ReplayDeps): ReplayCore {
     },
     async removeCustomization(customizationId) {
       const entry = live.get(customizationId);
-      if (!entry) return;
-      if (entry.state === 'applied') await releaseEntry(entry);
+      if (entry) {
+        await releaseIfLive(entry);
+      } else {
+        // A command-path apply without a saved record: the transaction is
+        // the only live state — release it exactly (the remove means undo).
+        const holds = deps.transaction.revisions().some((r) => r.customizationId === customizationId);
+        if (holds) await deps.transaction.releaseCustomization(customizationId);
+      }
       live.delete(customizationId);
       emit();
     },

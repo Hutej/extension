@@ -56,6 +56,16 @@ authority).
   (`showOriginal:false`). User bucket arrangement is session state that
   survives disable/re-enable; cross-reload persistence of the arrangement
   is not built yet.
+- **Floating existing surfaces** (`float` — S8.2): the EXISTING surface is
+  styled fixed at one corner through the measured compiled style path
+  (responsive width/max-height/inset defaults; stacking z-index; no copies,
+  no reparent) with a runtime-owned minimize/restore control; overflow and
+  media state are measured. **Gated relocation** (`relocate` — S8.2):
+  explicit `structuralGrant:true` mandatory; script/style/iframe/media/
+  canvas/form/editor/custom-element targets refused with the float/CSS or
+  projection fallback named; the exact node moves with its listeners and
+  focus; the site's newer position is never overwritten (visible conflict);
+  two site overrides suspend relocation for the document.
 - **Owned Canvas 2D** (S8.4): no drawing capability yet.
 - **Frame-scoped runs** (P2): top documents only; frames have no separate
   runtime/permission path yet.

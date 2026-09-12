@@ -462,6 +462,35 @@ export function wireCollapseToggle(toggle: HTMLElement, target: Element): Collap
   };
 }
 
+/** The owned minimized-state attribute on the floated TARGET (S8.2; the
+ *  baseline is recorded and restored by the transaction like collapse). */
+export const FLOAT_MIN_ATTRIBUTE = 'data-rv2-float-min';
+export const FLOAT_BTN_ATTRIBUTE = 'data-rv2-float-btn';
+
+/** Wire the owned float minimize/restore button: clicking toggles the
+ *  minimized-state attribute on the floated target and the button's own
+ *  label/pressed state. Runtime-owned listener on an OWNED node. */
+export function wireFloatButton(button: HTMLElement, target: Element): CollapseWiring {
+  const onClick = (): void => {
+    const minimized = target.getAttribute(FLOAT_MIN_ATTRIBUTE) === '1';
+    if (minimized) {
+      target.removeAttribute(FLOAT_MIN_ATTRIBUTE);
+      button.setAttribute('aria-expanded', 'true');
+      button.setAttribute('aria-label', 'Minimize floated surface');
+    } else {
+      target.setAttribute(FLOAT_MIN_ATTRIBUTE, '1');
+      button.setAttribute('aria-expanded', 'false');
+      button.setAttribute('aria-label', 'Restore floated surface');
+    }
+  };
+  button.addEventListener('click', onClick);
+  return {
+    dispose() {
+      button.removeEventListener('click', onClick);
+    },
+  };
+}
+
 // ── per-document behavior core ────────────────────────────────────────────
 
 export interface BehaviorDeps {

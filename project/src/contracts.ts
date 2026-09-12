@@ -685,11 +685,13 @@ export const INSERT_UI_INPUT_TYPES = ['text', 'search', 'checkbox', 'radio', 'ra
 const SAFE_ATTRIBUTES = new Set([
   'title', 'role', 'aria-label', 'aria-expanded', 'disabled', 'type', 'open',
   'placeholder', 'min', 'max', 'step', 'value', 'scope',
+  // S8.2: the runtime's own float-control marker (owned UI vocabulary).
+  'data-rv2-float-btn',
 ]);
 
 const decodeNodeTag = decodeLiteral(INSERT_UI_TAGS);
 const decodeAttrKey = (v: unknown, path = 'attribute'): DecodeResult<string> => {
-  const s = decodeString({ max: 64, pattern: /^[a-zA-Z-]+$/ })(v, path);
+  const s = decodeString({ max: 64, pattern: /^[a-zA-Z][a-zA-Z0-9-]*$/ })(v, path);
   if (!s.ok) return s;
   if (SAFE_ATTRIBUTES.has(s.value)) return ok(s.value);
   return fail(path, 'unknown-field', `attribute "${s.value}" is not in the typed attribute set`);

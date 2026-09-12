@@ -515,6 +515,8 @@ const ALLOWED_ATTRS = new Set([
   'title', 'role', 'aria-label', 'aria-describedby', 'aria-labelledby', 'aria-expanded',
   'disabled', 'type', 'open', 'placeholder', 'min', 'max', 'step', 'initialvalue',
   'value', 'selected', 'scope', 'for',
+  // S8.2: the runtime's own float-control marker (owned UI vocabulary).
+  'data-rv2-float-btn',
 ]);
 
 const LOCAL_INPUT_TYPES = new Set(['text', 'search', 'checkbox', 'radio', 'range', 'number']);

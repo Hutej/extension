@@ -50,7 +50,8 @@ import { TOKEN_ATTRIBUTE, type TokenScope } from './styles.ts';
 import {
   COLLAPSED_ATTRIBUTE, MAX_BINDINGS_PER_DOCUMENT, type BehaviorCore, type BindingSpec,
   type CollapseWiring, type RulePredicate, type RuleSpec, disclosureState, evaluateRule, isBindActionId,
-  isRuleActionId, parseChord, plainTypingChord, reservedChord, validateBindAction, wireCollapseToggle,
+  isRuleActionId, parseChord, plainTypingChord, reservedChord, validateBindAction, wireCollapseToggle, wireFloatButton,
+  FLOAT_BTN_ATTRIBUTE, FLOAT_MIN_ATTRIBUTE,
 } from './behavior.ts';
 
 // ── style-delivery client seam (runtime→broker; no background import) ──
@@ -158,6 +159,10 @@ interface RevisionRecord {
   collapses: Array<{ target: Element; toggle: Element; attrBaseline: string | null; collapsed: boolean; wiring: CollapseWiring | null }>;
   /** S8.1: linked projection views (the root joins ownedNodes). */
   projections: Array<{ container: Element; wiring: ProjectionHandle }>;
+  /** S8.2: floated surfaces (minimize wiring + state attribute baseline). */
+  floats: Array<{ target: Element; attrBaseline: string | null; wiring: CollapseWiring | null }>;
+  /** S8.2: relocated site nodes with their exact original anchors. */
+  relocations: Array<{ node: Element; destination: Element; position: 'first-child' | 'last-child' | 'before' | 'after'; originalParent: Element | null; originalSibling: Node | null; moved: boolean }>;
   /** Elements this revision's fragment targets (token membership). */
   elements: Element[];
   highImpact: Array<{ property: string; value: string; risk: HighImpactRisk }>;
@@ -203,7 +208,40 @@ const epochOf = (routeEpoch: number) => ({
   viewportRevision: 0,
 });
 
-const UNSUPPORTED_KINDS = new Set(['float', 'relocate']);
+const UNSUPPORTED_KINDS = new Set<string>([]);
+
+// ── S8.2 float/relocate contracts (plan/08 §1/§7, plan/09 §5) ────────────
+
+/** plan/08 §7 float design defaults — validated responsive values, not
+ *  measured geometry. */
+const FLOAT_DEFAULTS = { width: 'min(24rem, calc(100vw - 2rem))', maxHeight: '50vh', inset: '1rem' } as const;
+const FLOAT_EDGES: Record<'top-start' | 'top-end' | 'bottom-start' | 'bottom-end', [string, string]> = {
+  'top-start': ['top', 'left'],
+  'top-end': ['top', 'right'],
+  'bottom-start': ['bottom', 'left'],
+  'bottom-end': ['bottom', 'right'],
+};
+/** z-index above page content but below the int32 ceiling (stacking room
+ *  for site tooltips above our surface). */
+const FLOAT_Z_INDEX = '2147483000';
+
+/** Lifecycle-sensitive/void elements relocation must never reparent and
+ *  cannot host runtime UI (plan/09 §5: listener preservation alone does
+ *  not prove relocation safe; unknown custom elements change behavior on
+ *  connectedCallback). */
+const NO_HOST_TAGS = new Set([
+  'html', 'body', 'head', 'script', 'style', 'iframe', 'frame', 'object', 'embed',
+  'canvas', 'video', 'audio', 'img', 'picture', 'source', 'track', 'svg', 'math',
+  'br', 'hr', 'input', 'textarea', 'select', 'option', 'optgroup', 'form', 'label',
+  'meta', 'link', 'title', 'template', 'slot', 'noscript', 'dialog',
+]);
+const canRelocate = (el: Element): boolean => {
+  const tag = el.tagName.toLowerCase();
+  if (NO_HOST_TAGS.has(tag) || tag.includes('-')) return false;
+  if ((el as HTMLElement).isContentEditable === true) return false;
+  return true;
+};
+const canHostUi = (el: Element): boolean => canRelocate(el);
 
 /** A verifier that throws or answers for a different revision is UNKNOWN —
  *  never an accidental pass (T13). */
@@ -233,6 +271,10 @@ const collectOwnedText = (roots: Element[]): Array<{ el: Element; sample: string
 
 export function createTransaction(deps: TransactionDeps): Transaction {
   const revisions = new Map<string, RevisionRecord>();
+  /** S8.2: how often the site overrode a relocation (rollback/release
+   *  conflicts). Two fights suspend relocation for this document with a
+   *  visible fallback (plan/09 §5). */
+  let relocateFights = 0;
   /** Text-node claims: exact native reference → owning customization. */
   const textClaims = new Map<Text, string>();
   const receipts = new Map<string, { digest: string; receipt: BatchReceipt }>();
@@ -287,6 +329,10 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     for (const _c of rev.collapses) {
       parts.push(`:where([data-rv2-ns="${ns}"][${COLLAPSED_ATTRIBUTE}="1"]) { display: none !important; }`);
     }
+    for (const _f of rev.floats) {
+      parts.push(`:where([data-rv2-ns="${ns}"] [${FLOAT_BTN_ATTRIBUTE}]) { position: absolute !important; top: 0 !important; right: 0 !important; z-index: 1 !important; }`);
+      parts.push(`:where([data-rv2-ns="${ns}"][${FLOAT_MIN_ATTRIBUTE}="1"]) { width: 3rem !important; max-height: 3rem !important; overflow: hidden !important; }`);
+    }
     return parts.join('\n');
   };
 
@@ -332,6 +378,12 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     projectionPreps: Array<{ anchor: Element; container: Element; handle: ProjectionHandle }>;
     /** Handles created in the write section. */
     projectionWiring: ProjectionHandle[];
+    /** S8.2: prepared relocations (write section moves; .moved flips). */
+    relocatePreps: Array<{ node: Element; destination: Element; position: 'first-child' | 'last-child' | 'before' | 'after'; originalParent: Element | null; originalSibling: Node | null; moved: boolean }>;
+    /** S8.2: prepared floats (button rides prepared.inserts; wiring here). */
+    floatPreps: Array<{ target: Element; button: Element; attrBaseline: string | null; expectedButtonParent: Element }>;
+    /** Handles created in the write section. */
+    floatWiring: Array<{ dispose(): void }>;
     /** Handles created in the write section (empty until then). */
     collapseWiring: CollapseWiring[];
     ruleHandles: Array<{ dispose(): void }>;
@@ -378,6 +430,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     const collapsePreps: PreparedBatch['collapsePreps'] = [];
     const rulePreps: PreparedBatch['rulePreps'] = [];
     const projectionPreps: PreparedBatch['projectionPreps'] = [];
+    const relocatePreps: PreparedBatch['relocatePreps'] = [];
+    const floatPreps: PreparedBatch['floatPreps'] = [];
     const highImpact: PreparedBatch['highImpact'] = [];
     const newClaims = new Set<Text>();
     const styleRuleEls: Element[][] = [];
@@ -640,6 +694,132 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `collapse:${i}`, collapseTarget.el);
           break;
         }
+        case 'float': {
+          // S8.2 (plan/08 §1/§7, plan/09 §5): the EXISTING surface is
+          // visually fixed at one corner through the compiled style path
+          // (measured declarations; no reparent, no duplication). The
+          // minimize/restore control is runtime-owned UI; the minimized
+          // state rides an owned attribute with an exact baseline restore.
+          const floatTarget = resolveTarget(op.target, `${path}.target`);
+          if (!floatTarget.ok) return { ok: false, receipt: refuse(req, digest, floatTarget.error) };
+          if (!canHostUi(floatTarget.el)) {
+            return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${path}.target: a bare media/void/lifecycle-sensitive element cannot host the float control or be safely repositioned; float its container instead`)) };
+          }
+          const [edgeA, edgeB] = FLOAT_EDGES[op.edge];
+          const inset = op.inset ?? FLOAT_DEFAULTS.inset;
+          const declarations = [
+            { property: 'position', value: 'fixed', priority: 'important' },
+            { property: 'width', value: op.width ?? FLOAT_DEFAULTS.width, priority: 'important' },
+            { property: 'max-height', value: op.maxHeight ?? FLOAT_DEFAULTS.maxHeight, priority: 'important' },
+            { property: edgeA, value: inset, priority: 'important' },
+            { property: edgeB, value: inset, priority: 'important' },
+            { property: 'z-index', value: FLOAT_Z_INDEX, priority: 'important' },
+          ] as StyleOperation['rules'][number]['declarations'];
+          styleTargets.set(op.target.targetRef ?? op.target.localRef ?? `float:${i}`, floatTarget.el);
+          styleRuleEls.push([floatTarget.el]);
+          styleOps.push({
+            kind: 'style',
+            rules: [{ target: op.target, surface: 'element', state: 'none', declarations, conditions: [] }],
+          });
+          // plan/09 §5: minimize/restore controls via an owned button; the
+          // minimized state is an owned attribute (exact restore).
+          const btnLocalId = `rv-float-btn-${i}`;
+          const btnOp = {
+            kind: 'insertUI', target: op.target, position: 'first-child',
+            nodes: [{
+              localId: btnLocalId, tag: 'button', text: '—',
+              attributes: { type: 'button', 'aria-expanded': 'true', 'aria-label': 'Minimize floated surface', [FLOAT_BTN_ATTRIBUTE]: '1' },
+            }],
+          } as import('../contracts.ts').InsertUiOperation;
+          const btnPlan = compileInsertUi(btnOp);
+          if (!btnPlan.ok) {
+            const first = btnPlan.diagnostics[0];
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.${first.path}: ${first.message}`)) };
+          }
+          const builtBtn = deps.content.build(btnPlan.plan);
+          if (!builtBtn.ok) {
+            const first = builtBtn.diagnostics[0];
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.${first.path}: ${first.message}`)) };
+          }
+          const btn = builtBtn.byLocalId.get(btnLocalId);
+          if (!btn) {
+            return { ok: false, receipt: refuse(req, digest, err('internal', 'validate', `${path}: the float control did not build`)) };
+          }
+          try {
+            deps.content.checkPlacement(floatTarget.el, 'first-child', builtBtn.roots);
+          } catch (e) {
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.target: ${(e as Error).message}`)) };
+          }
+          for (const [localId, el] of builtBtn.byLocalId) batchLocal.set(localId, el);
+          inserts.push({ anchor: floatTarget.el, position: 'first-child', roots: builtBtn.roots });
+          candidateElements.push(floatTarget.el);
+          floatPreps.push({ target: floatTarget.el, button: btn as Element, attrBaseline: floatTarget.el.getAttribute(FLOAT_MIN_ATTRIBUTE), expectedButtonParent: floatTarget.el });
+          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `float:${i}`, floatTarget.el);
+          break;
+        }
+        case 'relocate': {
+          // S8.2 (plan/08 §1/§7, plan/09 §5): explicit high-risk same-node
+          // relocation. Gated: an explicit structural grant, protected
+          // native targets refused, exact original anchors recorded, and
+          // the site's position never overwritten on conflict.
+          if (op.structuralGrant !== true) {
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.structuralGrant: relocation needs an explicit structuralGrant: true — listener preservation alone does not prove a framework replacement safe`)) };
+          }
+          if (relocateFights >= 2) {
+            return { ok: false, receipt: refuse(req, digest, err('conflict', 'validate', `${path}: relocation is suspended on this document — the site overrode a relocated node twice; style the surface (float/CSS) or use a linked projection instead`, 'the fallback stays available; relocation resumes on a fresh document load')) };
+          }
+          const nodeR = resolveTarget(op.target, `${path}.target`);
+          if (!nodeR.ok) return { ok: false, receipt: refuse(req, digest, nodeR.error) };
+          const destR = resolveTarget(op.destination, `${path}.destination`);
+          if (!destR.ok) return { ok: false, receipt: refuse(req, digest, destR.error) };
+          if (nodeR.el === destR.el) {
+            return { ok: false, receipt: refuse(req, digest, err('conflict', 'validate', `${path}: a node cannot be relocated relative to itself`)) };
+          }
+          if (nodeR.el.contains(destR.el)) {
+            return { ok: false, receipt: refuse(req, digest, err('conflict', 'validate', `${path}: the relocation target cannot contain its destination`)) };
+          }
+          if (!canRelocate(nodeR.el)) {
+            return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${path}.target: this native element is refused for relocation — reparenting script/style/iframe/media/canvas/form/editor or unknown custom elements can break framework reconciliation, form ownership or lifecycle callbacks`, 'style the surface (float/CSS) or use a linked projection instead')) };
+          }
+          if ((op.position === 'first-child' || op.position === 'last-child') && !canHostUi(destR.el)) {
+            return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${path}.destination: a bare media/void/lifecycle-sensitive element cannot host children`, 'use a before/after placement next to it')) };
+          }
+          if (op.position === 'before' || op.position === 'after') {
+            if (destR.el.parentElement === null) {
+              return { ok: false, receipt: refuse(req, digest, err('conflict', 'validate', `${path}.destination: before/after placement requires the destination to have a parent`)) };
+            }
+          }
+          // Exact placement validated before any side effect (plan/28 §2):
+          // the effective host applies the same list/table context rules.
+          const effectiveHost = op.position === 'first-child' || op.position === 'last-child' ? destR.el : destR.el.parentElement;
+          if (effectiveHost !== null) {
+            try {
+              deps.content.checkPlacement(effectiveHost, 'last-child', [nodeR.el]);
+            } catch (e) {
+              return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.destination: ${(e as Error).message}`)) };
+            }
+          }
+          relocatePreps.push({
+            node: nodeR.el,
+            destination: destR.el,
+            position: op.position,
+            originalParent: nodeR.el.parentElement,
+            originalSibling: nodeR.el.nextSibling,
+            moved: false,
+          });
+          // Integrity: the moved node + destination keep their baselines.
+          // The original parent's own reflow (it may empty) is the reviewed
+          // consequence of the relocation — it joins the intentional
+          // restructure exemption (its ANCESTORS/SIBLINGS are still
+          // sentinel-measured, exactly like the hide scope).
+          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `relocate:${i}`, nodeR.el);
+          protectedMap.set(`relocate-dest:${i}`, destR.el);
+          if (nodeR.el.parentElement !== null) {
+            protectedMap.set(`relocate-origin:${i}`, nodeR.el.parentElement);
+            hideScope.push(nodeR.el.parentElement);
+          }
+          break;
+        }
         case 'localRule': {
           // S7.2 (plan/09 §3, plan/08 §7): finite trigger/predicate/action
           // rules; the runtime owns once/cooldown/override. Replay expands
@@ -797,6 +977,12 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     for (const _c of collapsePreps) {
       fragmentCss += `\n:where([data-rv2-ns="${nsNew}"][${COLLAPSED_ATTRIBUTE}="1"]) { display: none !important; }`;
     }
+    // S8.2: the float control sits in the corner of the fixed surface; the
+    // minimized state collapses the surface to it (token-scoped, exact).
+    for (const _f of floatPreps) {
+      fragmentCss += `\n:where([data-rv2-ns="${nsNew}"] [${FLOAT_BTN_ATTRIBUTE}]) { position: absolute !important; top: 0 !important; right: 0 !important; z-index: 1 !important; }`;
+      fragmentCss += `\n:where([data-rv2-ns="${nsNew}"][${FLOAT_MIN_ATTRIBUTE}="1"]) { width: 3rem !important; max-height: 3rem !important; overflow: hidden !important; }`;
+    }
 
     // Candidate aggregate = unchanged accepted fragments (recompiled under
     // the new token, identical values/order) + the candidate fragment, in
@@ -905,13 +1091,24 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       texts: textPreps.map((t, j) => ({ key: `effect:text:${j}`, node: t.node, installed: t.installed })),
       // before/after place beside the anchor (parent = its parent);
       // first-child/last-child place INSIDE the anchor (parent = the anchor).
-      inserts: inserts.map((ins, j) => ({
-        key: `effect:insert:${j}`,
-        roots: ins.roots,
-        expectedParent: (ins.position === 'before' || ins.position === 'after'
-          ? ins.anchor.parentNode
-          : ins.anchor) as Element | null,
-      })),
+      inserts: [
+        ...inserts.map((ins, j) => ({
+          key: `effect:insert:${j}`,
+          roots: ins.roots,
+          expectedParent: (ins.position === 'before' || ins.position === 'after'
+            ? ins.anchor.parentNode
+            : ins.anchor) as Element | null,
+        })),
+        // S8.2: a relocation's measured postcondition = the exact node at
+        // its validated destination parent (the same primitive check).
+        ...relocatePreps.map((p, j) => ({
+          key: `effect:relocate:${j}`,
+          roots: [p.node],
+          expectedParent: (p.position === 'before' || p.position === 'after'
+            ? p.destination.parentNode
+            : p.destination) as Element | null,
+        })),
+      ],
       protectedEls,
       sentinels,
       combined,
@@ -954,6 +1151,9 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         rulePreps,
         projectionPreps,
         projectionWiring: [],
+        relocatePreps,
+        floatPreps,
+        floatWiring: [],
         collapseWiring: [],
         ruleHandles: [],
         droppedTexts,
@@ -989,6 +1189,13 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     for (const p of prepared.projectionPreps) {
       if (!p.anchor.isConnected) return err('stale-target', 'apply', 'a projection anchor left the document after CSS delivery', 'no activation on stale targets');
       if (!p.container.isConnected) return err('stale-target', 'apply', 'a projection source set left the document after CSS delivery', 'no activation on stale targets');
+    }
+    for (const p of prepared.relocatePreps) {
+      if (!p.node.isConnected) return err('stale-target', 'apply', 'a relocation target left the document after CSS delivery', 'no activation on stale targets');
+      if (!p.destination.isConnected) return err('stale-target', 'apply', 'a relocation destination left the document after CSS delivery', 'no activation on stale targets');
+    }
+    for (const p of prepared.floatPreps) {
+      if (!p.target.isConnected) return err('stale-target', 'apply', 'a float target left the document after CSS delivery', 'no activation on stale targets');
     }
     for (const op of prepared.styleOps) {
       for (const rule of op.rules) {
@@ -1142,6 +1349,17 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         p.handle.connect();
         prepared.projectionWiring.push(p.handle);
       }
+      // S8.2: relocations move the EXACT site node (same reference, same
+      // listeners — content.insert applies the validated placement).
+      for (const p of prepared.relocatePreps) {
+        deps.content.insert(p.destination, p.position, [p.node]);
+        p.moved = true;
+      }
+      // S8.2: the float minimize control's wiring (the button itself was
+      // inserted with the owned trees above).
+      for (const p of prepared.floatPreps) {
+        prepared.floatWiring.push(wireFloatButton(p.button as HTMLElement, p.target));
+      }
       // S7.1: bindings install AFTER all other native writes, in batch order —
       // exact registry entries under the transaction's ownership.
       for (const bind of prepared.bindPreps) prepared.bindHandles.push(deps.behavior.install(bind.spec));
@@ -1213,6 +1431,22 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         if (c.wiring) c.wiring.dispose();
       }
       for (const p of prepared.replaces.projections) p.wiring.dispose();
+      for (const f of prepared.replaces.floats) {
+        if (f.wiring) f.wiring.dispose();
+        if (f.attrBaseline === null) f.target.removeAttribute(FLOAT_MIN_ATTRIBUTE);
+        else f.target.setAttribute(FLOAT_MIN_ATTRIBUTE, f.attrBaseline);
+      }
+      // The predecessor's relocation reattaches exactly (the successor's own
+      // relocation, if any, moves the node again in its write section).
+      for (const r of prepared.replaces.relocations) {
+        const outcome = restoreRelocation(r);
+        if (outcome === 'site-override') {
+          conflicts.push('the site changed the relocated node\'s position meanwhile; its newer position stays');
+          relocateFights += 1;
+        } else if (outcome === 'cannot-restore') {
+          conflicts.push('the relocated node\'s original parent is gone; it stays where the site left it');
+        }
+      }
     }
     }
     for (const t of prepared.textPreps) textClaims.set(t.node, req.customizationId);
@@ -1253,6 +1487,19 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         container: prepared.projectionPreps[j]!.container,
         wiring,
       })),
+      floats: prepared.floatPreps.map((p, j) => ({
+        target: p.target,
+        attrBaseline: p.attrBaseline,
+        wiring: prepared.floatWiring[j] ?? null,
+      })),
+      relocations: prepared.relocatePreps.map((p) => ({
+        node: p.node,
+        destination: p.destination,
+        position: p.position,
+        originalParent: p.originalParent,
+        originalSibling: p.originalSibling,
+        moved: p.moved,
+      })),
       elements: prepared.candidateElements,
       highImpact: prepared.highImpact,
       decls: prepared.candidateDecls,
@@ -1278,6 +1525,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       ...prepared.collapsePreps.map((_, i) => `collapse-${i}`),
       ...prepared.rulePreps.map((_, i) => `rule-${i}`),
       ...prepared.projectionPreps.map((_, i) => `projection-${i}`),
+      ...prepared.floatPreps.map((_, i) => `float-${i}`),
+      ...prepared.relocatePreps.map((_, i) => `relocate-${i}`),
     ];
     return remember(req.batchId, digest, {
       batchId: req.batchId,
@@ -1365,6 +1614,18 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       }
     }
     for (const ins of [...prepared.inserts].reverse()) deps.content.remove(ins.roots);
+    // S8.2: a rolled-back relocation reattaches to the recorded anchors
+    // (never content.remove on a site node); conflicts stay visible.
+    for (const r of [...prepared.relocatePreps].reverse()) {
+      const outcome = restoreRelocation(r);
+      if (outcome === 'site-override') conflicts.push('the site changed the relocated node\'s position during the candidate; its newer position stays');
+      else if (outcome === 'cannot-restore') conflicts.push('the relocated node\'s original parent is gone; the position conflict stays visible');
+    }
+    for (const w of [...prepared.floatWiring].reverse()) w.dispose();
+    for (const f of prepared.floatPreps) {
+      if (f.attrBaseline === null) f.target.removeAttribute(FLOAT_MIN_ATTRIBUTE);
+      else f.target.setAttribute(FLOAT_MIN_ATTRIBUTE, f.attrBaseline);
+    }
     for (const t of [...prepared.textPreps].reverse()) restoreTextRollback(t, conflicts);
     for (const drop of [...prepared.droppedTexts].reverse()) {
       if (!drop.node.isConnected) continue;
@@ -1381,6 +1642,23 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       ...(conflicts.length ? { conflicts: conflicts.slice(0, 16) } : {}),
       ...(report ? { report } : {}),
     });
+  };
+
+  /** S8.2 compare-and-restore a relocation to its exact original anchors
+   *  (plan/08 §5: the site's newer position is never overwritten — a site
+   *  override records a visible fight, never a guess). */
+  const restoreRelocation = (
+    r: { node: Element; destination: Element; originalParent: Element | null; originalSibling: Node | null; moved: boolean },
+  ): 'restored' | 'site-override' | 'cannot-restore' => {
+    if (!r.moved) return 'restored';
+    // Ours = still at our destination (connected or detached together with a
+    // site-removed destination). Anything else is the site's newer position.
+    const ours = r.node.parentElement === r.destination || (!r.node.isConnected && r.destination.contains(r.node));
+    if (!ours) return 'site-override';
+    if (r.originalParent === null || !r.originalParent.isConnected) return 'cannot-restore';
+    r.originalParent.insertBefore(r.node, r.originalSibling);
+    r.moved = false;
+    return 'restored';
   };
 
   /** Release one customization to the site baseline (disable/remove). Text
@@ -1414,6 +1692,22 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     // S8.1: the projection view is an owned node (removed above with the
     // owned trees); its source observer disconnects exactly here.
     for (const p of rev.projections) p.wiring.dispose();
+    // S8.2: floats restore the site attribute baseline exactly; relocations
+    // reattach the exact node to its original anchors if the site permits.
+    for (const f of rev.floats) {
+      if (f.wiring) f.wiring.dispose();
+      if (f.attrBaseline === null) f.target.removeAttribute(FLOAT_MIN_ATTRIBUTE);
+      else f.target.setAttribute(FLOAT_MIN_ATTRIBUTE, f.attrBaseline);
+    }
+    for (const r of rev.relocations) {
+      const outcome = restoreRelocation(r);
+      if (outcome === 'site-override') {
+        conflicts.push('the site changed the relocated node\'s position meanwhile; its newer position stays');
+        relocateFights += 1;
+      } else if (outcome === 'cannot-restore') {
+        conflicts.push('the relocated node\'s original parent is gone; it stays where the site left it');
+      }
+    }
     for (const c of rev.collapses) {
       if (c.wiring) c.wiring.dispose();
       if (c.attrBaseline === null) c.target.removeAttribute(COLLAPSED_ATTRIBUTE);
@@ -1455,6 +1749,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       if (oldOpId !== null) {
         const rm = await deps.styleClient.remove(oldOpId, acceptedCss);
         if (!rm.ok) cleanupPending = true;
+      } else {
       }
       acceptedOpId = null;
       acceptedCss = '';

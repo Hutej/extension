@@ -377,6 +377,7 @@ const observeEnvelope = (
 
 interface SnapshotRegion {
   targetRef: string;
+  parentRef?: string;
   semantics: { tag: string; role?: string; nameApprox?: string };
   textSample?: string;
 }
@@ -505,7 +506,7 @@ interface AppliedReceipt {
   payloadDigest?: string;
   status: string;
   resourceIds?: string[];
-  error?: { code: string; message: string };
+  error?: { code: string; message: string; recoveryAction?: string };
   report?: {
     status: string;
     counts: Record<string, number>;
@@ -1644,4 +1645,212 @@ test('S8.1/T17: a board projection renders observed items, stays local-only, upd
   await workspaceSend(ws, controlEnvelope({
     command: 'RemoveCustomization', origin, customizationId: 'proj-board', expectedRecordRevision: rec2.recordRevision, mutationId: 'proj-remove-1',
   }));
+});
+
+// ── S8.2: float + gated relocation (T18, real path) ────────────────────────
+
+test('S8.2/T18: floating the existing player preserves the node, its listeners and media state; minimize works; release restores exactly', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state } = await openRegistered('player.html');
+  const ws = workspace as Page;
+  const reply = await workspaceSend(ws, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
+  const snapshot = (reply as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt?.snapshot;
+  assert.ok(snapshot, 'observe must deliver a snapshot');
+  // The player section is the OBSERVED PARENT of its "Now playing" heading
+  // (region order is the observation's selection order, not document order).
+  const heading = snapshot!.regions.find((r) => r.semantics.tag === 'h2' && r.textSample === 'Now playing');
+  const player = heading?.parentRef !== undefined
+    ? snapshot!.regions.find((r) => r.targetRef === heading.parentRef && r.semantics.tag === 'section')
+    : undefined;
+  assert.ok(player, `the player section is observed via its heading's parentRef`);
+
+  await page.evaluate(() => {
+    (window as unknown as { __tokenFlips: string[] }).__tokenFlips = [];
+    new MutationObserver((muts) => {
+      const w = window as unknown as { __tokenFlips: string[] };
+      w.__tokenFlips = w.__tokenFlips.concat(muts.map(() => `flip->${document.getElementById('player')!.getAttribute('data-rv2-ns')}`));
+    }).observe(document.getElementById('player')!, { attributes: true, attributeFilter: ['data-rv2-ns'] });
+  });
+  const pausedBefore = await page.evaluate(() => (document.getElementById('vid') as HTMLVideoElement).paused);
+  const receipt = await applyBatch(ws, state, {
+    batchId: 'float-b1',
+    customizationId: 'c-player',
+    revisionId: 'c-player-r1',
+    operations: [{ kind: 'float', target: { targetRef: player!.targetRef }, edge: 'bottom-end', width: '24rem', maxHeight: '40vh', inset: '12px' }],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 500));
+  console.log('REPORT:', JSON.stringify(receipt.report?.counts), JSON.stringify(receipt.report?.issues?.slice(0, 4)));
+  void 0;
+  assert.deepEqual(receipt.resourceIds, ['aggregate-css', 'insert-0', 'float-0']);
+
+  console.log('FLIPS:', await page.evaluate(() => (window as unknown as { __tokenFlips: string[] }).__tokenFlips));
+  console.log('AFTER:', await page.evaluate(() => ({
+    token: document.getElementById('player')!.getAttribute('data-rv2-ns'),
+    pos: getComputedStyle(document.getElementById('player')!).position,
+    sheets: [...document.styleSheets].length,
+    btns: document.querySelectorAll('[data-rv2-float-btn]').length,
+  })));
+  // The SAME node: measured fixed at the corner, media state untouched,
+  // the site's own listener still fires on the real element.
+  assert.equal(
+    await page.evaluate(() => getComputedStyle(document.getElementById('player')!).position), 'fixed',
+    `token: ${await page.evaluate(() => document.getElementById('player')!.getAttribute('data-rv2-ns'))} · sheets: ${await page.evaluate(() => document.styleSheets.length)} · playerHTML: ${(await page.evaluate(() => document.getElementById('player')!.outerHTML)).slice(0, 200)}`,
+  );
+  assert.equal(await page.evaluate(() => (document.getElementById('vid') as HTMLVideoElement).paused), pausedBefore, 'playback state preserved');
+  const rect = await page.evaluate(() => {
+    const r = document.getElementById('player')!.getBoundingClientRect();
+    return { top: r.top, bottom: window.innerHeight - r.bottom, right: window.innerWidth - r.right };
+  });
+  assert.ok(rect.bottom < rect.top && Math.abs(rect.bottom - 12) < 2, `the surface sits at the declared bottom edge (inset 12px): ${JSON.stringify(rect)}`);
+  await page.evaluate(() => (document.getElementById('vid') as HTMLVideoElement).click());
+  assert.equal(await page.evaluate(() => (window as unknown as { clicks: number }).clicks), 1, 'the video element kept its page listener through the float');
+
+  // The runtime-owned minimize control collapses and restores the surface.
+  assert.equal(await page.locator('[data-rv2-float-btn]').count(), 1);
+  await page.locator('[data-rv2-float-btn]').click();
+  assert.equal(await page.evaluate(() => document.getElementById('player')!.getAttribute('data-rv2-float-min')), '1');
+  assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('player')!).maxHeight), '48px', 'the minimized surface collapses');
+  await page.locator('[data-rv2-float-btn]').click();
+  assert.equal(await page.evaluate(() => document.getElementById('player')!.getAttribute('data-rv2-float-min')), null, 'restore is exact');
+  assert.equal(await page.evaluate(() => (document.getElementById('vid') as HTMLVideoElement).paused), pausedBefore, 'minimize never touched playback');
+
+  // Disable: the control is removed exactly and the surface returns to flow.
+  const origin = new URL(page.url()).origin;
+  const currentRec = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord;
+  const saved = await workspaceSend(ws, controlEnvelope({
+    command: 'SaveRevision',
+    origin,
+    customizationId: 'c-player',
+    title: 'Floated player',
+    scope: { mode: 'exactPath', path: new URL(page.url()).pathname },
+    contentSensitivity: 'page-only',
+    grants: [],
+    revision: {
+      revisionId: 'c-player-r1',
+      capabilityVersion: 1,
+      targetDescriptors: [{ descriptorVersion: 1, rootPath: [], selection: 'single', anchor: { tag: 'section', accessibleLabel: 'Now playing' }, relation: 'self', matchBounds: { min: 1, max: 1 }, routeScopeRef: origin, continuityPolicy: 'stable-single' }],
+      operations: [{ kind: 'float', target: { targetRef: 'd0' }, edge: 'bottom-end', width: '24rem', maxHeight: '40vh', inset: '12px' }],
+      savedAt: Date.now(),
+      source: 'user-planned',
+    },
+    expectedRecordRevision: currentRec?.recordRevision ?? 0,
+    mutationId: 'float-save-1',
+  }));
+  assert.equal((saved as { ok?: boolean }).ok, true, JSON.stringify(saved).slice(0, 400));
+  const rec = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  const disabled = await workspaceSend(ws, controlEnvelope({
+    command: 'SetEnabled', origin, customizationId: 'c-player', enabled: false, expectedRecordRevision: rec.recordRevision, mutationId: 'float-disable-1',
+  }));
+  assert.equal((disabled as { ok?: boolean }).ok, true, JSON.stringify(disabled).slice(0, 400));
+  console.log('DISABLED-STATE:', await page.evaluate(() => ({
+    pos: getComputedStyle(document.getElementById('player')!).position,
+    token: document.getElementById('player')!.getAttribute('data-rv2-ns'),
+  })));
+  await waitFor(ws, async () => (await page.evaluate(() => getComputedStyle(document.getElementById('player')!).position)) === 'static', 'disable returns the surface to normal flow');
+  assert.equal(await page.locator('[data-rv2-float-btn]').count(), 0, 'the control is removed exactly');
+  assert.equal(await page.evaluate(() => (document.getElementById('vid') as HTMLVideoElement).paused), pausedBefore, 'media state survives the full cycle');
+  const rec2 = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  await workspaceSend(ws, controlEnvelope({
+    command: 'RemoveCustomization', origin, customizationId: 'c-player', expectedRecordRevision: rec2.recordRevision, mutationId: 'float-remove-1',
+  }));
+});
+
+test('S8.2/T18: gated relocation moves the exact node with its listeners and focus, records the site override, and suspends after two fights', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state } = await openRegistered('player.html');
+  const ws = workspace as Page;
+  const reply = await workspaceSend(ws, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
+  const snapshot = (reply as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt?.snapshot;
+  assert.ok(snapshot, 'observe must deliver a snapshot');
+  // The relocate target = the observed list item of the "Card action"
+  // button; the destination = the observed aside via its heading's parent.
+  const cardBtn = snapshot!.regions.find((r) => r.semantics.tag === 'button' && r.textSample === 'Card action');
+  const panelHeading = snapshot!.regions.find((r) => r.semantics.tag === 'h3' && r.textSample === 'Panel');
+  const card = cardBtn?.parentRef !== undefined ? snapshot!.regions.find((r) => r.targetRef === cardBtn.parentRef && r.semantics.tag === 'li') : undefined;
+  const panel = panelHeading?.parentRef !== undefined ? snapshot!.regions.find((r) => r.targetRef === panelHeading.parentRef && r.semantics.tag === 'aside') : undefined;
+  assert.ok(card && panel, 'the card list item and panel aside are observed via their descendants\' parent refs');
+
+  const clicksBefore = await page.evaluate(() => (window as unknown as { cardClicks: number }).cardClicks);
+
+  // 1. The gated move: the EXACT node (same reference) with its listener.
+  const receipt = await applyBatch(ws, state, {
+    batchId: 'rel-b1',
+    customizationId: 'c-rel',
+    revisionId: 'c-rel-r1',
+    operations: [{ kind: 'relocate', target: { targetRef: card!.targetRef }, destination: { targetRef: panel!.targetRef }, position: 'last-child', structuralGrant: true }],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 500));
+  assert.deepEqual(receipt.resourceIds, ['relocate-0']);
+  assert.equal(await page.evaluate(() => document.getElementById('panel')!.contains(document.getElementById('card'))), true, 'the exact node moved');
+  await page.evaluate(() => document.getElementById('card-btn')!.click());
+  const clicksAfter = await page.evaluate(() => (window as unknown as { cardClicks: number }).cardClicks);
+  assert.equal(clicksAfter, clicksBefore + 1, 'the moved node kept its page listener');
+
+  // 2. Focus is preserved: the card's focusable button moved WITH the card
+  //    and keeps focus (no focus loss on relocation).
+  await page.evaluate(() => document.getElementById('card-btn')!.focus());
+  assert.equal(await page.evaluate(() => document.activeElement === document.getElementById('card-btn')), true);
+
+  // 3. The site's framework replacement moves the card back; the release
+  //    never overwrites the site's newer position (I23) — the conflict is
+  //    visible and counts the fight. Each fight: save (the replay applies
+  //    it) → the site overrides → disable (the release records the site
+  //    override, fight counted).
+  const origin = new URL(page.url()).origin;
+  const fight = async (n: number): Promise<void> => {
+    const id = `c-fight-${n}`;
+    const rec0 = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord;
+    const saved = await workspaceSend(ws, controlEnvelope({
+      command: 'SaveRevision',
+      origin,
+      customizationId: id,
+      title: `Relocated card ${n}`,
+      scope: { mode: 'exactPath', path: new URL(page.url()).pathname },
+      contentSensitivity: 'page-only',
+      grants: [],
+      revision: {
+        revisionId: `${id}-r1`,
+        capabilityVersion: 1,
+        targetDescriptors: [
+          { descriptorVersion: 1, rootPath: [], selection: 'single', anchor: { tag: 'li' }, relation: 'self', matchBounds: { min: 1, max: 1 }, routeScopeRef: origin, continuityPolicy: 'stable-single' },
+          { descriptorVersion: 1, rootPath: [], selection: 'single', anchor: { tag: 'aside' }, relation: 'self', matchBounds: { min: 1, max: 1 }, routeScopeRef: origin, continuityPolicy: 'stable-single' },
+        ],
+        operations: [{ kind: 'relocate', target: { targetRef: 'd0' }, destination: { targetRef: 'd1' }, position: 'last-child', structuralGrant: true }],
+        savedAt: Date.now(),
+        source: 'user-planned',
+      },
+      expectedRecordRevision: rec0?.recordRevision ?? 0,
+      mutationId: `rel-save-${n}`,
+    }));
+    assert.equal((saved as { ok?: boolean }).ok, true, JSON.stringify(saved).slice(0, 400));
+    await waitFor(ws, async () => (await page.evaluate(() => document.getElementById('panel')!.contains(document.getElementById('card')))), `the saved relocation replays (fight ${n})`);
+    await page.click('#site-move-back'); // the site overrides the accepted intent
+    await page.waitForTimeout(250);
+    const rec = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+    const disabled = await workspaceSend(ws, controlEnvelope({
+      command: 'SetEnabled', origin, customizationId: id, enabled: false, expectedRecordRevision: rec.recordRevision, mutationId: `rel-disable-${n}`,
+    }));
+    assert.equal((disabled as { ok?: boolean }).ok, true, JSON.stringify(disabled).slice(0, 400));
+    await page.waitForTimeout(400);
+    assert.equal(await page.evaluate(() => document.getElementById('card')!.parentElement!.id), 'shelf-list', `the site's newer position wins (I23), fight ${n}`);
+    await workspaceSend(ws, controlEnvelope({
+      command: 'RemoveCustomization', origin, customizationId: id, expectedRecordRevision: rec.recordRevision, mutationId: `rel-remove-${n}`,
+    }));
+    await page.waitForTimeout(250);
+  };
+  await fight(1);
+  await fight(2);
+
+  // 4. The third gated attempt is refused with the visible projection/CSS
+  //    fallback: the site overrode a relocated node twice (plan/09 §5).
+  const suspended = await applyBatch(ws, state, {
+    batchId: 'rel-b3',
+    customizationId: 'c-rel3',
+    revisionId: 'c-rel3-r1',
+    operations: [{ kind: 'relocate', target: { targetRef: card!.targetRef }, destination: { targetRef: panel!.targetRef }, position: 'last-child', structuralGrant: true }],
+  });
+  assert.equal(suspended.status, 'not-applied', `the third attempt suspends (card at: ${await page.evaluate(() => document.getElementById('card')!.parentElement!.id)})`);
+  assert.equal(suspended.error!.code, 'conflict');
+  assert.match(`${suspended.error!.message} ${suspended.error!.recoveryAction ?? ''}`, /relocation is suspended on this document/);
+  assert.match(`${suspended.error!.message} ${suspended.error!.recoveryAction ?? ''}`, /projection|float/);
 });

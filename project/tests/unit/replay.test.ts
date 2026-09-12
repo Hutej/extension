@@ -125,6 +125,9 @@ function stubTransaction(script: ApplyScript) {
       released.push(customizationId);
       return { batchId: `release:${customizationId}`, payloadDigest: '', status: 'accepted' as never, resourceIds: [] };
     },
+    /** The transaction is the source of truth for live revisions (the
+     *  disable/record-removal release condition checks it). */
+    revisions: () => applied.map((a) => ({ customizationId: a.customizationId, revisionId: a.revisionId })),
     receiptFor: () => undefined,
   };
 }

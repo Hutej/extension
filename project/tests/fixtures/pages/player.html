@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <title>Media player — T18 fixture</title>
+</head>
+<body>
+  <main>
+    <h1>Player</h1>
+    <section id="player" aria-label="Now playing">
+      <h2>Now playing</h2>
+      <video id="vid" width="320" height="180"></video>
+      <p>
+        <button id="toggle-play" type="button">Play/Pause</button>
+      </p>
+    </section>
+    <section id="shelf">
+      <h2>Shelf</h2>
+      <ul id="shelf-list">
+        <li id="card">
+          <button id="card-btn" type="button">Card action</button>
+        </li>
+      </ul>
+      <aside id="panel">
+        <h3>Panel</h3>
+      </aside>
+    </section>
+    <p id="toolbelt">
+      <button id="site-move-back" type="button">Site moves the card back</button>
+      <button id="site-remove-panel" type="button">Site removes the panel</button>
+    </p>
+  </main>
+  <script>
+    var vid = document.getElementById('vid');
+    var clicks = 0;
+    vid.addEventListener('click', function () { clicks += 1; });
+    document.getElementById('toggle-play').addEventListener('click', function () {
+      if (vid.paused) { var p = vid.play(); if (p && p.catch) p.catch(function () {}); }
+      else vid.pause();
+    });
+    var cardClicks = 0;
+    document.getElementById('card-btn').addEventListener('click', function () { cardClicks += 1; });
+    // The site's own framework replacement: the card goes back to #shelf.
+    document.getElementById('site-move-back').addEventListener('click', function () {
+      document.getElementById('shelf-list').appendChild(document.getElementById('card'));
+    });
+    document.getElementById('site-remove-panel').addEventListener('click', function () {
+      document.getElementById('panel').remove();
+    });
+  </script>
+</body>
+</html>
