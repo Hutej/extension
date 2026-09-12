@@ -38,6 +38,11 @@ interface StubNode {
   children: StubNode[];
   isContentEditable?: boolean;
   __connected?: boolean;
+  /** S7.1: native activation/focus/scroll duck methods + parentElement. */
+  parentElement?: StubNode | null;
+  click?(): void;
+  focus?(): void;
+  scrollIntoView?(opts?: unknown): void;
   getRootNode(): StubNode;
   getAttribute(name: string): string | null;
   setAttribute(name: string, value: string): void;
@@ -116,6 +121,16 @@ function makeNode(nodeType: number, tagOrValue: string): StubNode {
 
 const el = (tag: string): StubNode => makeNode(1, tag) as StubNode;
 const text = (value: string): StubNode => makeNode(3, value) as StubNode;
+/** S7.1: an element that satisfies the bind-action duck checks (focus/click/
+ *  scrollIntoView), so bindKey batches run against realistic targets. */
+const activatable = (tag: string): StubNode => {
+  const node = el(tag);
+  node.click = () => {};
+  node.focus = () => {};
+  node.scrollIntoView = () => {};
+  node.parentElement = null;
+  return node;
+};
 
 function makeDoc(): { doc: StubNode } {
   const doc = makeNode(9, '#document');
@@ -149,6 +164,36 @@ interface World {
   epoch: { value: number };
   verifyMode: 'pass' | 'fail' | 'unknown' | 'empty';
   verifyCalls: number;
+  /** S7.1: normalized chords currently live in the fake behavior. */
+  bindInstalls: string[];
+  bindDisposes: string[];
+}
+
+/** S7.1: minimal in-memory behavior double — real conflict/cap semantics
+ *  via boundChords(); install/dispose recorded for rollback assertions. */
+function makeFakeBehavior(w: World): import('../../src/runtime/behavior.ts').BehaviorCore {
+  const live = new Map<string, import('../../src/runtime/behavior.ts').BindingSpec>();
+  return {
+    install: (spec) => {
+      live.set(spec.normalized, spec);
+      w.bindInstalls.push(spec.normalized);
+      return {
+        dispose: () => {
+          if (live.get(spec.normalized) === spec) {
+            live.delete(spec.normalized);
+            w.bindDisposes.push(spec.normalized);
+          }
+        },
+      };
+    },
+    boundChords: () => {
+      const out = new Map<string, string>();
+      for (const [normalized, spec] of live) out.set(normalized, spec.customizationId);
+      return out;
+    },
+    isBound: (normalized: string) => live.has(normalized),
+    dispose: () => { live.clear(); },
+  };
 }
 
 /** Semi-real stub verifier: re-checks the same primitives the S4.2 inline
@@ -164,6 +209,9 @@ function makeStubVerifier(w: World): Verifier {
       w.verifyCalls += 1;
       const outcomes: Array<{ key: string; section: 'delivery' | 'effect' | 'integrity'; status: 'pass' | 'fail' | 'unknown'; detail?: string }> = [];
       outcomes.push(outcome('delivery:css', 'pass', 'delivery'));
+      for (const b of plan.bindings) {
+        outcomes.push(outcome(b.key, w.bindInstalls.some((s) => s === b.normalized) ? 'pass' : 'fail', 'effect', 'binding not installed'));
+      }
       for (const t of plan.texts) {
         const ok = t.node.isConnected && t.node.nodeValue === t.installed;
         outcomes.push(outcome(t.key, ok ? 'pass' : 'fail', 'effect', ok ? undefined : 'text value does not hold'));
@@ -246,6 +294,8 @@ function makeWorld(): World {
     epoch,
     verifyMode: 'pass',
     verifyCalls: 0,
+    bindInstalls: [],
+    bindDisposes: [],
     setStage: (o) => { stageOutcome = o; },
     setCommit: (o) => { commitOutcome = o; },
     setRemove: (o) => { removeOutcome = o; },
@@ -261,6 +311,7 @@ function makeWorld(): World {
     randomId: () => Math.random().toString(36).slice(2),
     installationId: () => 'testinst',
     styleClient,
+    behavior: makeFakeBehavior(world),
     verify: makeStubVerifier(world),
     settle: async () => {
       (world as World & { settleHook?: () => void }).settleHook?.();
@@ -605,7 +656,7 @@ test('unsupported operations are refused before side effects (plan/08 §1)', asy
   const ref = observe(w, h);
   const r = await w.txn.applyBatch(req('b1', 'c1', [
     insertOp(ref, [{ tag: 'p', text: 'x' }]),
-    { kind: 'bindKey', chord: 'Ctrl+K', actionIds: ['a1'] },
+    { kind: 'localRule', target: { targetRef: ref }, trigger: 'target-appeared', predicates: [], actionId: 'a1' },
   ]));
   assert.equal(r.status, 'not-applied');
   assert.equal(r.error!.code, 'unsupported-capability');
@@ -717,4 +768,152 @@ test('S4.3: an accepted receipt carries the exact-revision VerificationReport', 
   assert.equal(r.report!.revisionId, 'b1-rev');
   assert.equal(r.report!.status, 'pass');
   assert.ok(r.report!.coverage.checks > 0);
+});
+
+// ── S7.1: approved native action bindings (bindKey) ──────────────────────
+
+const bindOp = (target: { targetRef?: string; localRef?: string }, chord: string, actionIds: string[], extra: Record<string, unknown> = {}): Operation => ({
+  kind: 'bindKey', target, chord, actionIds, ...extra,
+});
+
+test('S7.1: a bindKey-only batch installs exactly one binding; a colliding chord conflicts with its owner named; release uninstalls exactly', async () => {
+  const w = makeWorld();
+  const btn = activatable('button');
+  w.doc.appendChild(btn);
+  const ref = observe(w, btn);
+
+  const r = await w.txn.applyBatch(req('kb1', 'keys1', [bindOp({ targetRef: ref }, 'Alt+G', ['activate'])]));
+  assert.equal(r.status, 'accepted', JSON.stringify(r).slice(0, 400));
+  assert.deepEqual(r.resourceIds, ['bind-0']);
+  assert.deepEqual(w.bindInstalls, ['alt+g']);
+  // A second customization cannot take the same chord (plan/09 §2).
+  const other = await w.txn.applyBatch(req('kb2', 'keys2', [bindOp({ targetRef: ref }, 'Alt+G', ['focus'])]));
+  assert.equal(other.status, 'not-applied');
+  assert.equal(other.error!.code, 'conflict');
+  assert.match(other.error!.message, /keys1/);
+  assert.equal(w.bindInstalls.length, 1, 'the refused batch installed nothing');
+
+  const rel = await w.txn.releaseCustomization('keys1');
+  assert.equal(rel.status, 'accepted');
+  assert.deepEqual(w.bindDisposes, ['alt+g']);
+  // The freed chord is bindable again by the next customization.
+  const again = await w.txn.applyBatch(req('kb3', 'keys2', [bindOp({ targetRef: ref }, 'Alt+G', ['focus'])]));
+  assert.equal(again.status, 'accepted');
+});
+
+test('S7.1: reserved, plain-typing, unparseable and duplicate chords are refused before any install', async () => {
+  const w = makeWorld();
+  const btn = activatable('button');
+  w.doc.appendChild(btn);
+  const ref = observe(w, btn);
+
+  const cases: Array<[Operation[], string, RegExp]> = [
+    [[bindOp({ targetRef: ref }, 'Ctrl+T', ['activate'])], 'unsupported-capability', /reserved by the browser/],
+    [[bindOp({ targetRef: ref }, 'Cmd+W', ['activate'])], 'unsupported-capability', /reserved by the browser/],
+    [[bindOp({ targetRef: ref }, 'g', ['activate'])], 'conflict', /plain typing/],
+    [[bindOp({ targetRef: ref }, 'Foo+G', ['activate'])], 'invalid-schema', /not a recognized modifier/],
+    [[bindOp({ targetRef: ref }, 'NotAKey', ['activate'])], 'invalid-schema', /not a bindable key/],
+    [[bindOp({ targetRef: ref }, 'Alt+G', ['activate']), bindOp({ targetRef: ref }, 'Alt+G', ['focus'])], 'duplicate-id', /bound twice/],
+  ];
+  for (const [operations, code, message] of cases) {
+    const r = await w.txn.applyBatch(req(`bad-${Math.random().toString(36).slice(2, 6)}`, 'keys', operations));
+    assert.equal(r.status, 'not-applied');
+    assert.equal(r.error!.code, code, JSON.stringify(r.error));
+    assert.match(r.error!.message, message);
+  }
+  assert.equal(w.bindInstalls.length, 0, 'no refused chord ever installed');
+});
+
+test('S7.1: action catalog is validated against the concrete target before any side effect', async () => {
+  const w = makeWorld();
+  const div = activatable('div'); // no tabindex, not focusable-tag
+  w.doc.appendChild(div);
+  const ref = observe(w, div);
+
+  const notInCatalog = await w.txn.applyBatch(req('ac1', 'keys', [bindOp({ targetRef: ref }, 'Alt+G', ['selfDestruct'])]));
+  assert.equal(notInCatalog.status, 'not-applied');
+  assert.equal(notInCatalog.error!.code, 'invalid-schema');
+  assert.match(notInCatalog.error!.message, /not in the bind action catalog/);
+
+  const followPlainDiv = await w.txn.applyBatch(req('ac2', 'keys', [bindOp({ targetRef: ref }, 'Alt+G', ['followLink'])]));
+  assert.equal(followPlainDiv.status, 'not-applied');
+  assert.equal(followPlainDiv.error!.code, 'unsupported-capability');
+  assert.match(followPlainDiv.error!.message, /followLink targets a link/);
+
+  const focusPlainDiv = await w.txn.applyBatch(req('ac3', 'keys', [bindOp({ targetRef: ref }, 'Alt+G', ['focus'])]));
+  assert.equal(focusPlainDiv.status, 'not-applied');
+  assert.equal(focusPlainDiv.error!.code, 'unsupported-capability');
+  assert.match(focusPlainDiv.error!.message, /not keyboard-focusable/);
+
+  // A safe link IS followable; javascript: links never are.
+  const link = activatable('a');
+  link.setAttribute('href', 'https://example.com/page');
+  w.doc.appendChild(link);
+  const linkRef = observe(w, link);
+  const ok = await w.txn.applyBatch(req('ac4', 'keys', [bindOp({ targetRef: linkRef }, 'Alt+L', ['followLink'])]));
+  assert.equal(ok.status, 'accepted', JSON.stringify(ok).slice(0, 300));
+
+  const jsLink = activatable('a');
+  jsLink.setAttribute('href', 'javascript:alert(1)');
+  w.doc.appendChild(jsLink);
+  const jsRef = observe(w, jsLink);
+  const refused = await w.txn.applyBatch(req('ac5', 'keys', [bindOp({ targetRef: jsRef }, 'Alt+J', ['followLink'])]));
+  assert.equal(refused.status, 'not-applied');
+  assert.equal(refused.error!.code, 'unsupported-capability');
+  assert.match(refused.error!.message, /protocol/);
+});
+
+test('S7.1: the per-document binding cap refuses the 21st chord with the quota code', async () => {
+  const w = makeWorld();
+  const btn = activatable('button');
+  w.doc.appendChild(btn);
+  const ref = observe(w, btn);
+  const letters = 'abcdefghijklmnopqrstuvwxyz';
+  const operations = Array.from({ length: 21 }, (_, i) => bindOp({ targetRef: ref }, `Alt+${letters[i]}`, ['focus']));
+  const r = await w.txn.applyBatch(req('cap1', 'keys', operations));
+  assert.equal(r.status, 'not-applied');
+  assert.equal(r.error!.code, 'quota-exceeded');
+  assert.equal(w.bindInstalls.length, 0, 'the over-cap batch installed nothing');
+});
+
+test('S7.1: a failed replacement rolls the candidate back AND restores the predecessor binding', async () => {
+  const w = makeWorld();
+  const btn = activatable('button');
+  w.doc.appendChild(btn);
+  const ref = observe(w, btn);
+
+  const first = await w.txn.applyBatch(req('rk1', 'keys1', [bindOp({ targetRef: ref }, 'Alt+G', ['activate'])]));
+  assert.equal(first.status, 'accepted');
+  assert.deepEqual(w.bindInstalls, ['alt+g']);
+
+  // Same customization, same chord, a longer action sequence — but the
+  // verification gate fails: the whole candidate reverses and the
+  // predecessor's binding is restored (not left half-retired).
+  w.verifyMode = 'fail';
+  const second = await w.txn.applyBatch(req('rk2', 'keys1', [bindOp({ targetRef: ref }, 'Alt+G', ['focus', 'activate'], { repeat: true })], 'rk2-rev'));
+  assert.equal(second.status, 'rolled-back');
+  const disposes = w.bindDisposes.filter((c) => c === 'alt+g');
+  assert.equal(disposes.length, 1, 'the candidate binding uninstalled exactly once');
+  assert.ok(w.bindInstalls.filter((c) => c === 'alt+g').length >= 2, 'the predecessor binding re-installed after rollback');
+  assert.ok(w.deps.behavior.isBound('alt+g'), 'the predecessor shortcut is live again');
+});
+
+test('S7.1: an accepted replacement retires the predecessor binding; the new one owns the chord', async () => {
+  const w = makeWorld();
+  const btn = activatable('button');
+  w.doc.appendChild(btn);
+  const ref = observe(w, btn);
+
+  const first = await w.txn.applyBatch(req('rp1', 'keys1', [bindOp({ targetRef: ref }, 'Alt+G', ['activate'])]));
+  assert.equal(first.status, 'accepted');
+  const second = await w.txn.applyBatch(req('rp2', 'keys1', [bindOp({ targetRef: ref }, 'Alt+G', ['focus'], { repeat: true })], 'rp2-rev'));
+  assert.equal(second.status, 'accepted', JSON.stringify(second).slice(0, 300));
+  const installs = w.bindInstalls.filter((c) => c === 'alt+g');
+  assert.equal(installs.length, 2, 'predecessor + replacement');
+  // Same-chord replacement: the successor overwrote the registry entry, so
+  // the predecessor's stale handle disposes as an exact no-op — one live
+  // binding, owned by the replacement revision (no duplication, AC-11).
+  assert.equal(w.deps.behavior.boundChords().size, 1, 'exactly one live entry owns the chord');
+  assert.ok(w.deps.behavior.isBound('alt+g'), 'the replacement owns the chord');
+  assert.equal(w.deps.behavior.boundChords().get('alt+g'), 'keys1');
 });

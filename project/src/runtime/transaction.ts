@@ -46,6 +46,10 @@ import type { Verifier, VerificationReport, VerifyPlan } from './verify.ts';
 import type { ContentCreator } from './content.ts';
 import type { ResolvedTargetRegistry } from './targets.ts';
 import { TOKEN_ATTRIBUTE, type TokenScope } from './styles.ts';
+import {
+  MAX_BINDINGS_PER_DOCUMENT, type BehaviorCore, type BindingSpec,
+  isBindActionId, parseChord, plainTypingChord, reservedChord, validateBindAction,
+} from './behavior.ts';
 
 // ── style-delivery client seam (runtime→broker; no background import) ──
 
@@ -104,6 +108,9 @@ export interface TransactionDeps {
   /** Persisted non-secret installation id (plan/08 §3 namespace component). */
   installationId(): string;
   styleClient: StyleClient;
+  /** S7.1: the per-document keyboard-binding executor (exact listener
+   *  ownership; see runtime/behavior.ts). */
+  behavior: BehaviorCore;
   /** S4.3: the mandatory structured verifier. A missing verifier refuses the
    *  batch before any side effect — acceptance is impossible without a report. */
   verify?: Verifier;
@@ -136,6 +143,9 @@ interface RevisionRecord {
   styleOps: StyleOperation[];
   texts: TextResource[];
   ownedNodes: Element[];
+  /** S7.1: this revision's installed keyboard bindings with their exact
+   *  dispose handles (release/rollback own them; no listener duplication). */
+  bindings: Array<{ spec: BindingSpec; handle: { dispose(): void } }>;
   /** Elements this revision's fragment targets (token membership). */
   elements: Element[];
   highImpact: Array<{ property: string; value: string; risk: HighImpactRisk }>;
@@ -181,7 +191,7 @@ const epochOf = (routeEpoch: number) => ({
   viewportRevision: 0,
 });
 
-const UNSUPPORTED_KINDS = new Set(['collapse', 'float', 'bindKey', 'localRule', 'projectCollection', 'relocate']);
+const UNSUPPORTED_KINDS = new Set(['collapse', 'float', 'localRule', 'projectCollection', 'relocate']);
 
 /** A verifier that throws or answers for a different revision is UNKNOWN —
  *  never an accidental pass (T13). */
@@ -293,6 +303,9 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     highImpact: Array<{ property: string; value: string; risk: HighImpactRisk }>;
     textPreps: Array<{ node: Text; installed: string; predecessorValue: string | null; siteBaseline: string; claimedNew: boolean }>;
     inserts: Array<{ anchor: Element; position: 'before' | 'after' | 'first-child' | 'last-child'; roots: Element[] }>;
+    bindPreps: Array<{ spec: BindingSpec }>;
+    /** Handles created in the write section (empty until then). */
+    bindHandles: Array<{ dispose(): void }>;
     droppedTexts: Array<{ node: Text; siteBaseline: string; predecessorInstalled: string }>;
     aggregateCss: string | null;
     replaces: RevisionRecord | undefined;
@@ -331,6 +344,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     const candidateElements: Element[] = [];
     const textPreps: PreparedBatch['textPreps'] = [];
     const inserts: PreparedBatch['inserts'] = [];
+    const bindPreps: PreparedBatch['bindPreps'] = [];
+    const batchChords = new Set<string>();
     const highImpact: PreparedBatch['highImpact'] = [];
     const newClaims = new Set<Text>();
     const styleRuleEls: Element[][] = [];
@@ -471,6 +486,66 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           ownedTextSamples.push(...collectOwnedText(built.roots));
           break;
         }
+        case 'bindKey': {
+          // S7.1 (plan/09 §2): chord/action/policy checks all happen BEFORE
+          // any side effect — a refused binding installs nothing.
+          if (op.target?.targetRef === undefined && op.target?.localRef === undefined) {
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.target: bindKey needs the exact target its actions act on`)) };
+          }
+          const bindTarget = resolveTarget(op.target!, `${path}.target`);
+          if (!bindTarget.ok) return { ok: false, receipt: refuse(req, digest, bindTarget.error) };
+          const parsed = parseChord(op.chord);
+          if (!parsed.ok) {
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.chord: ${parsed.reason}`, parsed.suggestion)) };
+          }
+          if (reservedChord(parsed.chord)) {
+            return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${path}.chord: "${op.chord}" is reserved by the browser; pages cannot intercept it`, 'bind a different chord, e.g. Alt+<key>')) };
+          }
+          if (plainTypingChord(parsed.chord)) {
+            return { ok: false, receipt: refuse(req, digest, err('conflict', 'validate', `${path}.chord: "${op.chord}" is plain typing — it conflicts with every editable surface`, 'add a Ctrl/Alt/Meta modifier, or bind a named key like F5')) };
+          }
+          // Conflict (plan/09 §2): one chord, one binding — the current
+          // owner wins; the replacement's OWN chords are exempt.
+          const bound = deps.behavior.boundChords();
+          let othersChords = 0;
+          for (const [, owner] of bound) if (owner !== req.customizationId) othersChords += 1;
+          const owner = bound.get(parsed.chord.normalized);
+          if (owner !== undefined && owner !== req.customizationId) {
+            return { ok: false, receipt: refuse(req, digest, err('conflict', 'validate', `${path}.chord: "${op.chord}" is already bound by customization "${owner}"`, 'choose a different chord, or disable that customization first')) };
+          }
+          if (batchChords.has(parsed.chord.normalized)) {
+            return { ok: false, receipt: refuse(req, digest, err('duplicate-id', 'validate', `${path}.chord: "${op.chord}" is bound twice in one batch`)) };
+          }
+          if (othersChords + batchChords.size + 1 > MAX_BINDINGS_PER_DOCUMENT) {
+            return { ok: false, receipt: refuse(req, digest, err('quota-exceeded', 'validate', `this document already holds ${othersChords + batchChords.size} keyboard bindings (limit ${MAX_BINDINGS_PER_DOCUMENT})`, 'disable a binding to free a chord')) };
+          }
+          batchChords.add(parsed.chord.normalized);
+          for (const actionId of op.actionIds) {
+            if (!isBindActionId(actionId)) {
+              return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.actionIds: "${actionId}" is not in the bind action catalog (focus, scrollIntoView, activate, followLink, toggleDisclosure)`)) };
+            }
+            const valid = validateBindAction(actionId, bindTarget.el);
+            if (!valid.ok) {
+              return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${path}: action "${actionId}" is unsupported on this target: ${valid.detail}`)) };
+            }
+          }
+          bindPreps.push({
+            spec: {
+              customizationId: req.customizationId,
+              ...parsed.chord,
+              target: bindTarget.el,
+              actions: op.actionIds as BindingSpec['actions'],
+              scope: op.scope ?? 'document',
+              repeat: op.repeat === true,
+              editablePolicy: op.editablePolicy ?? 'ignore',
+              modalPolicy: op.modalPolicy ?? 'ignore',
+            },
+          });
+          // Integrity: a hidden/gone bind target would leave a dead shortcut —
+          // protect it like any other batch target.
+          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `bind:${i}`, bindTarget.el);
+          break;
+        }
       }
     }
 
@@ -559,10 +634,14 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         if (!parent) continue;
         const siblings = Array.from(parent.children ?? []);
         const idx = siblings.indexOf(p.el);
-        for (const sib of [siblings[idx - 1], siblings[idx + 1]]) {
+        // Each sibling gets its OWN stable key: two siblings under one key
+        // would collide in the baseline map (a focusable sibling's baseline
+        // was then measured against the other sibling — a false integrity
+        // fail; caught by the S7.1 keys fixture).
+        for (const [which, sib] of [['prev', siblings[idx - 1]], ['next', siblings[idx + 1]]] as const) {
           if (sib && !sentinelSeen.has(sib) && sentinels.length < 24) {
             sentinelSeen.add(sib);
-            sentinels.push({ key: `sentinel:${p.key}:sibling`, el: sib });
+            sentinels.push({ key: `sentinel:${p.key}:sibling-${which}`, el: sib });
           }
         }
       }
@@ -608,6 +687,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       sentinels,
       combined,
       ownedText: ownedTextSamples,
+      bindings: bindPreps.map((b, j) => ({ key: `effect:bind:${j}`, normalized: b.spec.normalized })),
       tokenChecks: candidateElements.map((el, j) => ({ key: `delivery:token:${j}`, el, ns: nsNew })),
       unmeasuredDecls: unmeasured,
     };
@@ -624,6 +704,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         highImpact,
         textPreps,
         inserts,
+        bindPreps,
+        bindHandles: [],
         droppedTexts,
         aggregateCss,
         replaces: replaced,
@@ -642,6 +724,9 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     }
     for (const ins of prepared.inserts) {
       if (!ins.anchor.isConnected) return err('stale-target', 'apply', 'an insertUI anchor left the document after CSS delivery', 'no activation on stale targets');
+    }
+    for (const bind of prepared.bindPreps) {
+      if (!bind.spec.target.isConnected) return err('stale-target', 'apply', 'a keyboard binding target left the document after CSS delivery', 'no activation on stale targets');
     }
     for (const op of prepared.styleOps) {
       for (const rule of op.rules) {
@@ -766,6 +851,9 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       }
       for (const t of prepared.textPreps) t.node.nodeValue = t.installed;
       for (const ins of prepared.inserts) deps.content.insert(ins.anchor, ins.position, ins.roots);
+      // S7.1: bindings install AFTER all other native writes, in batch order —
+      // exact registry entries under the transaction's ownership.
+      for (const bind of prepared.bindPreps) prepared.bindHandles.push(deps.behavior.install(bind.spec));
       if (stagedOpId) deps.tokens.activate(nsNew, [...newSet].filter((el) => el.isConnected));
     } catch (e) {
       const rolled = await rollbackCandidate(prepared, req, digest, oldNs, oldSet, newSet, stagedOpId, nsNew, conflicts, `write section failed: ${(e as Error).message}`);
@@ -822,6 +910,11 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         if (!prepared.textPreps.some((p) => p.node === t.node)) textClaims.delete(t.node);
       }
       deps.content.remove(replacedOwned);
+    // The replaced revision's bindings retire with it (stale handles over a
+    // same-chord successor entry are exact no-ops).
+    if (prepared.replaces) {
+      for (const b of prepared.replaces.bindings) b.handle.dispose();
+    }
     }
     for (const t of prepared.textPreps) textClaims.set(t.node, req.customizationId);
 
@@ -848,6 +941,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       styleOps: prepared.styleOps,
       texts: prepared.textPreps.map((t) => ({ node: t.node, siteBaseline: t.siteBaseline, installed: t.installed })),
       ownedNodes: prepared.inserts.flatMap((i) => i.roots),
+      bindings: prepared.bindHandles.map((handle, j) => ({ spec: prepared.bindPreps[j]!.spec, handle })),
       elements: prepared.candidateElements,
       highImpact: prepared.highImpact,
       decls: prepared.candidateDecls,
@@ -858,6 +952,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       ...(prepared.aggregateCss !== null ? ['aggregate-css'] : []),
       ...prepared.textPreps.map((_, i) => `text-${i}`),
       ...prepared.inserts.map((_, i) => `insert-${i}`),
+      ...prepared.bindPreps.map((_, i) => `bind-${i}`),
     ];
     return remember(req.batchId, digest, {
       batchId: req.batchId,
@@ -917,7 +1012,14 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       // Restore the accepted aggregate's membership.
       for (const el of oldSet) if (el.isConnected) deps.tokens.activate(oldNs, [el]);
     }
-    // Reverse creation order: inserts after texts are removed first.
+    // Reverse creation order: inserts after texts are removed first;
+    // candidate bindings uninstall exactly, then the predecessor's bindings
+    // re-install from their specs (a same-chord replacement overwrote the
+    // registry entry — the old shortcut must survive the rollback).
+    for (const h of [...prepared.bindHandles].reverse()) h.dispose();
+    if (prepared.replaces) {
+      for (const b of prepared.replaces.bindings) deps.behavior.install(b.spec);
+    }
     for (const ins of [...prepared.inserts].reverse()) deps.content.remove(ins.roots);
     for (const t of [...prepared.textPreps].reverse()) restoreTextRollback(t, conflicts);
     for (const drop of [...prepared.droppedTexts].reverse()) {
@@ -959,6 +1061,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       t.node.nodeValue = t.siteBaseline;
     }
     deps.content.remove(rev.ownedNodes);
+    // S7.1: exact uninstall of this revision's keyboard bindings.
+    for (const b of rev.bindings) b.handle.dispose();
     revisions.delete(customizationId);
 
     // Recompose the aggregate without the released fragment.

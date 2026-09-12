@@ -53,6 +53,7 @@ import { createTransaction, type BatchReceipt, type StyleClient, type StyleOutco
 import { createReplay, type ReplayCore, type ReplayEntry } from './replay.ts';
 import type { Customization } from '../contracts.ts';
 import { createVerifier, probeCanonicalOf } from './verify.ts';
+import { createBehavior } from './behavior.ts';
 
 // ── serial queue (plan/06 §2 boundary 1) ─────────────────────────────────
 
@@ -432,6 +433,10 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     commit: (operationId) => sendStyleCommand({ command: 'CommitComposition', operationId }),
   };
 
+  // S7.1: the per-document keyboard-binding executor (plan/03 runtime/
+  // behavior) — one keydown listener per session, exact registry entries.
+  const behavior = createBehavior({ doc: document });
+
   // S4.3: the mandatory structured verifier — acceptance is impossible
   // without its report (I11). Read-only measurements; no window resize (I22).
   const verifier = createVerifier({
@@ -441,6 +446,7 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     canonicalOf: probeCanonicalOf(document),
     rectOf: (el) => el.getBoundingClientRect(),
     recheckWait: () => new Promise((resolve) => setTimeout(resolve, 60)),
+    isBound: (normalized: string) => behavior.isBound(normalized),
   });
 
   // S4.2: the one-batch transaction — the runtime's only mutation path (I03:
@@ -458,6 +464,7 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     randomId: randomInstanceId,
     installationId,
     styleClient,
+    behavior,
     verify: verifier,
     settle: () =>
       new Promise<void>((resolve) => {
@@ -551,6 +558,7 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     disposed = true;
     queue.cancelPending('runtime disposing');
     replay.dispose();
+    behavior.dispose();
     core.dispose();
     for (const [target, type, fn] of domListeners) target.removeEventListener(type, fn);
     domListeners.length = 0;

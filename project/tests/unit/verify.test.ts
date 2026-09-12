@@ -186,6 +186,7 @@ function makeWorld() {
     recheckWait: async () => {
       rechecks += 1;
     },
+    isBound: () => true,
   };
   const verifier = createVerifier(deps);
   return { doc, docEl, styles, verifier, deps, recheckCount: () => rechecks };
@@ -198,6 +199,7 @@ const basePlan = (overrides: Partial<VerifyPlan> = {}): VerifyPlan => ({
   staged: false,
   styles: [],
   hides: [],
+  bindings: [],
   texts: [],
   inserts: [],
   protectedEls: [],
@@ -267,7 +269,7 @@ test('T13: an authorized hide satisfies its visibility check and leaves sentinel
   w.doc.appendChild(parent);
   const captured = w.verifier.captureBaseline(basePlan({
     protectedEls: [{ key: 't', el: target as unknown as Element }],
-    sentinels: [{ key: 'sentinel:t:sibling', el: sibling as unknown as Element }],
+    sentinels: [{ key: 'sentinel:t:sibling-prev', el: sibling as unknown as Element }],
   }));
   assert.ok(captured.ok);
   w.styles.set(target, 'display', 'none'); // our hide took effect
@@ -275,7 +277,7 @@ test('T13: an authorized hide satisfies its visibility check and leaves sentinel
     styles: [{ key: 'effect:style:op0:decl:display', el: target as unknown as Element, property: 'display', value: 'none' }],
     hides: [target as unknown as Element],
     protectedEls: [{ key: 't', el: target as unknown as Element }],
-    sentinels: [{ key: 'sentinel:t:sibling', el: sibling as unknown as Element }],
+    sentinels: [{ key: 'sentinel:t:sibling-prev', el: sibling as unknown as Element }],
   }), captured.baseline);
   assert.equal(report.status, 'pass', JSON.stringify(report.issues));
   assert.equal(report.counts.satisfied >= 1, true, 'the hide target is exempt from visibility failure (satisfied, disclosed in counts)');
@@ -291,7 +293,7 @@ test('T13: an unauthorized hidden sibling/ancestor fails — hides must not leak
   w.doc.appendChild(parent);
   const captured = w.verifier.captureBaseline(basePlan({
     protectedEls: [{ key: 't', el: target as unknown as Element }],
-    sentinels: [{ key: 'sentinel:t:sibling', el: sibling as unknown as Element }],
+    sentinels: [{ key: 'sentinel:t:sibling-prev', el: sibling as unknown as Element }],
   }));
   assert.ok(captured.ok);
   w.styles.set(sibling, 'display', 'none'); // collateral damage
@@ -299,10 +301,10 @@ test('T13: an unauthorized hidden sibling/ancestor fails — hides must not leak
     styles: [{ key: 'effect:style:op0:decl:display', el: target as unknown as Element, property: 'display', value: 'none' }],
     hides: [target as unknown as Element],
     protectedEls: [{ key: 't', el: target as unknown as Element }],
-    sentinels: [{ key: 'sentinel:t:sibling', el: sibling as unknown as Element }],
+    sentinels: [{ key: 'sentinel:t:sibling-prev', el: sibling as unknown as Element }],
   }), captured.baseline);
   assert.equal(report.status, 'fail');
-  assert.ok(report.issues.some((i) => i.key === 'integrity:sentinel:t:sibling:visible' && i.status === 'fail'));
+  assert.ok(report.issues.some((i) => i.key === 'integrity:sentinel:t:sibling-prev:visible' && i.status === 'fail'));
 });
 
 test('T22: keyboard reachability loss fails; loss inside an authorized hide is exempt', async () => {

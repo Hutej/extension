@@ -31,9 +31,17 @@ authority).
 
 ## Not available in this preview (P2 — later roadmap tasks)
 
-- **Keyboard shortcuts / behavior bindings** (`bindKey`, `localRule` — S7):
-  the operations decode and replay structurally, but no executor installs
-  keyboard or interaction rules yet.
+- **Approved keyboard bindings** (`bindKey` — S7.1): a finite action catalog
+  (focus, scrollIntoView, activate, followLink, toggleDisclosure) installable
+  on observed targets with reserved-chord/plain-typing/conflict/cap checks,
+  editable/IME/password/modal/repeat policies at event time, exact listener
+  ownership, and a measured is-installed postcondition in the acceptance
+  gate. Activating a site control is approved in review and is explicitly
+  non-reversible externally (undo removes the shortcut, not the site's own
+  effect).
+- **Local rules** (`localRule` — S7.2): trigger/predicate/action rules such
+  as auto-collapse are not available yet; the operation decodes but has no
+  executor.
 - **Linked alternative views / projections** (`projectCollection` — S8):
   no board/list view of a site collection exists yet.
 - **Owned Canvas 2D** (S8.4): no drawing capability yet.

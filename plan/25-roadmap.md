@@ -5,10 +5,10 @@
 ## Current checkpoint
 
 - Current phase: **S7 — behavior and keyboard-first workflows**.
-- Next task: **S7.1**.
+- Next task: **S7.2**.
 - Active task: none.
-- Completed: S0.1 through S6.3 — **the S6 cutover is complete** (see `plan/progress.md`). One v2 runtime and the canonical provider/store/target paths ship; the legacy agent loop, tool registry, popup, work overlay and their live paths are DELETED (plan/19 §4 deletion record); the built manifest is popup-free with `minimum_chrome_version: 120`; legacy `rv_*` data stays quarantined untouched and the old per-tab CSS tracker is exact-removed once at startup; docs are pointers and `docs/CORE-PREVIEW.md` lists unavailable P2 features honestly.
-- Known baseline blockers: none. Residual: an actual Chrome 120 install run is not available in this environment (current-stable Chromium proven; floor declared in the manifest); streaming + capability-probe connection tests deferred from S6.1 (recorded); reconciliation set-membership changes re-apply whole customizations (bounded by the conflict pause); the workspace `scripts/` no longer contains audit-env/audit-wiring (retired with their subjects — build runs the resolved-import gate only).
+- Completed: S0.1 through S7.1 — the S6 cutover is complete (plan/19 §4) and **S7.1 ships approved keyboard bindings**: the finite catalog (focus/scrollIntoView/activate/followLink/toggleDisclosure) on observed targets, one document keydown listener with exact per-binding registry ownership, prepare-time reserved/plain-typing/conflict/cap refusals, event-time IME/password/editable/modal/repeat/visibility eligibility that consumes no key until eligible, sync trusted-gesture execution, a measured is-installed acceptance check, full install/uninstall/rollback/replacement/replay semantics, and an approval review that names the target and warns that the site's own effect is non-reversible (AC-11 binding clauses; plan/09 §1/§2).
+- Known baseline blockers: none. Residual: an actual Chrome 120 install run is not available in this environment (current-stable Chromium proven; floor declared in the manifest); streaming + capability-probe connection tests deferred from S6.1 (recorded); reconciliation set-membership changes re-apply whole customizations (bounded by the conflict pause); the planner prompt still advertises collapse/float/relocate as vocabulary although their executors are refused as unsupported-capability at apply (pre-existing honesty gap — the refused batch surfaces in the workspace; S7.2/S8 own those executors); browser-level IME composition cannot be synthesized over CDP (Input.dispatchKeyEvent has no isComposing) — the composition decision is unit-proven on the pure evaluator and the listener is three lines.
 - Planning baseline: dirty `main` at `71263e0938e0a3d3a2a5e7a44d2175898b9e8c0b`; owner's changes preserved.
 - Evidence: `plan/progress.md` (one compact log).
 - Simplicity: follow consolidated physical files in document 02. Detailed module names below are logical responsibilities, not mandatory files/classes. One ordered batch per proposal; no subgroup DAG. Capability coverage including insertion/motion/canvas is in document 28.
@@ -216,15 +216,16 @@ Read: [providers](11-model-providers.md), [UX](16-observability-and-ux.md), ADR0
 Read: [behavior](09-behavior-and-workflows.md), algorithm A10, [security](17-security-and-privacy.md).
 
 - [ ] **S7 phase completed**
-  - [ ] **S7.1 — Install approved native action bindings**
+  - [x] **S7.1 — Install approved native action bindings**
     - Goal/inputs: S6, observed action catalog, trusted input rules.
     - Changes: finite chord/action schema, editable/IME/modal/repeat/reserved-key checks, conflict preview, exact listener ownership, focus/scroll/approved activation.
     - Outputs: keyboard-first navigation/control with no synthetic privilege or backend automation promise.
     - Invariants: I05/I14/I24.
-    - [ ] Tests: T15/T21/T30 and gesture-gated API manual fixture checks.
-    - [ ] Validation: ≤4 local steps; no key consumed until eligible; uninstall/reload no duplicate bindings.
-    - [ ] Completion: AC11 binding requirements pass; evidence S7.1.
+    - [x] Tests: T15/T21/T30 and gesture-gated API manual fixture checks.
+    - [x] Validation: ≤4 local steps; no key consumed until eligible; uninstall/reload no duplicate bindings.
+    - [x] Completion: AC11 binding requirements pass; evidence S7.1.
     - Follow-up: local disclosure rules and projection actions.
+    - Notes: the "conflict preview" is the proposal review naming chord/actions/target + the apply-time refusal naming the owning customization (no probe command was added — YAGNI); the S7.1 keys fixture also exposed and fixed a pre-existing verifier bug (sibling sentinels shared one baseline key → false integrity fails).
   - [ ] **S7.2 — Implement collapse and finite local behavior rules**
     - Goal/inputs: S7.1 plus S5 reconciliation.
     - Changes: owned disclosure, approved native expanded-state action, once-per-instance/user override/cooldown, suspension on conflict; persist rule not action history.

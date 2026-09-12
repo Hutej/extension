@@ -1,0 +1,45 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Keyboard bindings fixture (T15)</title>
+</head>
+<body>
+  <h1>Keyboard fixture</h1>
+  <main>
+    <button id="go" type="button">Poke</button>
+    <a id="link" href="#target">A safe same-page link</a>
+    <details id="disc">
+      <summary id="sum">Details toggle</summary>
+      <p>Details body</p>
+    </details>
+    <p id="target" hidden>Link landing</p>
+    <p>
+      <label>Field <input id="field" type="text" /></label>
+      <label>Secret <input id="pw" type="password" /></label>
+    </p>
+    <div id="editor" contenteditable="true">editable region</div>
+    <dialog id="modal">
+      <p>In a dialog</p>
+      <button id="modalbtn" type="button">Dialog button</button>
+      <button id="closedlg" type="button" onclick="document.getElementById('modal').close()">Close</button>
+    </dialog>
+  </main>
+  <script>
+    // The site's own listeners — a binding activates THESE, never clones.
+    window.__clicks = 0;
+    window.__linkClicks = 0;
+    window.__toggles = 0;
+    window.__keyseen = 0;
+    document.getElementById('go').addEventListener('click', () => { window.__clicks += 1; });
+    document.getElementById('link').addEventListener('click', () => { window.__linkClicks += 1; });
+    document.getElementById('disc').addEventListener('toggle', () => { window.__toggles += 1; });
+    document.getElementById('field').addEventListener('keydown', (ev) => {
+      // Records un-intercepted keys that REACH the editor: the binding must
+      // never steal keys from an editable surface under the default policy.
+      window.__keyseen += 1;
+      window.__lastKey = ev.key;
+    });
+  </script>
+</body>
+</html>

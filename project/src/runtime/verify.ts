@@ -122,6 +122,8 @@ export interface VerifyPlan {
   protectedEls: ProtectedEl[];
   sentinels: ProtectedEl[];
   combined: CombinedSample[];
+  /** S7.1: installed keyboard bindings — the chord must be live. */
+  bindings: Array<{ key: string; normalized: string }>;
   /** New extension-authored text (insertUI) for the WCAG AA contrast check. */
   ownedText: Array<{ el: Element; sample: string }>;
   tokenChecks: Array<{ key: string; el: Element; ns: string }>;
@@ -166,6 +168,10 @@ export interface VerifierDeps {
   rectOf(el: Element): RectLike | null;
   /** Bounded wait before the single recheck of unknown outcomes. */
   recheckWait?(): Promise<void>;
+  /** S7.1: measured postcondition for keyboard bindings — is this chord live
+   *  in the behavior registry? A missing seam fails the check (never an
+   *  accidental pass, T13). */
+  isBound(normalized: string): boolean;
 }
 
 // ── bounds ───────────────────────────────────────────────────────────────
@@ -454,6 +460,12 @@ export function createVerifier(deps: VerifierDeps): Verifier {
       outcomes.push(placed
         ? { key: ins.key, section: 'effect', status: 'pass' }
         : { key: ins.key, section: 'effect', status: 'fail', detail: 'the owned tree is not connected at its validated anchor' });
+    }
+    for (const b of plan.bindings) {
+      if (!want(b.key)) continue;
+      outcomes.push(deps.isBound(b.normalized)
+        ? { key: b.key, section: 'effect', status: 'pass' }
+        : { key: b.key, section: 'effect', status: 'fail', detail: 'the keyboard binding is not installed in the behavior registry' });
     }
 
     // INTEGRITY (baseline-relative; stable keys)

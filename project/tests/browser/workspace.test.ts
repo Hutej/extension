@@ -73,6 +73,17 @@ async function waitForStatus(page: Page, match: RegExp, ms = 15_000): Promise<st
   }
 }
 
+/** Poll one listed entry until its text matches — the live-state oracle. */
+async function waitForText(page: Page, listSel: string, entryHas: string, match: RegExp, what: string, ms = 15_000): Promise<void> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const text = await page.locator(listSel, { hasText: entryHas }).first().textContent();
+    if (text !== null && match.test(text)) return;
+    if (Date.now() > deadline) throw new Error(`never saw ${what}; last: ${text}`);
+    await sleep(150);
+  }
+}
+
 const fixtureProfile = () => ({
   settingsVersion: 1,
   profiles: [
@@ -259,4 +270,57 @@ test('axe: the workspace page has no critical or serious accessibility violation
     `axe violations: ${serious.map((v) => `${v.id} (${v.impact})`).join('; ')}`,
   );
   void readFile;
+});
+
+// ── S7.1: keyboard binding through the full review workflow ────────────────
+
+test('E2E/S7.1: the model proposes a shortcut, the review names the target and warns honestly, Apply installs, disable uninstalls', async () => {
+  const target = await openFixture('workspace-target.html');
+  await target.bringToFront();
+  // My exact tab — earlier tests leave same-URL tabs open with live runs.
+  const tabId = (await sw!.evaluate(async () => (await chrome.tabs.query({ active: true, currentWindow: true }))[0].id)) as number;
+  // The site's own listener — the shortcut must fire THIS, not a copy.
+  await target.evaluate(() => {
+    (window as unknown as { __pokes: number }).__pokes = 0;
+    document.getElementById('poke')!.addEventListener('click', () => { (window as unknown as { __pokes: number }).__pokes += 1; });
+  });
+
+  const ws = await openWorkspace();
+  await injectSettings(ws);
+  await ws.reload({ waitUntil: 'load' });
+  const radios = ws.locator('input[name=rv-target]');
+  const deadline = Date.now() + 15_000;
+  for (;;) {
+    if ((await radios.count()) >= 3) break;
+    if (Date.now() > deadline) throw new Error('targets never appeared after reopen');
+    await sleep(200);
+  }
+  await ws.locator('fieldset .radios label', { hasText: `tab ${tabId}` }).locator('input').check();
+  await ws.locator('#rv-goal').pressSequentially('bind a shortcut chord:Alt+G that clicks the Poke button');
+  await ws.getByRole('button', { name: 'Start' }).click();
+
+  // The review shows the chord, the exact action and the honest
+  // non-reversibility warning (plan/09 §1 — the user must see what a press
+  // triggers BEFORE approving).
+  await waitForStatus(ws, /Review the proposed changes below/);
+  assert.ok(await ws.getByText('bind “Alt+G” → activate on').isVisible(), 'the review names chord, action and target');
+  assert.ok(await ws.getByText(/undo removes the shortcut, not any effect it causes/).isVisible(), 'the review warns that the site effect is not reversible');
+
+  await ws.getByRole('button', { name: 'Apply' }).click();
+  await waitForStatus(ws, /Applied and saved\./);
+
+  // A trusted press on the pinned page activates the site's own button once.
+  await target.bringToFront();
+  await target.keyboard.press('Alt+g');
+  await sleep(300); // the trusted event is sync, but the assert is async
+  assert.equal(await target.evaluate(() => (window as unknown as { __pokes: number }).__pokes), 1, 'the approved shortcut fired the site control exactly once');
+
+  // Disable through the real checkbox → the exact listener is uninstalled.
+  const entry = ws.locator('ul.plain li', { hasText: 'Bind a shortcut to the Poke button' });
+  await entry.locator('input[type=checkbox]').uncheck();
+  await waitForText(ws, 'ul.plain li', 'Bind a shortcut to the Poke button', /disabled on the open page/, 'the disable relay released the runtime binding');
+  await target.bringToFront();
+  await target.keyboard.press('Alt+g');
+  assert.equal(await target.evaluate(() => (window as unknown as { __pokes: number }).__pokes), 1, 'the disabled shortcut fired nothing');
+  void ws;
 });

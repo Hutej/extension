@@ -63,6 +63,7 @@ import {
   type RunCounters,
 } from '../planning/controller.ts';
 import { createDiagnosticRing, type DiagnosticRing } from '../diagnostics.ts';
+import { CONSEQUENTIAL_BIND_ACTIONS } from '../runtime/behavior.ts';
 
 // ── settings storage (trusted-context; chrome.storage.local seam) ─────────
 
@@ -1583,6 +1584,16 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
         return `insert UI ${op.position} ${firstRef(op.target)}`;
       case 'relocate':
         return `move ${firstRef(op.target)} relative to ${firstRef(op.destination)}`;
+      case 'bindKey': {
+        // plan/09 §1: generic activation is potentially consequential — the
+        // review must show the exact target + actions and say plainly that
+        // undo removes the shortcut, NOT the site's own effect.
+        const base = `bind “${op.chord}” → ${op.actionIds.join(', ')} on ${firstRef(op.target)}`;
+        const consequential = op.actionIds.some((a) => (CONSEQUENTIAL_BIND_ACTIONS as ReadonlySet<string>).has(a));
+        return consequential
+          ? `${base} — pressing it activates this page's own control; undo removes the shortcut, not any effect it causes`
+          : base;
+      }
       default:
         return `${op.kind} on ${firstRef('target' in op ? op.target : undefined)}`;
     }

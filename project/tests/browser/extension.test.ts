@@ -1031,3 +1031,309 @@ test('S5.2/T11: an SPA route change out of scope revokes the effect; returning r
   }));
   void tabId;
 });
+
+// ── S7.1: approved native action bindings on the real path (T15) ─────────
+
+/** Open keys.html, register and observe — returns the Poke button's ref. */
+async function openKeysFixture(): Promise<{ page: Page; tabId: number; state: CapturedState; go: string; link: string; disc: string }> {
+  const { page, tabId } = await openFixture('keys.html');
+  await page.bringToFront();
+  assert.ok(workspace, 'workspace page from the registration test');
+  const state = await capturedState(workspace, tabId);
+  const reply = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
+  const snapshot = (reply as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt?.snapshot;
+  assert.ok(snapshot, 'observe must deliver a snapshot');
+  const byText = (needle: string): string => {
+    const region = snapshot!.regions.find((r) => r.textSample?.includes(needle) || r.semantics.nameApprox?.includes(needle));
+    assert.ok(region, `no region matches "${needle}"`);
+    return region!.targetRef;
+  };
+  const go = byText('Poke');
+  const link = byText('A safe same-page link');
+  const disc = snapshot!.regions.find((r) => r.semantics.tag === 'details');
+  assert.ok(disc, 'the details element is observed');
+  return { page, tabId, state, go, link, disc: disc!.targetRef };
+}
+
+test('S7.1/T15: a trusted key press activates the bound native control exactly once (no synthetic retries)', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state, go } = await openKeysFixture();
+  const receipt = await applyBatch(workspace, state, {
+    batchId: 'keys-b1',
+    customizationId: 'keys-act',
+    revisionId: 'keys-act-r1',
+    operations: [{ kind: 'bindKey', target: { targetRef: go }, chord: 'Alt+G', actionIds: ['activate'] }],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 400));
+  assert.deepEqual(receipt.resourceIds, ['bind-0'], 'the binding is a receipt resource');
+  assert.equal(receipt.report!.status, 'pass', 'the measured postcondition gated acceptance');
+  assert.ok(receipt.report!.coverage.checks >= 1, 'the binding check was actually measured');
+
+  await page.keyboard.press('Alt+g'); // CDP input: a trusted key event
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 1, 'the site\'s own listener fired exactly once');
+  await page.keyboard.press('Alt+g');
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 2, 'a second gesture fires again — one live listener, no duplication');
+  // A DIFFERENT chord is not consumed (no first-match activation).
+  await page.keyboard.press('Alt+h');
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 2, 'unbound chords pass through untouched');
+  void state;
+});
+
+test('S7.1/T15: focus and scrollIntoView run as one finite local sequence', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state, go } = await openKeysFixture();
+  const receipt = await applyBatch(workspace, state, {
+    batchId: 'keys-b2',
+    customizationId: 'keys-focus',
+    revisionId: 'keys-focus-r1',
+    operations: [{ kind: 'bindKey', target: { targetRef: go }, chord: 'Alt+F', actionIds: ['scrollIntoView', 'focus'], repeat: true }],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 300));
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur?.());
+  await page.keyboard.press('Alt+f');
+  assert.equal(await page.evaluate(() => document.activeElement?.id), 'go', 'the bound target received native focus');
+  void state;
+});
+
+test('S7.1/T15: editable surfaces keep their keys by default; an approved narrow opt-in fires, passwords never', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state, go } = await openKeysFixture();
+
+  // Default policy: inside an editor the chord is not consumed at all.
+  const def = await applyBatch(workspace, state, {
+    batchId: 'keys-b3',
+    customizationId: 'keys-edit',
+    revisionId: 'keys-edit-r1',
+    operations: [{ kind: 'bindKey', target: { targetRef: go }, chord: 'F4', actionIds: ['activate'] }],
+  });
+  assert.equal(def.status, 'accepted', JSON.stringify(def).slice(0, 300));
+  await page.locator('#field').focus();
+  await page.keyboard.press('F4');
+  let counters = await page.evaluate(() => ({ clicks: (window as unknown as { __clicks: number }).__clicks, keyseen: (window as unknown as { __keyseen: number }).__keyseen }));
+  assert.equal(counters.clicks, 0, 'the default policy never activates inside an editor');
+  assert.equal(counters.keyseen, 1, 'the key reached the editor unconsumed');
+
+  // The same chord outside the editor fires normally (the field is blurred
+  // explicitly — h1 is not focusable, focus() would be a no-op).
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
+  await page.keyboard.press('F4');
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 1, 'outside editors the binding fires');
+
+  // Approved narrow opt-in ('allow'): fires inside a plain editor…
+  const opt = await applyBatch(workspace, state, {
+    batchId: 'keys-b4',
+    customizationId: 'keys-optin',
+    revisionId: 'keys-optin-r1',
+    operations: [{ kind: 'bindKey', target: { targetRef: go }, chord: 'F2', actionIds: ['activate'], editablePolicy: 'allow' }],
+  });
+  assert.equal(opt.status, 'accepted', JSON.stringify(opt).slice(0, 300));
+  await page.locator('#field').focus();
+  await page.keyboard.press('F2');
+  const counters2 = await page.evaluate(() => ({ clicks: (window as unknown as { __clicks: number }).__clicks }));
+  assert.equal(counters2.clicks, 2, 'the approved opt-in fires inside the editor');
+  // …but NEVER in password editing — no policy can intercept it.
+  await page.locator('#pw').focus();
+  await page.keyboard.press('F2');
+  const counters3 = await page.evaluate(() => ({ clicks: (window as unknown as { __clicks: number }).__clicks }));
+  assert.equal(counters3.clicks, 2, 'password editing is never intercepted');
+  void state;
+});
+
+test('S7.1/T15: unwanted repeats are skipped; an approved repeat policy allows them', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state, go } = await openKeysFixture();
+  const receipt = await applyBatch(workspace, state, {
+    batchId: 'keys-b5',
+    customizationId: 'keys-rep',
+    revisionId: 'keys-rep-r1',
+    operations: [{ kind: 'bindKey', target: { targetRef: go }, chord: 'Alt+R', actionIds: ['activate'] }],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 300));
+  // CDP key repeats (autoRepeat) are trusted events with repeat=true.
+  const cdp = await context!.newCDPSession(page);
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyDown', key: 'r', code: 'KeyR', windowsVirtualKeyCode: 82, nativeVirtualKeyCode: 82, modifiers: 1, autoRepeat: true });
+  await cdp.send('Input.dispatchKeyEvent', { type: 'keyUp', key: 'r', code: 'KeyR', windowsVirtualKeyCode: 82, nativeVirtualKeyCode: 82, modifiers: 1 });
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 0, 'repeats are skipped under the default policy');
+  // A real (non-repeat) press still fires.
+  await page.keyboard.press('Alt+r');
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 1, 'a real gesture fires');
+  void state;
+});
+
+test('S7.1/T15: modal focus keeps the chord unless the binding opted in', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state, go } = await openKeysFixture();
+  const receipt = await applyBatch(workspace, state, {
+    batchId: 'keys-b6',
+    customizationId: 'keys-modal',
+    revisionId: 'keys-modal-r1',
+    operations: [{ kind: 'bindKey', target: { targetRef: go }, chord: 'Alt+M', actionIds: ['activate'] }],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 300));
+  await page.evaluate(() => (document.getElementById('modal') as HTMLDialogElement).showModal());
+  await page.keyboard.press('Alt+m');
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 0, 'a focused dialog keeps its keys by default');
+  await page.locator('#closedlg').click();
+  await page.keyboard.press('Alt+m');
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 1, 'outside the dialog the binding fires');
+  void state;
+});
+
+test('S7.1/T15: reserved chords, plain typing keys and chord collisions are refused before any install', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state, go } = await openKeysFixture();
+
+  const reserved = await applyBatch(workspace, state, {
+    batchId: 'keys-res1',
+    customizationId: 'keys-res',
+    revisionId: 'keys-res-r1',
+    operations: [{ kind: 'bindKey', target: { targetRef: go }, chord: 'Ctrl+T', actionIds: ['activate'] }],
+  });
+  assert.equal(reserved.status, 'not-applied');
+  assert.equal(reserved.error!.code, 'unsupported-capability');
+  assert.match(reserved.error!.message, /reserved by the browser/);
+
+  const plain = await applyBatch(workspace, state, {
+    batchId: 'keys-res2',
+    customizationId: 'keys-res',
+    revisionId: 'keys-res-r2',
+    operations: [{ kind: 'bindKey', target: { targetRef: go }, chord: 'g', actionIds: ['activate'] }],
+  });
+  assert.equal(plain.status, 'not-applied');
+  assert.equal(plain.error!.code, 'conflict');
+  assert.match(plain.error!.message, /plain typing/);
+
+  // Collision: the current owner wins and is named in the refusal.
+  const first = await applyBatch(workspace, state, {
+    batchId: 'keys-col1',
+    customizationId: 'keys-owner',
+    revisionId: 'keys-owner-r1',
+    operations: [{ kind: 'bindKey', target: { targetRef: go }, chord: 'Alt+P', actionIds: ['activate'] }],
+  });
+  assert.equal(first.status, 'accepted', JSON.stringify(first).slice(0, 300));
+  const second = await applyBatch(workspace, state, {
+    batchId: 'keys-col2',
+    customizationId: 'keys-other',
+    revisionId: 'keys-other-r1',
+    operations: [{ kind: 'bindKey', target: { targetRef: go }, chord: 'Alt+P', actionIds: ['activate'] }],
+  });
+  assert.equal(second.status, 'not-applied');
+  assert.equal(second.error!.code, 'conflict');
+  assert.match(second.error!.message, /keys-owner/);
+  await page.keyboard.press('Alt+p');
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 1, 'exactly one binding owns the chord');
+  void state;
+});
+
+test('S7.1/T15: followLink and toggleDisclosure use the site\'s own safe affordances', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state, link, disc } = await openKeysFixture();
+  const receipt = await applyBatch(workspace, state, {
+    batchId: 'keys-b7',
+    customizationId: 'keys-native',
+    revisionId: 'keys-native-r1',
+    operations: [
+      { kind: 'bindKey', target: { targetRef: link }, chord: 'Alt+L', actionIds: ['followLink'] },
+      { kind: 'bindKey', target: { targetRef: disc }, chord: 'Alt+D', actionIds: ['toggleDisclosure'] },
+    ],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 400));
+  assert.deepEqual(receipt.resourceIds, ['bind-0', 'bind-1']);
+
+  await page.keyboard.press('Alt+l');
+  assert.equal(await page.evaluate(() => (window as unknown as { __linkClicks: number }).__linkClicks), 1, 'the site link was followed natively');
+  await page.keyboard.press('Alt+d');
+  const dom = await page.evaluate(() => ({ open: (document.getElementById('disc') as HTMLDetailsElement).open, toggles: (window as unknown as { __toggles: number }).__toggles }));
+  assert.equal(dom.open, true, 'the native disclosure opened');
+  // The toggle event is a queued task — wait for the site's own listener.
+  await waitFor(workspace, async () => (await page.evaluate(() => (window as unknown as { __toggles: number }).__toggles)) === 1, "the site's toggle listeners ran");
+  void state;
+});
+
+test('S7.1/T15: save → replay on reload installs the shortcut exactly once; disable uninstalls it exactly', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, tabId, state, go } = await openKeysFixture();
+  const fixtureUrl = new URL(page.url());
+  const origin = fixtureUrl.origin;
+
+  // 1. Save a descriptor-based binding customization. The fixture origin is
+  //    SHARED with the S5.2 tests — fetch the current record revision first.
+  const currentRecord = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord;
+  const BIND_REVISION = {
+    revisionId: 'keys-replay-r1',
+    capabilityVersion: 1,
+    targetDescriptors: [{
+      descriptorVersion: 1,
+      rootPath: [],
+      selection: 'single',
+      anchor: { tag: 'button', stableId: 'go' },
+      relation: 'self',
+      matchBounds: { min: 1, max: 1 },
+      routeScopeRef: 'https://example.test',
+      continuityPolicy: 'stable-single',
+    }],
+    operations: [{ kind: 'bindKey', target: { targetRef: 'd0' }, chord: 'Alt+K', actionIds: ['activate'] }],
+    savedAt: 1,
+    source: 'user-planned',
+  };
+  const saved = await workspaceSend(workspace, controlEnvelope({
+    command: 'SaveRevision',
+    origin,
+    customizationId: 'keys-replay',
+    title: 'Keyboard shortcut',
+    scope: { mode: 'exactPath', path: fixtureUrl.pathname },
+    contentSensitivity: 'page-only',
+    grants: [],
+    revision: BIND_REVISION,
+    expectedRecordRevision: currentRecord?.recordRevision ?? 0,
+    mutationId: 'keys-save-1',
+  }));
+  assert.equal((saved as { ok?: boolean }).ok, true, JSON.stringify(saved).slice(0, 300));
+
+  // 2. The save broadcast replays in the live document.
+  await waitFor(workspace, async () => {
+    await page.keyboard.press('Alt+k');
+    return (await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks)) >= 1;
+  }, 'the replayed shortcut is live');
+
+  // 3. Reload: replay installs on the fresh runtime — one activation per
+  //    press proves no duplicate listeners (AC-11), on the real path.
+  await page.reload({ waitUntil: 'load' });
+  await page.bringToFront();
+  const fresh = await capturedState(workspace, tabId);
+  void fresh;
+  await waitFor(workspace, async () => {
+    try {
+      await page.keyboard.press('Alt+k');
+    } catch {
+      return false; // page not ready for input yet
+    }
+    return (await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks)) === 1;
+  }, 'exactly one activation per press after reload (no duplicate bindings)');
+  await page.keyboard.press('Alt+k');
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 2, 'still exactly one listener');
+
+  // 4. Disable: the exact listener is uninstalled.
+  const record = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  const disabled = await workspaceSend(workspace, controlEnvelope({
+    command: 'SetEnabled', origin, customizationId: 'keys-replay', enabled: false, expectedRecordRevision: record.recordRevision, mutationId: 'keys-disable-1',
+  }));
+  assert.equal((disabled as { ok?: boolean }).ok, true, JSON.stringify(disabled).slice(0, 300));
+  await page.keyboard.press('Alt+k');
+  await page.keyboard.press('Alt+k');
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 2, 'the disabled shortcut fired nothing');
+
+  // 5. Reload once more: the disabled intent does not reinstall.
+  await page.reload({ waitUntil: 'load' });
+  await page.bringToFront();
+  await sleep(1200);
+  await page.keyboard.press('Alt+k');
+  assert.equal(await page.evaluate(() => (window as unknown as { __clicks: number }).__clicks), 0, 'disabled bindings never replay');
+
+  // Cleanup.
+  const rec2 = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  await workspaceSend(workspace, controlEnvelope({
+    command: 'RemoveCustomization', origin, customizationId: 'keys-replay', expectedRecordRevision: rec2.recordRevision, mutationId: 'keys-remove-1',
+  }));
+  void state;
+});

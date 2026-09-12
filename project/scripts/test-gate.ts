@@ -36,6 +36,7 @@ export const EXPECTED_UNIT_SUITES = [
   'styles.test.ts',
   'token-scope.test.ts',
   'targets.test.ts',
+  'behavior.test.ts',
   'compile.test.ts',
   'gate.test.ts',
 ];

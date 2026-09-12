@@ -59,6 +59,35 @@ export function startFixtureServer(): Promise<{ server: Server; origin: string; 
       } catch {
         /* fall back to raw body matching */
       }
+      // S7.1 branch: a goal asking for a shortcut gets a bindKey proposal on
+      // the first observed button — the canned provider stays a stand-in for
+      // the real model path; no test-only production hooks exist.
+      if (/bind a shortcut/i.test(evidenceText)) {
+        const actionMatch = evidenceText.match(/^ {2}(a\d+) \| button\b.* → (t\d+)$/m);
+        const chordMatch = evidenceText.match(/chord:([A-Za-z0-9+]+)/);
+        const bindContent = actionMatch
+          ? JSON.stringify({
+              kind: 'proposal',
+              schemaVersion: 1,
+              summary: 'Bind a shortcut to the Poke button',
+              operations: [{
+                kind: 'bindKey',
+                target: { targetRef: actionMatch[2] },
+                chord: chordMatch ? chordMatch[1] : 'Alt+G',
+                actionIds: ['activate'],
+              }],
+            })
+          : JSON.stringify({ kind: 'cannotComplete', reason: `no button evidence in the payload; got: ${evidenceText.slice(0, 2000).replace(/\s+/g, ' ')}` });
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+          id: 'chatcmpl-fixture-bind',
+          object: 'chat.completion',
+          created: 0,
+          model: 'fixture-model',
+          choices: [{ index: 0, message: { role: 'assistant', content: bindContent }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }));
+        return;
+      }
       const m = evidenceText.match(/^ {2}(t\d+) \| h1\b/m);
       if (!m) console.log('[fixture-provider] no h1 match; evidence head:', evidenceText.slice(-2500).replace(/\s+/g, ' ').slice(0, 2500));
       const targetRef = m ? m[1] : '';

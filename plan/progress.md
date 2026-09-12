@@ -458,3 +458,32 @@ Next task: **S6.3 — Cut over core runtime and remove legacy live paths** (plan
 - `src/core/sanitize/redact.ts` remains as the retained pure primitive (its credential-shape suite is in the roadmap's stay-list); no production code imports it — noted here so it is not mistaken for a live path.
 
 Next task: **S7.1 — Install approved native action bindings** (plan/09, plan/28; the core product is stable at S6 — P2 capabilities now build on it, not on the deleted stubs).
+
+## S7.1 — Install approved native action bindings — `complete`
+
+- Date: 2026-09-09. Source: `main` `df9972e` (S6.3 committed; clean tree).
+- **`runtime/behavior.ts` (new)** — the per-document executor (plan/03, plan/09 §1/§2): finite catalog `focus | scrollIntoView | activate | followLink | toggleDisclosure`; chord grammar (Ctrl/Alt/Shift/Meta/F1–F12/named keys, canonical normalization shared by parse and live events); reserved-chord set (Ctrl/Cmd+T/W/N/Q/Tab/PageUp/PageDown, Alt+F4) refused — never promised; plain-typing chords refused (editable-surface conflict); pure `decideBinding` eligibility: IME composition, unwanted repeats, password (NEVER interceptable), editable surfaces (default skip, `editablePolicy:'allow'` narrow opt-in), modal focus (default skip, opt-in), target scope, target visible+enabled — no key consumed until eligible (`preventDefault` only after the decision); sync execution of ≤4 native actions while the gesture is current; ONE document keydown listener per session with exact per-binding registry entries (AC-11: no install can duplicate listeners).
+- **Transaction integration** — `bindKey` leaves `UNSUPPORTED_KINDS`: prepare validates chord/target/action-fit (duck-typed per-target validation: followLink needs an http(s) link, toggleDisclosure needs details/summary, focus needs a keyboard-focusable element) and refuses reserved/plain/duplicate/colliding chords and the 21st binding (cap 20) BEFORE any side effect; the write section installs bindings as owned resources (`bind-i` receipt ids); rollback uninstalls the candidate and RE-INSTALLS the predecessor's binding specs; acceptance retires replaced bindings; release disposes exactly; bind targets join the integrity-protected set.
+- **Verification (I11)** — a bindKey batch has a measured postcondition (`isBound(chord)`) in the effect section; a binding-only batch can now pass with zero style checks, and a missing seam fails (never an accidental pass).
+- **Product bug found and fixed by the new fixture**: sibling sentinels shared ONE baseline key (`sentinel:<p>:sibling`), so a focusable sibling's baseline was measured against the other sibling → false "lost keyboard reachability" integrity fails. Keys are now per-sibling (`-prev`/`-next`); root-cause fix in the shared plan builder, not a fixture workaround.
+- **Workspace + planner**: the approval review renders `bind "chord" → actions on target — pressing it activates this page's own control; undo removes the shortcut, not any effect it causes` for consequential actions (plan/09 §1's mandatory distinction); the planner vocabulary documents bindKey, the catalog and the honest rules (reserved chords, exact control only).
+
+### Evidence (commands from `project/`)
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` / `npm run lint` | pass / 0 errors |
+| `npm run build` | pass — audit:imports ✓ (22 files), manifest unchanged, 429.3 kB |
+| `npm test` (×2 consecutive) | exit 0 — unit: 312/312, 0 known-red, 0 unexpected (19 suites); browser: 30/30, 0 known-red, 0 unexpected (2 suites) |
+| T15 matrix (browser, real path) | trusted CDP activation fires the site's own listener exactly once per gesture; focus/scroll sequence; default editable skip with the key REACHING the editor; approved opt-in fires in editors but never in password fields; CDP autoRepeat skipped under default policy; open dialog keeps keys; reserved chord (`Ctrl+T`), plain typing and collision refusals exact; followLink + toggleDisclosure native; save→broadcast→reload replays the shortcut with NO duplicate listener (one activation per press after reload); disable uninstalls exactly; disabled intent never replays |
+| Workspace E2E | model proposes a bindKey through the canned provider → review shows chord/actions/target + the non-reversible warning → Apply → trusted press fires once → checkbox disable uninstalls |
+| Validation gates | ≤4 actions per gesture (schema); no key consumed until eligible (decide-then-preventDefault, unit+browser); uninstall/reload no duplicates (exact-handle dispose + one-listener design, proven after reload) |
+
+### Notes / residual risks
+
+- IME composition cannot be synthesized over CDP (`Input.dispatchKeyEvent` has no isComposing parameter): the composition/repeat decisions are proven on the exported pure evaluator; the trusted-path listener is three lines. A real-IME manual check belongs to a release checklist.
+- The planner prompt still advertises collapse/float/relocate vocabulary whose executors refuse at apply (pre-existing gap, recorded in the checkpoint residual; S7.2/S8 own those executors).
+- "Conflict preview" is implemented as: the proposal review names chord/actions/target, and a colliding chord refuses at apply naming the owning customization — no runtime probe command was added for it (YAGNI; plan/03 lists none).
+- Bindings on owned local nodes work through `localRef` in the same batch (validateBindAction duck-checks apply); the insertUI node-level `actionId` attribute stays a declaration until S7.2's localRule triggers consume it.
+
+Next task: **S7.2 — Implement collapse and finite local behavior rules** (plan/09 §3, plan/28 §2; T16).
