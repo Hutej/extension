@@ -39,9 +39,11 @@ authority).
   gate. Activating a site control is approved in review and is explicitly
   non-reversible externally (undo removes the shortcut, not the site's own
   effect).
-- **Local rules** (`localRule` — S7.2): trigger/predicate/action rules such
-  as auto-collapse are not available yet; the operation decodes but has no
-  executor.
+- **Auto-collapse rules** (`localRule` — S7.2): a finite target-appeared
+  rule collapses newly appearing expanded instances through the site's own
+  disclosure (once per instance, sticky user-override, 500ms cooldown,
+  review-approved as consequential); the owned collapse disclosure
+  (`collapse`) is available as the manual mechanism.
 - **Linked alternative views / projections** (`projectCollection` — S8):
   no board/list view of a site collection exists yet.
 - **Owned Canvas 2D** (S8.4): no drawing capability yet.

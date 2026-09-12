@@ -312,6 +312,56 @@ test('buildSavedRevision: unobserved and shadow-root targets are honest errors, 
   assert.match(shadow.ok ? '' : shadow.error, /shadow root/);
 });
 
+test('S7.2: a localRule saves as a future-set instance descriptor with all refs mapped', () => {
+  const ruleRegion = (ref: string, tag: string, name?: string): PageSnapshot['regions'][number] => ({
+    targetRef: ref,
+    rootRef: 'document',
+    kind: 'element',
+    semantics: { tag, ...(name !== undefined ? { nameApprox: name, nameSource: 'button-text' as const } : {}) },
+    geometry: { x: 0, y: 0, w: 10, h: 10, inViewport: true },
+    stability: 'session-only',
+    hidden: false,
+  });
+  const evidence = new Map([
+    ['t1', ruleRegion('t1', 'article', 'A comment')],
+    ['t2', ruleRegion('t2', 'button', 'Collapse')],
+    ['t3', ruleRegion('t3', 'section')],
+  ]);
+  const result = buildSavedRevision({
+    proposal: {
+      summary: 'Auto-collapse expanded comments',
+      operations: [
+        {
+          kind: 'localRule',
+          target: { targetRef: 't1' },
+          targetRef: 't2',
+          trigger: 'target-appeared',
+          predicates: [{ type: 'member-of', targetRef: 't3' }, { type: 'expanded-equals', value: true }],
+          actionId: 'activateDisclosure',
+        },
+      ],
+    } as Proposal,
+    evidence,
+    origin: 'https://site-b.test',
+    revisionId: 'rev-rule',
+    savedAt: 5,
+  });
+  assert.ok(result.ok, JSON.stringify(result));
+  if (!result.ok) return;
+  const [instance, affordance, container] = result.revision.targetDescriptors;
+  assert.equal(instance.selection, 'set', 'a rule instance target is a bounded future-set');
+  assert.equal(instance.continuityPolicy, 'future-set');
+  assert.equal(instance.matchBounds.max, 64);
+  assert.equal(instance.anchor.tag, 'article');
+  assert.equal(affordance.selection, 'single');
+  assert.equal(affordance.anchor.accessibleLabel, 'Collapse');
+  assert.equal(container.anchor.tag, 'section');
+  const op = result.revision.operations[0] as { target: { targetRef?: string }; targetRef?: string; predicates: Array<{ type: string; targetRef?: string }> };
+  assert.equal(op.target.targetRef, 'd0');
+  assert.equal(op.targetRef, 'd1');
+  assert.equal(op.predicates.find((p) => p.type === 'member-of')!.targetRef, 'd2');
+});
+
 test('refsOfProposal: style/hide/relocate/localRule refs are all collected', () => {
   const refs = refsOfProposal({
     ...PROPOSAL,

@@ -232,6 +232,9 @@ export function refsOfProposal(proposal: Proposal): string[] {
       case 'localRule':
         note(op.target);
         if (op.targetRef !== undefined) refs.add(op.targetRef);
+        for (const predicate of op.predicates ?? []) {
+          if (predicate.type === 'member-of') refs.add(predicate.targetRef);
+        }
         break;
       case 'bindKey':
         note(op.target);
@@ -257,7 +260,18 @@ function rewriteRefs(proposal: Proposal, refToIndex: Map<string, number>): Propo
       case 'relocate':
         return { ...op, target: map(op.target), destination: map(op.destination) };
       case 'localRule':
-        return { ...op, target: map(op.target) };
+        return {
+          ...op,
+          target: map(op.target),
+          ...(op.targetRef !== undefined ? { targetRef: map({ targetRef: op.targetRef }).targetRef } : {}),
+          ...(op.predicates !== undefined
+            ? {
+                predicates: op.predicates.map((p) =>
+                  p.type === 'member-of' ? { ...p, targetRef: map({ targetRef: p.targetRef }).targetRef! } : p,
+                ),
+              }
+            : {}),
+        };
       case 'bindKey':
         return op.target ? { ...op, target: map(op.target) } : op;
       default:
@@ -291,6 +305,13 @@ export function buildSavedRevision(input: SavedRevisionInput): SavedRevisionResu
   const refs = refsOfProposal(input.proposal);
   const refToIndex = new Map<string, number>();
   const descriptors: Revision['targetDescriptors'] = [];
+  // S7.2: a rule's instance target addresses a PATTERN (new matching
+  // instances are picked up by reconciliation), so its descriptor is a
+  // bounded future-set instead of a single observed node.
+  const ruleInstanceRefs = new Set<string>();
+  for (const op of input.proposal.operations) {
+    if (op.kind === 'localRule' && op.target.targetRef !== undefined) ruleInstanceRefs.add(op.target.targetRef);
+  }
   for (const ref of refs) {
     const region = input.evidence.get(ref);
     if (region === undefined) {
@@ -314,16 +335,17 @@ export function buildSavedRevision(input: SavedRevisionInput): SavedRevisionResu
     if (Object.keys(anchor).length === 0) {
       return { ok: false, error: `target "${ref}" has no stable anchor evidence (tag unknown); it cannot be saved` };
     }
+    const isRuleInstance = ruleInstanceRefs.has(ref);
     refToIndex.set(ref, descriptors.length);
     descriptors.push({
       descriptorVersion: 1,
       rootPath: [],
-      selection: 'single',
+      selection: isRuleInstance ? 'set' : 'single',
       anchor,
       relation: 'self',
-      matchBounds: { min: 1, max: 1 },
+      matchBounds: isRuleInstance ? { min: 1, max: 64 } : { min: 1, max: 1 },
       routeScopeRef: input.origin,
-      continuityPolicy: 'stable-single',
+      continuityPolicy: isRuleInstance ? 'future-set' : 'stable-single',
     });
   }
   const operations = rewriteRefs(input.proposal, refToIndex);
@@ -1593,6 +1615,19 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
         return consequential
           ? `${base} — pressing it activates this page's own control; undo removes the shortcut, not any effect it causes`
           : base;
+      }
+      case 'collapse':
+        return `add a disclosure toggle “${op.label}” ${op.placement ?? 'before'} ${firstRef(op.target)} (starts ${op.initialState ?? 'collapsed'}; you can always expand)`;
+      case 'localRule': {
+        // plan/09 §3: the automatic trigger acts WITHOUT a gesture — the
+        // review must say what will be clicked and that undo removes the
+        // rule, not effects already caused.
+        const base = `rule: when a new matching element appears ${firstRef(op.target)}`;
+        if (op.actionId === 'activateDisclosure') {
+          return `${base}, click its own disclosure control automatically — undo removes the rule, not collapses it already caused`;
+        }
+        if (op.actionId === 'focus') return `${base}, focus it`;
+        return `${base}, ${op.actionId}`;
       }
       default:
         return `${op.kind} on ${firstRef('target' in op ? op.target : undefined)}`;

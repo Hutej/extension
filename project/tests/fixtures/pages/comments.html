@@ -1,0 +1,50 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Comment threads fixture (T16)</title>
+</head>
+<body>
+  <h1>Discussion</h1>
+  <button id="add" type="button">Add comment</button>
+  <section id="comments">
+    <article class="comment">
+      <button class="toggle" type="button" aria-expanded="true">Collapse</button>
+      <p class="body">First comment body</p>
+    </article>
+    <article class="comment">
+      <button class="toggle" type="button" aria-expanded="true">Collapse</button>
+      <p class="body">Second comment body</p>
+    </article>
+  </section>
+  <script>
+    // The site's own collapse behavior: clicking the toggle flips
+    // aria-expanded and hides the body. Revueon's rule activates THIS.
+    let seq = 2;
+    document.getElementById('comments').addEventListener('click', (ev) => {
+      const target = ev.target;
+      if (!target || !target.classList || !target.classList.contains('toggle')) return;
+      target.dataset.clicks = String(Number(target.dataset.clicks || '0') + 1);
+      const expanded = target.getAttribute('aria-expanded') === 'true';
+      target.setAttribute('aria-expanded', expanded ? 'false' : 'true');
+      const body = target.parentElement.querySelector('.body');
+      body.hidden = expanded;
+    });
+    document.getElementById('add').addEventListener('click', () => {
+      seq += 1;
+      const article = document.createElement('article');
+      article.className = 'comment';
+      const button = document.createElement('button');
+      button.className = 'toggle';
+      button.type = 'button';
+      button.setAttribute('aria-expanded', 'true');
+      button.textContent = 'Collapse';
+      const p = document.createElement('p');
+      p.className = 'body';
+      p.textContent = 'Comment number ' + seq + ' body';
+      article.append(button, p);
+      document.getElementById('comments').append(article);
+    });
+  </script>
+</body>
+</html>

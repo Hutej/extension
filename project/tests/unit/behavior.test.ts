@@ -98,7 +98,18 @@ test('the action catalog is finite and the consequential set is exactly activati
 });
 
 const htmlEl = (tag: string, extra: Record<string, unknown> = {}): Element =>
-  ({ tagName: tag.toUpperCase(), getAttribute: () => null, focus() {}, click() {}, scrollIntoView() {}, ...(extra as object) }) as unknown as Element;
+  ({
+    tagName: tag.toUpperCase(), getAttribute: () => null, focus() {}, click() {}, scrollIntoView() {},
+    contains(other: Element | null): boolean {
+      let n: Element | null = other;
+      while (n) {
+        if (n === (this as unknown as Element)) return true;
+        n = (n as unknown as { parentElement?: Element | null }).parentElement ?? null;
+      }
+      return false;
+    },
+    ...(extra as object),
+  }) as unknown as Element;
 /** An element WITHOUT the native activation methods (non-HTML node). */
 const bareEl = (tag: string, extra: Record<string, unknown> = {}): Element =>
   ({ tagName: tag.toUpperCase(), getAttribute: () => null, ...(extra as object) }) as unknown as Element;
@@ -243,4 +254,106 @@ test('the behavior core installs/disposes entries exactly; a stale predecessor h
 
   behavior.dispose();
   assert.equal(listeners.length, 0, 'dispose removes the exact listener');
+});
+
+// ── S7.2: finite local behavior rules ─────────────────────────────────────
+
+import { COLLAPSED_ATTRIBUTE, disclosureState, evaluateRule, wireCollapseToggle, type RuleSpec } from '../../src/runtime/behavior.ts';
+
+const toggle = (expanded: string | null): Element => stubEl('button', { getAttribute: (n: string) => n === 'aria-expanded' ? expanded : null });
+const detailsEl = (open: boolean): Element => stubEl('details', { hasAttribute: (n: string) => n === 'open' && open });
+
+const ruleSpec = (over: Partial<RuleSpec> = {}): RuleSpec => ({
+  customizationId: 'r1', actionId: 'activateDisclosure', predicates: [], affordance: null, ...over,
+});
+const t0 = 1_000_000;
+
+test('T16: disclosureState reads aria-expanded and native details/summary state', () => {
+  assert.equal(disclosureState(toggle('true')), true);
+  assert.equal(disclosureState(toggle('false')), false);
+  assert.equal(disclosureState(toggle(null)), null, 'no observable state');
+  assert.equal(disclosureState(detailsEl(true)), true);
+  assert.equal(disclosureState(detailsEl(false)), false);
+  const summary = stubEl('summary', { parentElement: detailsEl(true) });
+  assert.equal(disclosureState(summary), true);
+});
+
+test('T16: a rule fires ONCE per instance — a user expansion afterwards is never re-collapsed', () => {
+  const instance = stubEl('article', { textContent: 'A comment' });
+  const aff = toggle('true');
+  const clicks: string[] = [];
+  const clickAff = { ...aff, click: () => { clicks.push('x'); } } as unknown as Element;
+  const rule = ruleSpec({ affordance: clickAff });
+  assert.equal(evaluateRule(rule, instance, clickAff, t0), true);
+  assert.equal(clicks.length, 1);
+  assert.equal(evaluateRule(rule, instance, clickAff, t0 + 10_000), false, 'once per instance, sticky');
+  assert.equal(clicks.length, 1, 'the user-expanded instance is never re-acted on');
+});
+
+test('T16: the runtime-controlled cooldown bounds re-fires within 500ms (different instances unaffected)', () => {
+  const a = stubEl('article');
+  const b = stubEl('article');
+  const aff = { ...toggle('true'), click: () => {} } as unknown as Element;
+  const rule = ruleSpec({ affordance: aff });
+  assert.equal(evaluateRule(rule, a, aff, t0), true);
+  assert.equal(evaluateRule(rule, a, aff, t0 + 100), false, 'inside the cooldown');
+  assert.equal(evaluateRule(rule, a, aff, t0 + 600), false, 'cooldown passed but once-per-instance holds');
+  assert.equal(evaluateRule(rule, b, aff, t0 + 100), true, 'another instance is independent');
+});
+
+test('T16: predicates are a conjunction — member-of, expanded-equals, text-contains', () => {
+  const container = stubEl('section');
+  const inside = stubEl('article', { textContent: 'spam comment', parentElement: container });
+  const outside = stubEl('article', { textContent: 'spam comment' });
+  const aff = { ...toggle('true'), click: () => {} } as unknown as Element;
+  const rule = ruleSpec({
+    predicates: [
+      { type: 'member-of', element: container },
+      { type: 'expanded-equals', value: true },
+      { type: 'text-contains', literal: 'spam' },
+    ],
+    affordance: aff,
+  });
+  assert.equal(evaluateRule(rule, inside, aff, t0), true, 'all predicates hold');
+  assert.equal(evaluateRule(rule, outside, aff, t0), false, 'member-of fails');
+  const collapsedAff = { ...toggle('false'), click: () => {} } as unknown as Element;
+  assert.equal(evaluateRule(rule, inside, collapsedAff, t0 + 1000), false, 'expanded-equals fails (already collapsed)');
+  const noState = stubEl('button', { getAttribute: () => null });
+  assert.equal(evaluateRule(rule, inside, noState, t0 + 1000), false, 'no observable state never matches');
+});
+
+test('T16: a throwing site handler consumes the one attempt without throwing', () => {
+  const instance = stubEl('article');
+  const aff = { ...toggle('true'), click: () => { throw new Error('site handler broke'); } } as unknown as Element;
+  assert.doesNotThrow(() => evaluateRule(ruleSpec({ affordance: aff }), instance, aff, t0));
+  assert.equal(evaluateRule(ruleSpec({ affordance: aff }), instance, aff, t0 + 10_000), false, 'never re-fires');
+});
+
+// ── S7.2: owned collapse toggle wiring ────────────────────────────────────
+
+test('the owned toggle flips aria-expanded and the collapsed-state attribute exactly', () => {
+  const listeners: Array<[string, () => void]> = [];
+  const toggleEl = {
+    tagName: 'BUTTON', getAttribute: (n: string) => n === 'aria-expanded' ? 'true' : null,
+    setAttribute: () => {}, removeAttribute: () => {},
+    addEventListener: (t: string, fn: () => void) => { listeners.push([t, fn]); },
+    removeEventListener: (t: string, fn: () => void) => {
+      const i = listeners.findIndex(([tt, f]) => tt === t && f === fn);
+      if (i !== -1) listeners.splice(i, 1);
+    },
+  } as unknown as HTMLElement;
+  const targetAttrs = new Map<string, string>();
+  const target = {
+    tagName: 'ARTICLE',
+    getAttribute: (n: string) => targetAttrs.get(n) ?? null,
+    setAttribute: (n: string, v: string) => { targetAttrs.set(n, v); },
+    removeAttribute: (n: string) => { targetAttrs.delete(n); },
+  } as unknown as Element;
+
+  const wiring = wireCollapseToggle(toggleEl, target);
+  assert.equal(listeners.length, 1);
+  listeners[0][1](); // click → collapse
+  assert.equal(targetAttrs.get(COLLAPSED_ATTRIBUTE), '1');
+  wiring.dispose();
+  assert.equal(listeners.length, 0, 'exact listener uninstall');
 });

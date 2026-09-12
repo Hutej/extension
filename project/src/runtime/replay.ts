@@ -26,6 +26,7 @@
  * once; a group pauses after two conflict cycles within 10s (plan/13 §5).
  */
 
+import { LIMITS } from '../contracts.ts';
 import type { Customization, RouteScope } from '../contracts.ts';
 import { createTargetRegistry, type ResolvedTargetRegistry } from './targets.ts';
 import type { BatchReceipt, Transaction } from './transaction.ts';
@@ -248,21 +249,44 @@ export function createReplay(deps: ReplayDeps): ReplayCore {
    *  reference `d<i>` = targetDescriptors[i]; replay rewrites them to fresh
    *  session refs after resolution. Unresolvable refs are rejected here —
    *  stale observation tokens can never reach the transaction. */
-  const buildBatch = (entry: LiveEntry): { batch: Parameters<Transaction['applyBatch']>[0] } | { fail: DescriptorFailure } => {
+  const buildBatch = (entry: LiveEntry): { batch: Parameters<Transaction['applyBatch']>[0]; ruleCoverage?: string } | { fail: DescriptorFailure } => {
     const rev = entry.customization.revisions.find((r) => r.revisionId === entry.customization.activeRevisionId);
     if (!rev) return { fail: { ok: false, reason: 'unsupported', detail: 'the active revision is not stored on the record' } };
     const refMap = new Map<string, string>();
     const memberRefs: string[] = [];
+    /** S7.2: descriptors referenced ONLY as a rule's affordance resolve
+     *  RELATIVE to each instance — document-wide they are naturally
+     *  ambiguous (one disclosure per instance) and must never gate the
+     *  replay. */
+    const affordanceOnly = new Set<number>();
+    for (const op of rev.operations) {
+      if (op.kind === 'localRule' && op.targetRef !== undefined) {
+        const idx = Number.parseInt(op.targetRef.slice(1), 10);
+        if (!Number.isNaN(idx)) affordanceOnly.add(idx);
+      }
+    }
+    /** S7.2: per-descriptor member (ref, element) pairs, in resolution
+     *  order — the rule expansion addresses each member individually. */
+    const descriptorRefs: Array<Array<{ ref: string; el: Element }>> = [];
     for (let i = 0; i < rev.targetDescriptors.length; i++) {
+      if (affordanceOnly.has(i)) {
+        descriptorRefs.push([]);
+        continue;
+      }
       const outcome = resolveDescriptor(deps.doc, rev.targetDescriptors[i]);
       if (!outcome.ok) return { fail: outcome };
+      const members: Array<{ ref: string; el: Element }> = [];
       for (const el of outcome.elements) {
         const ref = deps.targets.register(el, deps.targets.roots()[0]?.rootId ?? deps.targets.registerRoot(deps.doc), rev.targetDescriptors[i].anchor.role, deps.now(), rev.targetDescriptors[i].anchor.role !== undefined);
         refMap.set(`d${i}`, ref);
         memberRefs.push(ref);
+        members.push({ ref, el });
       }
+      descriptorRefs.push(members);
     }
-    const rewritten = rev.operations.map((op) => {
+    const rewritten: Parameters<Transaction['applyBatch']>[0]['operations'] = [];
+    let ruleCoverage: string | undefined;
+    for (const op of rev.operations) {
       const clone = structuredClone(op) as typeof op;
       // Every op kind carries its site targets in one of these slots (plan/04
       // §3 grammar). Local refs (insertUI/localRef) stay untouched.
@@ -282,7 +306,6 @@ export function createReplay(deps: ReplayDeps): ReplayCore {
         case 'float':
         case 'replaceText':
         case 'insertUI':
-        case 'localRule':
         case 'projectCollection':
           retarget(clone.target);
           break;
@@ -293,9 +316,52 @@ export function createReplay(deps: ReplayDeps): ReplayCore {
           retarget(clone.target);
           retarget(clone.destination);
           break;
+        case 'localRule': {
+          // S7.2: the rule's saved target is a future-set descriptor — the
+          // rule expands to ONE op per current member, each with its own
+          // affordance resolved RELATIVE to that member (the same validated
+          // anchor semantics, never a guessed selector). Member growth is
+          // picked up by the next reconcile pass (release + re-apply); the
+          // behavior engine's sticky once-per-instance state keeps user
+          // overrides intact across re-applies.
+          if (clone.target.targetRef === undefined) throw new Error('a saved rule must reference a descriptor');
+          const instanceDescriptorIndex = Number.parseInt(clone.target.targetRef.slice(1), 10);
+          const members = descriptorRefs[instanceDescriptorIndex] ?? [];
+          let affordanceDescriptor: Parameters<typeof resolveDescriptor>[1] | null = null;
+          if (clone.targetRef !== undefined) {
+            const affIndex = Number.parseInt(clone.targetRef.slice(1), 10);
+            const saved = rev.targetDescriptors[affIndex];
+            if (!saved) throw new Error(`saved rule references unknown affordance descriptor "${clone.targetRef}"`);
+            // Relative form: resolve WITHIN each member instance.
+            affordanceDescriptor = { ...saved, rootPath: [], relation: 'self' };
+          }
+          let expanded = 0;
+          for (const member of members) {
+            if (rewritten.length >= LIMITS.maxOperations) break;
+            let affordanceRef: string | undefined;
+            if (affordanceDescriptor) {
+              const aff = resolveDescriptor(member.el as unknown as Document, affordanceDescriptor);
+              if (!aff.ok || aff.elements.length !== 1) continue; // ambiguous/missing affordance: instance is skipped honestly
+              const affRef = deps.targets.register(aff.elements[0], deps.targets.roots()[0]?.rootId ?? deps.targets.registerRoot(deps.doc), undefined, deps.now(), false);
+              affordanceRef = affRef;
+            }
+            const predicates = (clone.predicates ?? []).map((p) =>
+              p.type === 'member-of'
+                ? { ...p, targetRef: refMap.get(p.targetRef) ?? p.targetRef }
+                : p,
+            );
+            rewritten.push({ ...clone, target: { targetRef: member.ref }, ...(affordanceRef !== undefined ? { targetRef: affordanceRef } : {}), ...(clone.predicates !== undefined ? { predicates } : {}) });
+            expanded += 1;
+          }
+          if (members.length > expanded) {
+            ruleCoverage = `rule expanded to ${expanded} of ${members.length} matching instances (batch limit)`;
+          }
+          entry.memberRefs = memberRefs;
+          continue; // already pushed expanded forms
+        }
       }
-      return clone;
-    });
+      rewritten.push(clone);
+    }
     entry.memberRefs = memberRefs;
     entry.memberCount = memberRefs.length;
     return {
@@ -305,6 +371,7 @@ export function createReplay(deps: ReplayDeps): ReplayCore {
         revisionId: rev.revisionId,
         operations: rewritten,
       },
+      ...(ruleCoverage !== undefined ? { ruleCoverage } : {}),
     };
   };
 
@@ -349,7 +416,9 @@ export function createReplay(deps: ReplayDeps): ReplayCore {
     const receipt: BatchReceipt = await deps.transaction.applyBatch(built.batch);
     if (receipt.status === 'accepted') {
       entry.state = 'applied';
-      entry.detail = undefined;
+      // S7.2: honest partial rule coverage (batch-limited expansion) —
+      // never full success with missing coverage (plan/13 §4.5).
+      entry.detail = built.ruleCoverage;
     } else {
       entry.rollbackTimes.push(deps.now());
       if (entry.state === 'applied' || conflictsRecently(entry)) {

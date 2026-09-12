@@ -447,6 +447,7 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     rectOf: (el) => el.getBoundingClientRect(),
     recheckWait: () => new Promise((resolve) => setTimeout(resolve, 60)),
     isBound: (normalized: string) => behavior.isBound(normalized),
+    hasRule: (customizationId: string) => behavior.hasRule(customizationId),
   });
 
   // S4.2: the one-batch transaction — the runtime's only mutation path (I03:

@@ -210,6 +210,7 @@ export function createObservationEngine(deps: ObservationDeps, targets: Resolved
       if (tag === 'button' || tag === 'a' || tag === 'input' || tag === 'select' || tag === 'textarea') {
         const controlType = tag === 'input' ? (el.getAttribute('type') ?? 'text').toLowerCase() : undefined;
         const actionId = `a${actions.length + 1}`;
+        const ariaExpanded = el.getAttribute('aria-expanded');
         actions.push({
           actionId,
           kind: tag === 'button' ? (controlType === 'submit' ? 'submit' : 'button')
@@ -219,6 +220,7 @@ export function createObservationEngine(deps: ObservationDeps, targets: Resolved
           targetRef: ref,
           ...(controlType !== undefined && !isSensitiveControl(el) ? { controlType } : {}),
           disabled: (el as HTMLButtonElement).disabled === true || el.getAttribute('aria-disabled') === 'true',
+          ...(ariaExpanded === 'true' || ariaExpanded === 'false' ? { expanded: ariaExpanded === 'true' } : {}),
         });
         region.affordances = [actionId];
       }

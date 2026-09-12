@@ -187,6 +187,7 @@ function makeWorld() {
       rechecks += 1;
     },
     isBound: () => true,
+    hasRule: () => true,
   };
   const verifier = createVerifier(deps);
   return { doc, docEl, styles, verifier, deps, recheckCount: () => rechecks };
@@ -200,6 +201,8 @@ const basePlan = (overrides: Partial<VerifyPlan> = {}): VerifyPlan => ({
   styles: [],
   hides: [],
   bindings: [],
+  collapses: [],
+  rules: [],
   texts: [],
   inserts: [],
   protectedEls: [],

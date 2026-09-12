@@ -41,6 +41,9 @@ interface StubNode {
   /** S7.1: native activation/focus/scroll duck methods + parentElement. */
   parentElement?: StubNode | null;
   click?(): void;
+  addEventListener?(type: string, fn: () => void): void;
+  removeEventListener?(type: string, fn: () => void): void;
+  contains?(other: StubNode | null): boolean;
   focus?(): void;
   scrollIntoView?(opts?: unknown): void;
   getRootNode(): StubNode;
@@ -56,10 +59,28 @@ interface StubNode {
 }
 
 function makeNode(nodeType: number, tagOrValue: string): StubNode {
+  const listeners: Array<[string, () => void]> = [];
+  const containsFn = (self: StubNode, other: StubNode | null): boolean => {
+    let n: StubNode | null = other;
+    while (n) {
+      if (n === self) return true;
+      n = n.parentElement ?? null;
+    }
+    return false;
+  };
   const node: StubNode = {
     nodeType,
     ...(nodeType === 1
-      ? { tagName: tagOrValue.toUpperCase(), isContentEditable: false }
+      ? {
+          tagName: tagOrValue.toUpperCase(),
+          isContentEditable: false,
+          addEventListener: (t: string, fn: () => void) => { listeners.push([t, fn]); },
+          removeEventListener: (t: string, fn: () => void) => {
+            const i = listeners.findIndex(([tt, f]) => tt === t && f === fn);
+            if (i !== -1) listeners.splice(i, 1);
+          },
+          contains: (other: StubNode | null) => containsFn(node, other),
+        }
       : { nodeValue: tagOrValue }),
     attrs: new Map<string, string>(),
     children: [],
@@ -79,6 +100,10 @@ function makeNode(nodeType: number, tagOrValue: string): StubNode {
     },
     removeAttribute(name) {
       node.attrs.delete(name);
+    },
+    get parentElement(): StubNode | null {
+      const p = node.parentNode;
+      return p && p.nodeType === 1 ? p : null;
     },
     get isConnected(): boolean {
       let p: StubNode = node;
@@ -128,7 +153,13 @@ const activatable = (tag: string): StubNode => {
   node.click = () => {};
   node.focus = () => {};
   node.scrollIntoView = () => {};
-  node.parentElement = null;
+  const listeners: Array<[string, () => void]> = [];
+  node.addEventListener = (t: string, fn: () => void) => { listeners.push([t, fn]); };
+  node.removeEventListener = (t: string, fn: () => void) => {
+    const i = listeners.findIndex(([tt, f]) => tt === t && f === fn);
+    if (i !== -1) listeners.splice(i, 1);
+  };
+  (node as StubNode & { __listeners(): number }).__listeners = () => listeners.length;
   return node;
 };
 
@@ -167,12 +198,17 @@ interface World {
   /** S7.1: normalized chords currently live in the fake behavior. */
   bindInstalls: string[];
   bindDisposes: string[];
+  /** S7.2: customization ids with a live rule. */
+  ruleInstalls: string[];
+  ruleDisposes: string[];
 }
 
-/** S7.1: minimal in-memory behavior double — real conflict/cap semantics
+/** S7.1+S7.2: minimal in-memory behavior double — real conflict/cap semantics
  *  via boundChords(); install/dispose recorded for rollback assertions. */
 function makeFakeBehavior(w: World): import('../../src/runtime/behavior.ts').BehaviorCore {
   const live = new Map<string, import('../../src/runtime/behavior.ts').BindingSpec>();
+  const rules = new Map<string, import('../../src/runtime/behavior.ts').RuleSpec>();
+  let ruleSeq = 0;
   return {
     install: (spec) => {
       live.set(spec.normalized, spec);
@@ -192,7 +228,17 @@ function makeFakeBehavior(w: World): import('../../src/runtime/behavior.ts').Beh
       return out;
     },
     isBound: (normalized: string) => live.has(normalized),
-    dispose: () => { live.clear(); },
+    installRule: (spec) => {
+      const key = `${spec.customizationId}#${ruleSeq++}`;
+      rules.set(key, spec);
+      w.ruleInstalls.push(spec.customizationId);
+      return { dispose: () => { rules.delete(key); w.ruleDisposes.push(spec.customizationId); } };
+    },
+    hasRule: (customizationId: string) => {
+      for (const [key, spec] of rules) if (spec.customizationId === customizationId && rules.has(key)) return true;
+      return false;
+    },
+    dispose: () => { live.clear(); rules.clear(); },
   };
 }
 
@@ -211,6 +257,12 @@ function makeStubVerifier(w: World): Verifier {
       outcomes.push(outcome('delivery:css', 'pass', 'delivery'));
       for (const b of plan.bindings) {
         outcomes.push(outcome(b.key, w.bindInstalls.some((s) => s === b.normalized) ? 'pass' : 'fail', 'effect', 'binding not installed'));
+      }
+      for (const c of plan.collapses) {
+        outcomes.push(outcome(c.key, (c.toggle as unknown as StubNode).isConnected ? 'pass' : 'fail', 'effect', 'toggle not connected'));
+      }
+      for (const r of plan.rules) {
+        outcomes.push(outcome(r.key, w.ruleInstalls.includes(r.ruleKey) ? 'pass' : 'fail', 'effect', 'rule not installed'));
       }
       for (const t of plan.texts) {
         const ok = t.node.isConnected && t.node.nodeValue === t.installed;
@@ -296,6 +348,8 @@ function makeWorld(): World {
     verifyCalls: 0,
     bindInstalls: [],
     bindDisposes: [],
+    ruleInstalls: [],
+    ruleDisposes: [],
     setStage: (o) => { stageOutcome = o; },
     setCommit: (o) => { commitOutcome = o; },
     setRemove: (o) => { removeOutcome = o; },
@@ -656,7 +710,7 @@ test('unsupported operations are refused before side effects (plan/08 §1)', asy
   const ref = observe(w, h);
   const r = await w.txn.applyBatch(req('b1', 'c1', [
     insertOp(ref, [{ tag: 'p', text: 'x' }]),
-    { kind: 'localRule', target: { targetRef: ref }, trigger: 'target-appeared', predicates: [], actionId: 'a1' },
+    { kind: 'float', target: { targetRef: ref }, edge: 'top-start' },
   ]));
   assert.equal(r.status, 'not-applied');
   assert.equal(r.error!.code, 'unsupported-capability');
@@ -916,4 +970,178 @@ test('S7.1: an accepted replacement retires the predecessor binding; the new one
   assert.equal(w.deps.behavior.boundChords().size, 1, 'exactly one live entry owns the chord');
   assert.ok(w.deps.behavior.isBound('alt+g'), 'the replacement owns the chord');
   assert.equal(w.deps.behavior.boundChords().get('alt+g'), 'keys1');
+});
+
+// ── S7.2: owned collapse disclosures + finite local rules ─────────────────
+
+test('S7.2: a collapse batch inserts an owned toggle, hides the collapsed target, and verifies both', async () => {
+  const w = makeWorld();
+  const target = activatable('article');
+  w.doc.appendChild(target);
+  const ref = observe(w, target);
+
+  const r = await w.txn.applyBatch(req('col1', 'col', [
+    { kind: 'collapse', target: { targetRef: ref }, label: 'Hide comment', initialState: 'collapsed', placement: 'before' },
+  ]));
+  assert.equal(r.status, 'accepted', JSON.stringify(r).slice(0, 400));
+  assert.deepEqual(r.resourceIds, ['aggregate-css', 'insert-0', 'collapse-0'], 'the toggle is an insert resource; the collapse rule ships in the aggregate CSS');
+  // The toggle exists as an owned child of the target's parent, BEFORE it.
+  const parent = target.parentNode!;
+  const idx = parent.childNodes.indexOf(target);
+  const toggle = parent.childNodes[idx - 1];
+  assert.ok(toggle, 'the toggle sits before the target');
+  assert.equal(toggle.tagName, 'BUTTON');
+  assert.equal(toggle.getAttribute('aria-expanded'), 'false');
+  assert.equal(target.getAttribute('data-rv2-collapsed'), '1', 'the collapsed state is an owned attribute write');
+});
+
+test('S7.2: user override is mandatory; an empty label is refused', async () => {
+  const w = makeWorld();
+  const target = activatable('article');
+  w.doc.appendChild(target);
+  const ref = observe(w, target);
+
+  const noOverride = await w.txn.applyBatch(req('col-ov', 'col', [
+    { kind: 'collapse', target: { targetRef: ref }, label: 'Hide', userOverride: false },
+  ]));
+  assert.equal(noOverride.status, 'not-applied');
+  assert.equal(noOverride.error!.code, 'invalid-schema');
+  assert.match(noOverride.error!.message, /override cannot be disabled/);
+
+  const noLabel = await w.txn.applyBatch(req('col-lb', 'col', [
+    { kind: 'collapse', target: { targetRef: ref }, label: '  ' },
+  ]));
+  assert.equal(noLabel.status, 'not-applied');
+  assert.equal(noLabel.error!.code, 'invalid-schema');
+});
+
+test('S7.2: release restores the collapse attribute baseline and removes the toggle exactly', async () => {
+  const w = makeWorld();
+  const target = activatable('article');
+  w.doc.appendChild(target);
+  const ref = observe(w, target);
+
+  const r = await w.txn.applyBatch(req('col2', 'col', [
+    { kind: 'collapse', target: { targetRef: ref }, label: 'Hide' },
+  ]));
+  assert.equal(r.status, 'accepted');
+  assert.equal(target.getAttribute('data-rv2-collapsed'), '1');
+  const parent = target.parentNode!;
+  const toggleCount = parent.childNodes.filter((n) => n.tagName === 'BUTTON').length;
+  assert.equal(toggleCount, 1);
+
+  const rel = await w.txn.releaseCustomization('col');
+  assert.equal(rel.status, 'accepted');
+  assert.equal(target.getAttribute('data-rv2-collapsed'), null, 'the site baseline (absent) is restored');
+  assert.equal(parent.childNodes.filter((n) => n.tagName === 'BUTTON').length, 0, 'the owned toggle is removed exactly');
+});
+
+test('S7.2: a failed replacement rolls the collapse back — the site attribute baseline survives', async () => {
+  const w = makeWorld();
+  const target = activatable('article');
+  w.doc.appendChild(target);
+  const ref = observe(w, target);
+
+  const first = await w.txn.applyBatch(req('col-r1', 'col', [
+    { kind: 'collapse', target: { targetRef: ref }, label: 'Hide' },
+  ]));
+  assert.equal(first.status, 'accepted');
+
+  w.verifyMode = 'fail';
+  const second = await w.txn.applyBatch(req('col-r2', 'col', [
+    { kind: 'collapse', target: { targetRef: ref }, label: 'Hide', initialState: 'expanded' },
+  ], 'col-r2-rev'));
+  assert.equal(second.status, 'rolled-back');
+  assert.equal(target.getAttribute('data-rv2-collapsed'), '1', 'the predecessor state is restored after rollback');
+  assert.ok(target.parentNode!.childNodes.some((n) => n.tagName === 'BUTTON'), 'the predecessor toggle stays');
+});
+
+test('S7.2: a target-appeared rule installs, refuses wrong triggers/actions, and releases exactly', async () => {
+  const w = makeWorld();
+  const container = activatable('section');
+  const comment = activatable('article');
+  const toggle = activatable('button');
+  toggle.setAttribute('aria-expanded', 'true');
+  comment.appendChild(toggle);
+  container.appendChild(comment);
+  w.doc.appendChild(container);
+  const containerRef = observe(w, container);
+  const commentRef = observe(w, comment);
+  const toggleRef = observe(w, toggle);
+
+  const badTrigger = await w.txn.applyBatch(req('rule-t', 'rule', [
+    { kind: 'localRule', target: { targetRef: commentRef }, trigger: 'trusted-shortcut', predicates: [], actionId: 'activateDisclosure' },
+  ]));
+  assert.equal(badTrigger.status, 'not-applied');
+  assert.equal(badTrigger.error!.code, 'unsupported-capability');
+  assert.match(badTrigger.error!.message, /no executor/);
+
+  const badAction = await w.txn.applyBatch(req('rule-a', 'rule', [
+    { kind: 'localRule', target: { targetRef: commentRef }, trigger: 'target-appeared', predicates: [], actionId: 'hideEverything' },
+  ]));
+  assert.equal(badAction.status, 'not-applied');
+  assert.equal(badAction.error!.code, 'invalid-schema');
+  assert.match(badAction.error!.message, /not in the rule action catalog/);
+
+  const ownedState = await w.txn.applyBatch(req('rule-o', 'rule', [
+    { kind: 'localRule', target: { targetRef: commentRef }, trigger: 'target-appeared', actionId: 'focus', predicates: [{ type: 'owned-state-equals', value: 'x' }] },
+  ]));
+  assert.equal(ownedState.status, 'not-applied');
+  assert.equal(ownedState.error!.code, 'unsupported-capability');
+  assert.match(ownedState.error!.message, /owned-state predicates/);
+
+  // activateDisclosure needs an affordance INSIDE the instance with an
+  // observable expanded state.
+  const noAffordance = await w.txn.applyBatch(req('rule-n', 'rule', [
+    { kind: 'localRule', target: { targetRef: commentRef }, trigger: 'target-appeared', predicates: [], actionId: 'activateDisclosure' },
+  ]));
+  assert.equal(noAffordance.status, 'not-applied');
+  assert.match(noAffordance.error!.message, /needs the disclosure affordance/);
+
+  const outside = activatable('button');
+  w.doc.appendChild(outside);
+  const outsideRef = observe(w, outside);
+  const notInside = await w.txn.applyBatch(req('rule-x', 'rule', [
+    { kind: 'localRule', target: { targetRef: commentRef }, targetRef: outsideRef, trigger: 'target-appeared', predicates: [], actionId: 'activateDisclosure' },
+  ]));
+  assert.equal(notInside.status, 'not-applied');
+  assert.match(notInside.error!.message, /must live inside/);
+
+  const ok = await w.txn.applyBatch(req('rule-ok', 'rule', [
+    { kind: 'localRule', target: { targetRef: commentRef }, targetRef: toggleRef, trigger: 'target-appeared', predicates: [{ type: 'member-of', targetRef: containerRef }, { type: 'expanded-equals', value: true }], actionId: 'activateDisclosure' },
+  ]));
+  assert.equal(ok.status, 'accepted', JSON.stringify(ok).slice(0, 400));
+  assert.deepEqual(ok.resourceIds, ['rule-0']);
+  assert.deepEqual(w.ruleInstalls, ['rule']);
+
+  // Two rule ops in one batch install two copies (replay expands one saved
+  // rule this way); they share the rule's per-instance once-set — one action
+  // per instance per customization (conservative by design).
+  const twoRules = await w.txn.applyBatch(req('rule-2', 'rule', [
+    { kind: 'localRule', target: { targetRef: commentRef }, targetRef: toggleRef, trigger: 'target-appeared', predicates: [], actionId: 'activateDisclosure' },
+    { kind: 'localRule', target: { targetRef: commentRef }, targetRef: toggleRef, trigger: 'target-appeared', predicates: [{ type: 'expanded-equals', value: false }], actionId: 'activateDisclosure' },
+  ]));
+  assert.equal(twoRules.status, 'accepted', JSON.stringify(twoRules).slice(0, 300));
+  assert.deepEqual(twoRules.resourceIds, ['rule-0', 'rule-1']);
+  assert.equal(w.ruleInstalls.length, 3, 'seed rule + two copies');
+  assert.ok(w.deps.behavior.hasRule('rule'));
+
+  const rel = await w.txn.releaseCustomization('rule');
+  assert.equal(rel.status, 'accepted');
+  assert.equal(w.ruleDisposes.length, 3, 'every installed copy uninstalled exactly');
+  assert.equal(w.deps.behavior.hasRule('rule'), false);
+});
+
+test('S7.2: a collapsed instance joins the intentional hide scope (verification exemption)', async () => {
+  const w = makeWorld();
+  const target = activatable('article');
+  w.doc.appendChild(target);
+  const ref = observe(w, target);
+
+  const r = await w.txn.applyBatch(req('col-h', 'col', [
+    { kind: 'collapse', target: { targetRef: ref }, label: 'Hide' },
+  ]));
+  assert.equal(r.status, 'accepted', JSON.stringify(r).slice(0, 400));
+  assert.equal(r.report!.status, 'pass');
+  assert.ok(r.report!.issues.every((i) => i.status === 'pass'), 'the intentional collapse is exempt from integrity failures');
 });

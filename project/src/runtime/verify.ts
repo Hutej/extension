@@ -124,6 +124,11 @@ export interface VerifyPlan {
   combined: CombinedSample[];
   /** S7.1: installed keyboard bindings — the chord must be live. */
   bindings: Array<{ key: string; normalized: string }>;
+  /** S7.2: owned collapse disclosures — the toggle must sit at its validated
+   *  anchor, and a collapsed initial state must measure display:none. */
+  collapses: Array<{ key: string; toggle: Element; expectedParent: Element | null; target: Element; collapsed: boolean }>;
+  /** S7.2: the installed local rule — it must be live. */
+  rules: Array<{ key: string; ruleKey: string }>;
   /** New extension-authored text (insertUI) for the WCAG AA contrast check. */
   ownedText: Array<{ el: Element; sample: string }>;
   tokenChecks: Array<{ key: string; el: Element; ns: string }>;
@@ -172,6 +177,8 @@ export interface VerifierDeps {
    *  in the behavior registry? A missing seam fails the check (never an
    *  accidental pass, T13). */
   isBound(normalized: string): boolean;
+  /** S7.2: measured postcondition for local rules — is this rule live? */
+  hasRule(customizationId: string): boolean;
 }
 
 // ── bounds ───────────────────────────────────────────────────────────────
@@ -466,6 +473,28 @@ export function createVerifier(deps: VerifierDeps): Verifier {
       outcomes.push(deps.isBound(b.normalized)
         ? { key: b.key, section: 'effect', status: 'pass' }
         : { key: b.key, section: 'effect', status: 'fail', detail: 'the keyboard binding is not installed in the behavior registry' });
+    }
+    for (const c of plan.collapses) {
+      if (!want(c.key)) continue;
+      const placed = c.toggle.isConnected && c.toggle.parentNode === c.expectedParent;
+      if (!placed) {
+        outcomes.push({ key: c.key, section: 'effect', status: 'fail', detail: 'the disclosure toggle is not connected at its validated anchor' });
+        continue;
+      }
+      if (!c.collapsed) {
+        outcomes.push({ key: c.key, section: 'effect', status: 'pass' });
+        continue;
+      }
+      const display = deps.computedOf(c.target)?.getPropertyValue('display');
+      outcomes.push(display === 'none'
+        ? { key: c.key, section: 'effect', status: 'pass' }
+        : { key: c.key, section: 'effect', status: 'fail', detail: `the collapsed target measures display "${display ?? 'unknown'}", not none` });
+    }
+    for (const r of plan.rules) {
+      if (!want(r.key)) continue;
+      outcomes.push(deps.hasRule(r.ruleKey)
+        ? { key: r.key, section: 'effect', status: 'pass' }
+        : { key: r.key, section: 'effect', status: 'fail', detail: 'the behavior rule is not installed in the behavior registry' });
     }
 
     // INTEGRITY (baseline-relative; stable keys)

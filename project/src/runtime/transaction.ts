@@ -47,8 +47,9 @@ import type { ContentCreator } from './content.ts';
 import type { ResolvedTargetRegistry } from './targets.ts';
 import { TOKEN_ATTRIBUTE, type TokenScope } from './styles.ts';
 import {
-  MAX_BINDINGS_PER_DOCUMENT, type BehaviorCore, type BindingSpec,
-  isBindActionId, parseChord, plainTypingChord, reservedChord, validateBindAction,
+  COLLAPSED_ATTRIBUTE, MAX_BINDINGS_PER_DOCUMENT, type BehaviorCore, type BindingSpec,
+  type CollapseWiring, type RulePredicate, type RuleSpec, disclosureState, evaluateRule, isBindActionId,
+  isRuleActionId, parseChord, plainTypingChord, reservedChord, validateBindAction, wireCollapseToggle,
 } from './behavior.ts';
 
 // ── style-delivery client seam (runtime→broker; no background import) ──
@@ -146,6 +147,10 @@ interface RevisionRecord {
   /** S7.1: this revision's installed keyboard bindings with their exact
    *  dispose handles (release/rollback own them; no listener duplication). */
   bindings: Array<{ spec: BindingSpec; handle: { dispose(): void } }>;
+  /** S7.2: this revision's installed local rule (at most one per revision). */
+  rules: Array<{ key: string; handle: { dispose(): void } }>;
+  /** S7.2: owned collapse disclosures (toggle + state attribute baseline). */
+  collapses: Array<{ target: Element; toggle: Element; attrBaseline: string | null; collapsed: boolean; wiring: CollapseWiring | null }>;
   /** Elements this revision's fragment targets (token membership). */
   elements: Element[];
   highImpact: Array<{ property: string; value: string; risk: HighImpactRisk }>;
@@ -191,7 +196,7 @@ const epochOf = (routeEpoch: number) => ({
   viewportRevision: 0,
 });
 
-const UNSUPPORTED_KINDS = new Set(['collapse', 'float', 'localRule', 'projectCollection', 'relocate']);
+const UNSUPPORTED_KINDS = new Set(['float', 'projectCollection', 'relocate']);
 
 /** A verifier that throws or answers for a different revision is UNKNOWN —
  *  never an accidental pass (T13). */
@@ -272,6 +277,9 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       // of the same source cannot newly fail. Fail closed regardless.
       if (compiled.ok) parts.push(compiled.sheet.css);
     }
+    for (const _c of rev.collapses) {
+      parts.push(`:where([data-rv2-ns="${ns}"][${COLLAPSED_ATTRIBUTE}="1"]) { display: none !important; }`);
+    }
     return parts.join('\n');
   };
 
@@ -306,6 +314,15 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     bindPreps: Array<{ spec: BindingSpec }>;
     /** Handles created in the write section (empty until then). */
     bindHandles: Array<{ dispose(): void }>;
+    /** S7.2: owned collapse disclosures to build in the write section. */
+    collapsePreps: Array<{ target: Element; toggle: Element; attrBaseline: string | null; collapsed: boolean; expectedToggleParent: Element | null }>;
+    /** S7.2: the revision's rule(s) — one saved rule expands to per-member
+     *  copies (seed evaluation deferred to post-acceptance: an external
+     *  click must never survive a rollback). */
+    rulePreps: Array<{ spec: RuleSpec; seed: Element }>;
+    /** Handles created in the write section (empty until then). */
+    collapseWiring: CollapseWiring[];
+    ruleHandles: Array<{ dispose(): void }>;
     droppedTexts: Array<{ node: Text; siteBaseline: string; predecessorInstalled: string }>;
     aggregateCss: string | null;
     replaces: RevisionRecord | undefined;
@@ -346,6 +363,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     const inserts: PreparedBatch['inserts'] = [];
     const bindPreps: PreparedBatch['bindPreps'] = [];
     const batchChords = new Set<string>();
+    const collapsePreps: PreparedBatch['collapsePreps'] = [];
+    const rulePreps: PreparedBatch['rulePreps'] = [];
     const highImpact: PreparedBatch['highImpact'] = [];
     const newClaims = new Set<Text>();
     const styleRuleEls: Element[][] = [];
@@ -546,6 +565,137 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `bind:${i}`, bindTarget.el);
           break;
         }
+        case 'collapse': {
+          // S7.2 (plan/08 §1/§7): owned accessible disclosure controlling
+          // local presentation. User override is MANDATORY — the toggle is
+          // always installed; the model cannot disable it.
+          if (op.userOverride === false) {
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.userOverride: collapse user override cannot be disabled`)) };
+          }
+          if (op.label.trim() === '') {
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.label: the disclosure toggle needs a non-empty accessible label`)) };
+          }
+          const collapseTarget = resolveTarget(op.target, `${path}.target`);
+          if (!collapseTarget.ok) return { ok: false, receipt: refuse(req, digest, collapseTarget.error) };
+          const placement = op.placement ?? 'before';
+          const toggleLocalId = `rv-collapse-${i}`;
+          const toggleOp = {
+            kind: 'insertUI', target: op.target, position: placement,
+            nodes: [{
+              localId: toggleLocalId, tag: 'button', text: op.label,
+              attributes: { type: 'button', 'aria-expanded': op.initialState === 'expanded' ? 'true' : 'false' },
+            }],
+          } as import('../contracts.ts').InsertUiOperation;
+          const togglePlan = compileInsertUi(toggleOp);
+          if (!togglePlan.ok) {
+            const first = togglePlan.diagnostics[0];
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.${first.path}: ${first.message}`)) };
+          }
+          const builtToggle = deps.content.build(togglePlan.plan);
+          if (!builtToggle.ok) {
+            const first = builtToggle.diagnostics[0];
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.${first.path}: ${first.message}`)) };
+          }
+          const toggle = builtToggle.byLocalId.get(toggleLocalId);
+          if (!toggle) {
+            return { ok: false, receipt: refuse(req, digest, err('internal', 'validate', `${path}: the disclosure toggle did not build`)) };
+          }
+          try {
+            deps.content.checkPlacement(collapseTarget.el, placement, builtToggle.roots);
+          } catch (e) {
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}: ${(e as Error).message}`)) };
+          }
+          for (const [localId, el] of builtToggle.byLocalId) batchLocal.set(localId, el);
+          inserts.push({ anchor: collapseTarget.el, position: placement, roots: builtToggle.roots });
+          // The collapsed element is an INTENTIONAL hide scope member when it
+          // starts collapsed (same exemption policy as the hide operation).
+          const collapsed = op.initialState !== 'expanded';
+          if (collapsed) hideScope.push(collapseTarget.el);
+          // The target joins the composition token scope: the collapse rule
+          // (token + owned state attribute) reaches it; release removes the
+          // token with the rest of the fragment.
+          candidateElements.push(collapseTarget.el);
+          collapsePreps.push({
+            target: collapseTarget.el,
+            toggle,
+            attrBaseline: collapseTarget.el.getAttribute(COLLAPSED_ATTRIBUTE),
+            collapsed,
+            expectedToggleParent: (placement === 'before' || placement === 'after'
+              ? collapseTarget.el.parentNode
+              : collapseTarget.el) as Element | null,
+          });
+          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `collapse:${i}`, collapseTarget.el);
+          break;
+        }
+        case 'localRule': {
+          // S7.2 (plan/09 §3, plan/08 §7): finite trigger/predicate/action
+          // rules; the runtime owns once/cooldown/override. Replay expands
+          // one saved rule into per-member copies that share the rule's
+          // once-per-instance key.
+          if (op.trigger !== 'target-appeared') {
+            return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${path}.trigger: "${op.trigger}" has no executor in this revision; it was not executed`, 're-propose with trigger "target-appeared"')) };
+          }
+          if (!isRuleActionId(op.actionId)) {
+            return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.actionId: "${op.actionId}" is not in the rule action catalog (activateDisclosure, focus)`)) };
+          }
+          const ruleTarget = resolveTarget(op.target, `${path}.target`);
+          if (!ruleTarget.ok) return { ok: false, receipt: refuse(req, digest, ruleTarget.error) };
+          const predicates: RulePredicate[] = [];
+          for (const [pi, predicate] of (op.predicates ?? []).entries()) {
+            const ppath = `${path}.predicates[${pi}]`;
+            switch (predicate.type) {
+              case 'member-of': {
+                const member = deps.targets.resolve(predicate.targetRef, epoch);
+                if (!member.ok) {
+                  return { ok: false, receipt: refuse(req, digest, err(member.reason === 'missing' ? 'unknown-target' : 'stale-target', 'validate', `${ppath}: ${member.detail}`)) };
+                }
+                predicates.push({ type: 'member-of', element: member.node });
+                break;
+              }
+              case 'expanded-equals':
+                predicates.push({ type: 'expanded-equals', value: predicate.value });
+                break;
+              case 'text-contains':
+                predicates.push({ type: 'text-contains', literal: predicate.literal });
+                break;
+              case 'owned-state-equals':
+                return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${ppath}: owned-state predicates have no executor in this revision; it was not executed`)) };
+            }
+          }
+          let affordance: Element | null = null;
+          if (op.targetRef !== undefined) {
+            const aff = deps.targets.resolve(op.targetRef, epoch);
+            if (!aff.ok) {
+              return { ok: false, receipt: refuse(req, digest, err(aff.reason === 'missing' ? 'unknown-target' : 'stale-target', 'validate', `${path}.targetRef: ${aff.detail}`)) };
+            }
+            if (aff.rootId !== 'document') {
+              return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${path}.targetRef: the affordance lives in root "${aff.rootId}"; rules address document-root instances`)) };
+            }
+            affordance = aff.node;
+            if (!ruleTarget.el.contains(affordance)) {
+              return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${path}.targetRef: the disclosure affordance must live inside the rule's target instance`)) };
+            }
+          }
+          if (op.actionId === 'activateDisclosure') {
+            if (affordance === null) {
+              return { ok: false, receipt: refuse(req, digest, err('invalid-schema', 'validate', `${path}.targetRef: activateDisclosure needs the disclosure affordance ref`)) };
+            }
+            if (disclosureState(affordance) === null) {
+              return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${path}.targetRef: the affordance exposes no observable expanded state (aria-expanded or a native details/summary)`)) };
+            }
+          }
+          if (op.actionId === 'focus') {
+            const focusable = validateBindAction('focus', ruleTarget.el);
+            if (!focusable.ok) {
+              return { ok: false, receipt: refuse(req, digest, err('unsupported-capability', 'validate', `${path}: action "focus" is unsupported on this target: ${focusable.detail}`)) };
+            }
+          }
+          rulePreps.push({
+            spec: { customizationId: req.customizationId, actionId: op.actionId, predicates, affordance },
+            seed: ruleTarget.el,
+          });
+          break;
+        }
       }
     }
 
@@ -567,6 +717,11 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       }
       fragmentCss = compiled.css;
       highImpact.push(...compiled.highImpact);
+    }
+    // S7.2: one deterministic collapse rule per owned disclosure — the token
+    // marks membership, the owned state attribute carries the toggle state.
+    for (const _c of collapsePreps) {
+      fragmentCss += `\n:where([data-rv2-ns="${nsNew}"][${COLLAPSED_ATTRIBUTE}="1"]) { display: none !important; }`;
     }
 
     // Candidate aggregate = unchanged accepted fragments (recompiled under
@@ -688,6 +843,14 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       combined,
       ownedText: ownedTextSamples,
       bindings: bindPreps.map((b, j) => ({ key: `effect:bind:${j}`, normalized: b.spec.normalized })),
+      collapses: collapsePreps.map((c, j) => ({
+        key: `effect:collapse:${j}`,
+        toggle: c.toggle,
+        expectedParent: c.expectedToggleParent,
+        target: c.target,
+        collapsed: c.collapsed,
+      })),
+      rules: rulePreps.map((_, j) => ({ key: `effect:rule:${j}`, ruleKey: req.customizationId })),
       tokenChecks: candidateElements.map((el, j) => ({ key: `delivery:token:${j}`, el, ns: nsNew })),
       unmeasuredDecls: unmeasured,
     };
@@ -706,6 +869,10 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         inserts,
         bindPreps,
         bindHandles: [],
+        collapsePreps,
+        rulePreps,
+        collapseWiring: [],
+        ruleHandles: [],
         droppedTexts,
         aggregateCss,
         replaces: replaced,
@@ -727,6 +894,14 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     }
     for (const bind of prepared.bindPreps) {
       if (!bind.spec.target.isConnected) return err('stale-target', 'apply', 'a keyboard binding target left the document after CSS delivery', 'no activation on stale targets');
+    }
+    for (const c of prepared.collapsePreps) {
+      // Only the target is a live-document identity; the toggle is built
+      // detached and inserted during the write section.
+      if (!c.target.isConnected) return err('stale-target', 'apply', 'a collapse target left the document after CSS delivery', 'no activation on stale targets');
+    }
+    for (const prep of prepared.rulePreps) {
+      if (!prep.seed.isConnected) return err('stale-target', 'apply', 'a behavior rule target left the document after CSS delivery', 'no activation on stale targets');
     }
     for (const op of prepared.styleOps) {
       for (const rule of op.rules) {
@@ -851,6 +1026,28 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       }
       for (const t of prepared.textPreps) t.node.nodeValue = t.installed;
       for (const ins of prepared.inserts) deps.content.insert(ins.anchor, ins.position, ins.roots);
+      // S7.2: collapse state + wiring. The attribute write is an OWNED
+      // mutation (site baseline recorded at prepare, restored on release/
+      // rollback); the toggle listener lives on the OWNED button. A replaced
+      // revision's collapse state yields to the successor's declaration.
+      if (prepared.replaces) {
+        for (const c of prepared.replaces.collapses) {
+          if (c.attrBaseline === null) c.target.removeAttribute(COLLAPSED_ATTRIBUTE);
+          else c.target.setAttribute(COLLAPSED_ATTRIBUTE, c.attrBaseline);
+        }
+      }
+      for (const c of prepared.collapsePreps) {
+        if (c.collapsed) c.target.setAttribute(COLLAPSED_ATTRIBUTE, '1');
+      }
+      for (const c of prepared.collapsePreps) {
+        prepared.collapseWiring.push(wireCollapseToggle(c.toggle as HTMLElement, c.target));
+      }
+      // S7.2: rules install here (a reversible resource); their seed
+      // actions fire only AFTER acceptance — an external click must never
+      // survive a rollback.
+      for (const prep of prepared.rulePreps) {
+        prepared.ruleHandles.push(deps.behavior.installRule(prep.spec));
+      }
       // S7.1: bindings install AFTER all other native writes, in batch order —
       // exact registry entries under the transaction's ownership.
       for (const bind of prepared.bindPreps) prepared.bindHandles.push(deps.behavior.install(bind.spec));
@@ -910,10 +1107,17 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         if (!prepared.textPreps.some((p) => p.node === t.node)) textClaims.delete(t.node);
       }
       deps.content.remove(replacedOwned);
-    // The replaced revision's bindings retire with it (stale handles over a
-    // same-chord successor entry are exact no-ops).
+    // The replaced revision's bindings, rules and collapse wiring retire
+    // with it (its toggle nodes go with replacedOwned; its attribute state
+    // was already yielded to the successor's declaration in the write
+    // section). Stale handles over a same-chord successor entry are exact
+    // no-ops.
     if (prepared.replaces) {
       for (const b of prepared.replaces.bindings) b.handle.dispose();
+      for (const r of prepared.replaces.rules) r.handle.dispose();
+      for (const c of prepared.replaces.collapses) {
+        if (c.wiring) c.wiring.dispose();
+      }
     }
     }
     for (const t of prepared.textPreps) textClaims.set(t.node, req.customizationId);
@@ -942,17 +1146,38 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       texts: prepared.textPreps.map((t) => ({ node: t.node, siteBaseline: t.siteBaseline, installed: t.installed })),
       ownedNodes: prepared.inserts.flatMap((i) => i.roots),
       bindings: prepared.bindHandles.map((handle, j) => ({ spec: prepared.bindPreps[j]!.spec, handle })),
+      rules: prepared.ruleHandles.map((handle, j) => ({ key: req.customizationId, handle, ruleKey: req.customizationId })),
+      collapses: prepared.collapsePreps.map((c, j) => ({
+        target: c.target,
+        toggle: c.toggle,
+        attrBaseline: c.attrBaseline,
+        collapsed: c.collapsed,
+        wiring: prepared.collapseWiring[j] ?? null,
+      })),
       elements: prepared.candidateElements,
       highImpact: prepared.highImpact,
       decls: prepared.candidateDecls,
     };
     revisions.set(req.customizationId, record);
 
+    // S7.2: each rule copy's SEED action fires only now — post-acceptance,
+    // so an external (non-reversible) click can never survive a rollback.
+    // The once-per-instance state marks the attempt either way (plan/09 §3).
+    for (const prep of prepared.rulePreps) {
+      try {
+        evaluateRule(prep.spec, prep.seed, prep.spec.affordance, deps.now());
+      } catch {
+        /* a throwing site handler consumed the one attempt; the rule stays */
+      }
+    }
+
     const resourceIds = [
       ...(prepared.aggregateCss !== null ? ['aggregate-css'] : []),
       ...prepared.textPreps.map((_, i) => `text-${i}`),
       ...prepared.inserts.map((_, i) => `insert-${i}`),
       ...prepared.bindPreps.map((_, i) => `bind-${i}`),
+      ...prepared.collapsePreps.map((_, i) => `collapse-${i}`),
+      ...prepared.rulePreps.map((_, i) => `rule-${i}`),
     ];
     return remember(req.batchId, digest, {
       batchId: req.batchId,
@@ -1017,8 +1242,23 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     // re-install from their specs (a same-chord replacement overwrote the
     // registry entry — the old shortcut must survive the rollback).
     for (const h of [...prepared.bindHandles].reverse()) h.dispose();
+    // S7.2: the candidate's rule never fired its seed (post-acceptance only)
+    // and the collapse wiring/attribute state reverse exactly.
+    for (const h of [...prepared.ruleHandles].reverse()) h.dispose();
+    for (const w of [...prepared.collapseWiring].reverse()) w.dispose();
+    for (const c of prepared.collapsePreps) {
+      if (c.collapsed) {
+        if (c.attrBaseline === null) c.target.removeAttribute(COLLAPSED_ATTRIBUTE);
+        else c.target.setAttribute(COLLAPSED_ATTRIBUTE, c.attrBaseline);
+      }
+    }
     if (prepared.replaces) {
       for (const b of prepared.replaces.bindings) deps.behavior.install(b.spec);
+      // The replaced revision's collapse state re-applies (the write section
+      // yielded it to the candidate's declaration).
+      for (const c of prepared.replaces.collapses) {
+        if (c.collapsed) c.target.setAttribute(COLLAPSED_ATTRIBUTE, '1');
+      }
     }
     for (const ins of [...prepared.inserts].reverse()) deps.content.remove(ins.roots);
     for (const t of [...prepared.textPreps].reverse()) restoreTextRollback(t, conflicts);
@@ -1063,6 +1303,15 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     deps.content.remove(rev.ownedNodes);
     // S7.1: exact uninstall of this revision's keyboard bindings.
     for (const b of rev.bindings) b.handle.dispose();
+    // S7.2: the rule uninstalls (its already-caused external effects stay —
+    // no replayed or inverse consequential action, plan/08 §1); owned
+    // collapse disclosures restore the site's attribute baseline exactly.
+    for (const r of rev.rules) r.handle.dispose();
+    for (const c of rev.collapses) {
+      if (c.wiring) c.wiring.dispose();
+      if (c.attrBaseline === null) c.target.removeAttribute(COLLAPSED_ATTRIBUTE);
+      else c.target.setAttribute(COLLAPSED_ATTRIBUTE, c.attrBaseline);
+    }
     revisions.delete(customizationId);
 
     // Recompose the aggregate without the released fragment.

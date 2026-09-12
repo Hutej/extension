@@ -1034,13 +1034,22 @@ test('S5.2/T11: an SPA route change out of scope revokes the effect; returning r
 
 // ── S7.1: approved native action bindings on the real path (T15) ─────────
 
-/** Open keys.html, register and observe — returns the Poke button's ref. */
-async function openKeysFixture(): Promise<{ page: Page; tabId: number; state: CapturedState; go: string; link: string; disc: string }> {
-  const { page, tabId } = await openFixture('keys.html');
-  await page.bringToFront();
+/** Open a fixture page and wait for its runtime registration. */
+async function openRegistered(fixtureName: string): Promise<{ page: Page; tabId: number; state: CapturedState }> {
   assert.ok(workspace, 'workspace page from the registration test');
-  const state = await capturedState(workspace, tabId);
-  const reply = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
+  const { page, tabId } = await openFixture(fixtureName);
+  await page.bringToFront();
+  const ws = workspace as Page;
+  const state = await capturedState(ws, tabId);
+  return { page, tabId, state };
+}
+
+/** Open keys.html and observe — returns the Poke/link/disclosure refs. */
+async function openKeysFixture(): Promise<{ page: Page; tabId: number; state: CapturedState; go: string; link: string; disc: string }> {
+  const opened = await openRegistered('keys.html');
+  const { page, tabId, state } = opened;
+  const ws = workspace as Page;
+  const reply = await workspaceSend(ws, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
   const snapshot = (reply as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt?.snapshot;
   assert.ok(snapshot, 'observe must deliver a snapshot');
   const byText = (needle: string): string => {
@@ -1335,5 +1344,143 @@ test('S7.1/T15: save → replay on reload installs the shortcut exactly once; di
   await workspaceSend(workspace, controlEnvelope({
     command: 'RemoveCustomization', origin, customizationId: 'keys-replay', expectedRecordRevision: rec2.recordRevision, mutationId: 'keys-remove-1',
   }));
+  void state;
+});
+
+// ── S7.2: collapse + finite local behavior rules on the real path (T16) ───
+
+test('S7.2/T16: a saved auto-collapse rule collapses new expanded instances once; user expansion wins; disable stops fighting', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, tabId, state } = await openRegistered('comments.html');
+  const fixtureUrl = new URL(page.url());
+  const origin = fixtureUrl.origin;
+
+  // Observe: the rule's three refs — instance, affordance, container.
+  const obs = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
+  const snapshot = (obs as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt?.snapshot;
+  assert.ok(snapshot, 'observe must deliver a snapshot');
+  const instanceRef = snapshot!.regions.find((r) => r.semantics.tag === 'article')!.targetRef;
+  const affordanceRef = snapshot!.regions.find((r) => r.semantics.tag === 'button' && r.semantics.nameApprox === 'Collapse')!.targetRef;
+  const containerRef = snapshot!.regions.find((r) => r.semantics.tag === 'section')!.targetRef;
+
+  // 1. Save the RULE as self-contained intent: a future-set instance
+  //    descriptor + the affordance descriptor + the member-of container.
+  const currentRecord = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord;
+  const RULE_REVISION = {
+    revisionId: 't16-r1',
+    capabilityVersion: 1,
+    targetDescriptors: [
+      { descriptorVersion: 1, rootPath: [], selection: 'set', anchor: { tag: 'article' }, relation: 'self', matchBounds: { min: 1, max: 64 }, routeScopeRef: 'https://example.test', continuityPolicy: 'future-set' },
+      { descriptorVersion: 1, rootPath: [], selection: 'single', anchor: { tag: 'button', accessibleLabel: 'Collapse' }, relation: 'self', matchBounds: { min: 1, max: 1 }, routeScopeRef: 'https://example.test', continuityPolicy: 'stable-single' },
+      { descriptorVersion: 1, rootPath: [], selection: 'single', anchor: { tag: 'section', stableId: 'comments' }, relation: 'self', matchBounds: { min: 1, max: 1 }, routeScopeRef: 'https://example.test', continuityPolicy: 'stable-single' },
+    ],
+    operations: [{
+      kind: 'localRule',
+      target: { targetRef: 'd0' },
+      targetRef: 'd1',
+      trigger: 'target-appeared',
+      predicates: [{ type: 'member-of', targetRef: 'd2' }, { type: 'expanded-equals', value: true }],
+      actionId: 'activateDisclosure',
+    }],
+    savedAt: 1,
+    source: 'user-planned',
+  };
+  const saved = await workspaceSend(workspace, controlEnvelope({
+    command: 'SaveRevision',
+    origin,
+    customizationId: 't16-rule',
+    title: 'Auto-collapse comments',
+    scope: { mode: 'exactPath', path: fixtureUrl.pathname },
+    contentSensitivity: 'page-only',
+    grants: [],
+    revision: RULE_REVISION,
+    expectedRecordRevision: currentRecord?.recordRevision ?? 0,
+    mutationId: 't16-save-1',
+  }));
+  assert.equal((saved as { ok?: boolean }).ok, true, JSON.stringify(saved).slice(0, 300));
+
+  // 2. The broadcast replays: BOTH existing expanded comments collapse once,
+  //    through the site's own disclosure (its aria-expanded flipped).
+  await waitFor(workspace, async () =>
+    (await page.evaluate(() => document.querySelectorAll('.toggle[aria-expanded="false"]').length)) === 2,
+  'both initially expanded instances collapsed once', 15_000);
+  const clickCounts1 = await page.evaluate(() => [...document.querySelectorAll('.toggle')].map((b) => (b as HTMLElement).dataset.clicks ?? '0'));
+  assert.deepEqual(clickCounts1, ['1', '1'], 'exactly one native disclosure click per instance');
+
+  // 3. A NEW comment arrives (expanded): the reconcile pass re-applies and
+  //    the rule collapses it once. The already-processed instances are never
+  //    re-collapsed (sticky once-per-instance).
+  await page.getByRole('button', { name: 'Add comment' }).click();
+  await waitFor(workspace, async () =>
+    (await page.evaluate(() => document.querySelectorAll('.toggle[aria-expanded="false"]').length)) === 3,
+  'the new instance collapsed too', 15_000);
+  const clickCounts2 = await page.evaluate(() => [...document.querySelectorAll('.toggle')].map((b) => (b as HTMLElement).dataset.clicks ?? '0'));
+  assert.deepEqual(clickCounts2, ['1', '1', '1'], 'no duplicate collapse after the re-apply');
+
+  // 4. The user expands the first comment — a LATER re-apply must keep it.
+  await page.locator('.comment').first().locator('button.toggle').click();
+  await page.getByRole('button', { name: 'Add comment' }).click();
+  await waitFor(workspace, async () =>
+    (await page.evaluate(() => document.querySelectorAll('.toggle[aria-expanded="true"]').length)) === 1,
+  'the user expansion survived the next re-apply', 15_000);
+  const clickCounts3 = await page.evaluate(() => [...document.querySelectorAll('.toggle')].map((b) => (b as HTMLElement).dataset.clicks ?? '0'));
+  // Comment 1: one rule click + the USER's expansion click — and nothing
+  // more: the rule never re-acted on the user-expanded instance.
+  assert.deepEqual(clickCounts3, ['2', '1', '1', '1'], 'the rule never re-acted on the user-expanded instance');
+
+  // 5. Disable: the rule uninstalls — a further new comment is NOT collapsed
+  //    (and the user's expanded state is untouched).
+  const record = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  const disabled = await workspaceSend(workspace, controlEnvelope({
+    command: 'SetEnabled', origin, customizationId: 't16-rule', enabled: false, expectedRecordRevision: record.recordRevision, mutationId: 't16-disable-1',
+  }));
+  assert.equal((disabled as { ok?: boolean }).ok, true, JSON.stringify(disabled).slice(0, 300));
+  await page.getByRole('button', { name: 'Add comment' }).click();
+  await sleep(1500); // a full reconcile window
+  const afterDisable = await page.evaluate(() => ({
+    expanded: document.querySelectorAll('.toggle[aria-expanded="true"]').length,
+    collapsed: document.querySelectorAll('.toggle[aria-expanded="false"]').length,
+  }));
+  assert.equal(afterDisable.expanded, 2, 'the user-expanded comment and the new comment stay expanded');
+  assert.equal(afterDisable.collapsed, 3, 'the rule no longer acts after disable');
+
+  // 6. Reload: the disabled intent never replays.
+  await page.reload({ waitUntil: 'load' });
+  await page.bringToFront();
+  await sleep(1500);
+  // The reload resets the fixture DOM: only the two static comments remain.
+  const afterReload = await page.evaluate(() => document.querySelectorAll('.toggle[aria-expanded="true"]').length);
+  assert.equal(afterReload, 2, 'disabled rules never reinstall');
+
+  // Cleanup.
+  const rec2 = (await workspaceSend(workspace, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  await workspaceSend(workspace, controlEnvelope({
+    command: 'RemoveCustomization', origin, customizationId: 't16-rule', expectedRecordRevision: rec2.recordRevision, mutationId: 't16-remove-1',
+  }));
+  void state;
+});
+
+test('S7.2/T16: the owned collapse disclosure controls local presentation with exact cleanup', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state } = await openRegistered('comments.html');
+
+  // Live batch (no save): an owned disclosure toggle before the container.
+  const obs = await workspaceSend(workspace, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
+  const snapshot = (obs as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt?.snapshot;
+  const containerRef = snapshot!.regions.find((r) => r.semantics.tag === 'section')!.targetRef;
+  const receipt = await applyBatch(workspace, state, {
+    batchId: 't16-col',
+    customizationId: 't16-col',
+    revisionId: 't16-col-r1',
+    operations: [{ kind: 'collapse', target: { targetRef: containerRef }, label: 'Hide discussion', initialState: 'collapsed', placement: 'before' }],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 400));
+  assert.deepEqual(receipt.resourceIds, ['aggregate-css', 'insert-0', 'collapse-0']);
+  assert.ok(receipt.report!.status === 'pass', 'the collapsed state is measured (display:none) and gates acceptance');
+  assert.ok(await page.evaluate(() => (document.querySelector('section#comments') as HTMLElement).offsetHeight === 0), 'the collapsed container measures no box');
+
+  // The user expands through the owned toggle — the container comes back.
+  await page.getByRole('button', { name: 'Hide discussion' }).click();
+  assert.ok(await page.evaluate(() => (document.querySelector('section#comments') as HTMLElement).offsetHeight > 0), 'the owned toggle expands exactly');
   void state;
 });

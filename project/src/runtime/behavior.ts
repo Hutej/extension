@@ -312,6 +312,156 @@ export function executeBindAction(action: BindAction, el: Element): void {
   }
 }
 
+// ── finite rule engine (S7.2, plan/09 §3, plan/08 §7) ──────────────────
+
+/** Rule actions are FINITE: the automatic trigger (target-appeared) may only
+ *  use local presentation actions — the approved native disclosure (with an
+ *  observable expanded/open state) or focus. Generic consequential
+ *  activation is NOT in the rule catalog (plan/08 §7 compatibility rule). */
+export const RULE_ACTIONS = ['activateDisclosure', 'focus'] as const;
+export type RuleAction = (typeof RULE_ACTIONS)[number];
+
+export function isRuleActionId(id: string): id is RuleAction {
+  return (RULE_ACTIONS as readonly string[]).includes(id);
+}
+
+/** plan/08 §7: runtime-controlled, not model-disableable. */
+export const RULE_COOLDOWN_MS = 500;
+
+/** The observable expanded/open state of a disclosure affordance; null when
+ *  the element exposes none (the predicate could never hold). */
+export function disclosureState(el: Element): boolean | null {
+  const aria = el.getAttribute('aria-expanded');
+  if (aria === 'true') return true;
+  if (aria === 'false') return false;
+  const tag = (el.tagName ?? '').toLowerCase();
+  if (tag === 'details') return el.hasAttribute('open');
+  if (tag === 'summary') {
+    const parent = el.parentElement;
+    if (parent && (parent.tagName ?? '').toLowerCase() === 'details') return parent.hasAttribute('open');
+  }
+  return null;
+}
+
+/** Resolved predicates (refs resolved to exact elements at prepare). */
+export type RulePredicate =
+  | { type: 'member-of'; element: Element }
+  | { type: 'expanded-equals'; value: boolean }
+  | { type: 'text-contains'; literal: string };
+
+export interface RuleSpec {
+  /** The once-per-instance key — sticky for the session so a re-apply or
+   *  re-enable never re-acts on an instance (user overrides win). Replay
+   *  expands one saved rule into per-member copies that SHARE this key:
+   *  one action per instance per rule, regardless of re-applies. */
+  customizationId: string;
+  actionId: RuleAction;
+  predicates: RulePredicate[];
+  /** Seed affordance for the live batch (the observed disclosure of the
+   *  seed instance). Replay-expanded rules carry one per member. */
+  affordance: Element | null;
+}
+
+export interface RuleHandle {
+  dispose(): void;
+}
+
+/** One attempt per instance per rule, sticky for the SESSION (plan/09 §3:
+ *  "one attempt per instance"; AC-11: user later expansion is retained).
+ *  Survives disable/re-enable — a re-enabled rule never re-acts on an
+ *  instance it (or the user) already handled. Cleared only when the runtime
+ *  disposes. */
+const ruleOnce = new WeakMap<Element, Set<string>>();
+/** Cooldown per (instance, rule): plan/08 §7 runtime-controlled 500ms. */
+const ruleLastRun = new WeakMap<Element, Map<string, number>>();
+
+/** Evaluate one rule against one instance; returns true ONLY when the action
+ *  ran. Pure control flow; the action itself is a native call. */
+export function evaluateRule(rule: RuleSpec, instance: Element, affordance: Element | null, now: number): boolean {
+  let once = ruleOnce.get(instance);
+  if (once === undefined) {
+    once = new Set();
+    ruleOnce.set(instance, once);
+  }
+  if (once.has(rule.customizationId)) return false;
+  const last = ruleLastRun.get(instance)?.get(rule.customizationId);
+  if (last !== undefined && now - last < RULE_COOLDOWN_MS) return false;
+
+  for (const predicate of rule.predicates) {
+    switch (predicate.type) {
+      case 'member-of':
+        if (!predicate.element.contains(instance)) return false;
+        break;
+      case 'expanded-equals': {
+        const state = disclosureState(affordance ?? instance);
+        if (state !== predicate.value) return false;
+        break;
+      }
+      case 'text-contains':
+        if (!(instance.textContent ?? '').includes(predicate.literal)) return false;
+        break;
+    }
+  }
+
+  // Mark the attempt BEFORE acting: a failed site handler counts as the one
+  // attempt (plan/09 §3 — no spam-clicking until it happens).
+  once.add(rule.customizationId);
+  let times = ruleLastRun.get(instance);
+  if (times === undefined) {
+    times = new Map();
+    ruleLastRun.set(instance, times);
+  }
+  times.set(rule.customizationId, now);
+
+  if (rule.actionId === 'activateDisclosure') {
+    try {
+      (affordance as HTMLElement | null)?.click?.(); // the site's own disclosure toggle
+    } catch {
+      /* a throwing site handler consumed the attempt; never re-fires */
+    }
+    return true;
+  }
+  try {
+    (instance as HTMLElement).focus?.();
+  } catch {
+    /* ignore */
+  }
+  return true;
+}
+
+// ── owned collapse wiring (S7.2, plan/08 §1/§7 collapse row) ─────────────
+
+export interface CollapseWiring {
+  /** Exact uninstall of the toggle's click listener. */
+  dispose(): void;
+}
+
+/** The owned collapsed-state attribute on the TARGET (never a site
+ *  attribute; baseline recorded and restored by the transaction). */
+export const COLLAPSED_ATTRIBUTE = 'data-rv2-collapsed';
+
+/** Wire the owned disclosure toggle: clicking flips aria-expanded on the
+ *  toggle and the collapsed-state attribute on the target. Runtime-owned
+ *  listener on an OWNED node — no model-supplied handler source. */
+export function wireCollapseToggle(toggle: HTMLElement, target: Element): CollapseWiring {
+  const onClick = (): void => {
+    const expanded = toggle.getAttribute('aria-expanded') !== 'false';
+    if (expanded) {
+      toggle.setAttribute('aria-expanded', 'false');
+      target.setAttribute(COLLAPSED_ATTRIBUTE, '1');
+    } else {
+      toggle.setAttribute('aria-expanded', 'true');
+      target.removeAttribute(COLLAPSED_ATTRIBUTE);
+    }
+  };
+  toggle.addEventListener('click', onClick);
+  return {
+    dispose() {
+      toggle.removeEventListener('click', onClick);
+    },
+  };
+}
+
 // ── per-document behavior core ────────────────────────────────────────────
 
 export interface BehaviorDeps {
@@ -330,11 +480,18 @@ export interface BehaviorCore {
   boundChords(): Map<string, string>;
   /** Measured postcondition for verification: this chord is live. */
   isBound(normalized: string): boolean;
+  /** S7.2: install one local rule; the seed instance is evaluated by the
+   *  caller (the transaction's write section). */
+  installRule(spec: RuleSpec): RuleHandle;
+  /** Measured postcondition for verification: this rule is live. */
+  hasRule(customizationId: string): boolean;
   dispose(): void;
 }
 
 export function createBehavior(deps: BehaviorDeps): BehaviorCore {
   const registry = new Map<string, BindingSpec>();
+  const rules = new Map<string, { customizationId: string; handle: RuleHandle }>();
+  let ruleSeq = 0;
   const listener = (ev: KeyboardEvent): void => {
     // ≤4ms event budget: trusted/composition checks, one map lookup, the
     // pure decision, then — only on eligibility — preventDefault + actions.
@@ -383,8 +540,19 @@ export function createBehavior(deps: BehaviorDeps): BehaviorCore {
     isBound(normalized) {
       return registry.has(normalized);
     },
+    installRule(spec) {
+      const key = `${spec.customizationId}#${ruleSeq++}`;
+      const handle = { dispose: () => rules.delete(key) };
+      rules.set(key, { customizationId: spec.customizationId, handle });
+      return handle;
+    },
+    hasRule(customizationId) {
+      for (const entry of rules.values()) if (entry.customizationId === customizationId) return true;
+      return false;
+    },
     dispose() {
       registry.clear();
+      rules.clear();
       deps.doc.removeEventListener('keydown', listener, false);
     },
   };

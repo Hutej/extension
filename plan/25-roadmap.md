@@ -4,10 +4,10 @@
 
 ## Current checkpoint
 
-- Current phase: **S7 — behavior and keyboard-first workflows**.
-- Next task: **S7.2**.
+- Current phase: **S8 — workflow and layout breadth**.
+- Next task: **S8.1**.
 - Active task: none.
-- Completed: S0.1 through S7.1 — the S6 cutover is complete (plan/19 §4) and **S7.1 ships approved keyboard bindings**: the finite catalog (focus/scrollIntoView/activate/followLink/toggleDisclosure) on observed targets, one document keydown listener with exact per-binding registry ownership, prepare-time reserved/plain-typing/conflict/cap refusals, event-time IME/password/editable/modal/repeat/visibility eligibility that consumes no key until eligible, sync trusted-gesture execution, a measured is-installed acceptance check, full install/uninstall/rollback/replacement/replay semantics, and an approval review that names the target and warns that the site's own effect is non-reversible (AC-11 binding clauses; plan/09 §1/§2).
+- Completed: S0.1 through S7.2 — the S6 cutover is complete (plan/19 §4); S7.1 shipped approved keyboard bindings (see below); **S7.2 completes AC-11's behavior clauses**: the owned collapse disclosure (`collapse` — toggle + owned state attribute + scoped fragment rule, exact release/rollback), and the finite `localRule` engine (trigger target-appeared, actions activateDisclosure/focus, conjunction predicates member-of/expanded-equals/text-contains, once-per-instance sticky state + 500ms cooldown, seed actions post-acceptance so no external click survives a rollback, replay expands the saved future-set per member with relative affordance resolution, reconcile re-applies pick up new members while the sticky once-per-instance state keeps user overrides intact — T16 proven end-to-end). S7.1 details: the finite bind catalog (focus/scrollIntoView/activate/followLink/toggleDisclosure) on observed targets, one document keydown listener with exact per-binding registry ownership, prepare-time reserved/plain-typing/conflict/cap refusals, event-time IME/password/editable/modal/repeat/visibility eligibility that consumes no key until eligible, and an approval review that names the target and warns that the site's own effect is non-reversible (plan/09 §1/§2).
 - Known baseline blockers: none. Residual: an actual Chrome 120 install run is not available in this environment (current-stable Chromium proven; floor declared in the manifest); streaming + capability-probe connection tests deferred from S6.1 (recorded); reconciliation set-membership changes re-apply whole customizations (bounded by the conflict pause); the planner prompt still advertises collapse/float/relocate as vocabulary although their executors are refused as unsupported-capability at apply (pre-existing honesty gap — the refused batch surfaces in the workspace; S7.2/S8 own those executors); browser-level IME composition cannot be synthesized over CDP (Input.dispatchKeyEvent has no isComposing) — the composition decision is unit-proven on the pure evaluator and the listener is three lines.
 - Planning baseline: dirty `main` at `71263e0938e0a3d3a2a5e7a44d2175898b9e8c0b`; owner's changes preserved.
 - Evidence: `plan/progress.md` (one compact log).
@@ -215,7 +215,7 @@ Read: [providers](11-model-providers.md), [UX](16-observability-and-ux.md), ADR0
 
 Read: [behavior](09-behavior-and-workflows.md), algorithm A10, [security](17-security-and-privacy.md).
 
-- [ ] **S7 phase completed**
+- [x] **S7 phase completed**
   - [x] **S7.1 — Install approved native action bindings**
     - Goal/inputs: S6, observed action catalog, trusted input rules.
     - Changes: finite chord/action schema, editable/IME/modal/repeat/reserved-key checks, conflict preview, exact listener ownership, focus/scroll/approved activation.
@@ -226,15 +226,16 @@ Read: [behavior](09-behavior-and-workflows.md), algorithm A10, [security](17-sec
     - [x] Completion: AC11 binding requirements pass; evidence S7.1.
     - Follow-up: local disclosure rules and projection actions.
     - Notes: the "conflict preview" is the proposal review naming chord/actions/target + the apply-time refusal naming the owning customization (no probe command was added — YAGNI); the S7.1 keys fixture also exposed and fixed a pre-existing verifier bug (sibling sentinels shared one baseline key → false integrity fails).
-  - [ ] **S7.2 — Implement collapse and finite local behavior rules**
+  - [x] **S7.2 — Implement collapse and finite local behavior rules**
     - Goal/inputs: S7.1 plus S5 reconciliation.
     - Changes: owned disclosure, approved native expanded-state action, once-per-instance/user override/cooldown, suspension on conflict; persist rule not action history.
     - Outputs: automatic compatible new-comment collapse and explicit manual override; no generic observer click.
     - Invariants: I14/I23/I24.
-    - [ ] Tests: T16/T23—new instance, repeated mutation, user expansion, disable/reload.
-    - [ ] Validation: native external action never auto-replayed; conflict fallback owned collapse UI.
-    - [ ] Completion: AC11 fully met; evidence S7.2.
+    - [x] Tests: T16/T23—new instance, repeated mutation, user expansion, disable/reload.
+    - [x] Validation: native external action never auto-replayed; conflict fallback owned collapse UI.
+    - [x] Completion: AC11 fully met; evidence S7.2.
     - Follow-up: workflow projections/interaction recomposition.
+    - Notes: the rule fires through the site's OWN disclosure (activateDisclosure); seed actions fire post-acceptance so an external click never survives a rollback; replay expands the saved rule per member with relative affordance resolution (affordance descriptors are never document-resolved); `owned-state-equals` predicates and the trusted-shortcut/owned-state-change triggers stay explicit unsupported-capability refusals.
 
 ## S8 — Workflow and layout breadth
 

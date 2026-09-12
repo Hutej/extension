@@ -1153,6 +1153,9 @@ export interface ActionEntry {
   /** Declared control type (input type attr) — never a value. */
   controlType?: string;
   disabled: boolean;
+  /** S7.2: observed aria-expanded state (evidence for expanded-equals rule
+   *  predicates); present only when the attribute is declared. */
+  expanded?: boolean;
 }
 
 export interface SnapshotCoverage {
