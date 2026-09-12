@@ -1854,3 +1854,166 @@ test('S8.2/T18: gated relocation moves the exact node with its listeners and foc
   assert.match(`${suspended.error!.message} ${suspended.error!.recoveryAction ?? ''}`, /relocation is suspended on this document/);
   assert.match(`${suspended.error!.message} ${suspended.error!.recoveryAction ?? ''}`, /projection|float/);
 });
+
+test('S8.3/T06: embedded frames register as separate documents, an explicitly pinned frame applies only there, and a shadow-internal target delivers a root-local stylesheet', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const ws = workspace as Page;
+  const { page, tabId } = await openRegistered('shadow-frame.html');
+
+  // 1. Both runtimes register: the top document AND the same-origin iframe
+  //    (one runtime per individually permissioned frame — browser-injected).
+  interface S83DocRow {
+    documentKey: { tabId: number; frameId: number; browserDocumentId: string; runtimeInstanceId: string };
+    origin: string | null;
+    parentOrigin: string | null;
+    routeEpoch: number;
+    registeredAt: number;
+  }
+  let docs: S83DocRow[] = [];
+  const listMine = async (): Promise<S83DocRow[]> => {
+    const reply = await workspaceSend(ws, {
+      protocolVersion: 1, requestId: 'ws-s83-list', kind: 'control', deadlineAt: Date.now() + 5000,
+      payload: { command: 'ListDocuments' },
+    });
+    const list = (reply as { ok?: boolean; documents?: S83DocRow[] }).documents ?? [];
+    return list.filter((d) => d.documentKey.tabId === tabId);
+  };
+  await waitFor(ws, async () => {
+    docs = await listMine();
+    return docs.length >= 2;
+  }, 'both the top and the embedded-frame runtime registered');
+  // Chromium frame ids are browser-global (not 1-based) — the embedded row
+  // is any non-top frame for this tab.
+  const topRow = docs.find((d) => d.documentKey.frameId === 0)!;
+  const frameRow = docs.find((d) => d.documentKey.frameId !== 0);
+  assert.ok(frameRow, `an embedded frame document registered: ${JSON.stringify(docs.map((d) => d.documentKey.frameId))}`);
+  assert.equal(frameRow.parentOrigin, new URL(page.url()).origin, 'the enclosing origin is browser-derived display');
+
+  // 2. Observe the frame document and style its exact node — accepted.
+  //  The frame runtime may re-handshake (iframe reload) — poll the CURRENT
+  //  registry row right before each frame command (never a stale instance).
+  // about:blank→src double loads leave DEAD rows registered until the commit
+  // event prunes them — the NEWEST row per frame is the live instance.
+  const freshRow = async (pick: (d: S83DocRow) => boolean, what: string): Promise<S83DocRow> => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const mine = await listMine();
+      const row = mine.filter(pick).sort((a, b) => b.registeredAt - a.registeredAt)[0];
+      if (row) return row;
+      if (Date.now() > deadline) throw new Error(`${what} died: ${JSON.stringify(mine.map((d) => d.documentKey.frameId))}`);
+      await sleep(200);
+    }
+  };
+  const freshFrameRow = (): Promise<S83DocRow> =>
+    freshRow((d) => d.documentKey.frameId !== 0, 'the frame row'); // Chromium re-assigns the frame id per navigation — poll ANY embedded row
+  const freshTopRow = (): Promise<S83DocRow> => freshRow((d) => d.documentKey.frameId === 0, 'the top row');
+  // The embedded frame's runtime can re-boot (Chromium loads the iframe
+  // twice: about:blank → src) — retry the relay until the CURRENT instance
+  // answers (bounded; 'stale-document' names the replaced instance exactly).
+  const relayFrame = async (payload: Record<string, unknown>): Promise<Record<string, unknown>> => {
+    const deadline = Date.now() + 10_000;
+    for (;;) {
+      const row = await freshFrameRow();
+      console.log('S83-TRY:', row.documentKey.frameId, row.documentKey.runtimeInstanceId.slice(0, 8));
+      console.log('S83-LIVE:', JSON.stringify(await Promise.all(page.frames().map(async (f) => {
+        try {
+          const s = await f.evaluate(() => {
+            const sess = (globalThis as unknown as { __revueonRuntimeSession?: { instanceId?: string } }).__revueonRuntimeSession;
+            return sess?.instanceId?.slice(0, 8) ?? null;
+          });
+          return `${f.url().split('/').pop() ?? f.url()}:${s ?? 'none'}`;
+        } catch { return `${f.url()}:unreachable`; }
+      }))));
+      const reply = await workspaceSend(ws, observeEnvelope(row.documentKey as unknown as CapturedState['documentKey'], row.routeEpoch ?? 0, payload));
+      const receipt = (reply as { receipt?: { ok?: boolean } }).receipt;
+      if (reply.ok === true && receipt?.ok === true) return reply as Record<string, unknown>;
+      console.log('S83-MISS:', JSON.stringify((reply as { receipt?: { error?: { message?: string } } }).receipt?.error?.message));
+      if (Date.now() > deadline) throw new Error(`the frame relay never settled: ${JSON.stringify(reply).slice(0, 400)}`);
+      await sleep(250);
+    }
+  };
+  const frameObserve = await relayFrame({ command: 'Observe' });
+  const frameSnapshot = (frameObserve as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt!.snapshot!;
+  const frameNote = frameSnapshot.regions.find((r) => r.textSample?.includes('Inside the embedded frame'));
+  assert.ok(frameNote, `the frame's note is observed: ${JSON.stringify(frameSnapshot.regions.map((r) => r.textSample))}`);
+  // The relay for the batch uses the same fresh-row retry (the observe
+  // succeeded → the instance settles → the apply lands on the same one).
+  const row2 = await freshFrameRow();
+  const frameReceipt = await applyBatch(ws, { documentKey: row2.documentKey, routeEpoch: row2.routeEpoch ?? 0 }, {
+    batchId: 's83-frame-b1',
+    customizationId: 's83-frame',
+    revisionId: 's83-frame-r1',
+    operations: [{ kind: 'style', rules: [{ target: { targetRef: frameNote!.targetRef }, surface: 'element', state: 'none', declarations: [{ property: 'color', value: 'red', priority: 'important' }], conditions: [] }] }],
+  });
+  assert.equal(frameReceipt.status, 'accepted', JSON.stringify(frameReceipt).slice(0, 400));
+  const frameChildFrame = page.frames().find((f) => f.url().includes('frame-child.html'))!;
+  assert.equal(await frameChildFrame.evaluate(() => getComputedStyle(document.getElementById('frame-note')!).color), 'rgb(255, 0, 0)', 'the style applied inside the frame');
+  assert.notEqual(await page.evaluate(() => getComputedStyle(document.getElementById('top-note')!).color), 'rgb(255, 0, 0)', 'the top document is untouched (one frame, one outcome)');
+
+  // 3. The top document's open shadow root: the observed shadow-internal
+  //    region styles through a root-local stylesheet (the document fragment
+  //    cannot match across the boundary).
+  const row3 = await freshTopRow();
+  const topObserve = await workspaceSend(ws, observeEnvelope(row3.documentKey, row3.routeEpoch ?? 0, { command: 'Observe' }));
+  assert.equal(topObserve.ok, true, JSON.stringify(topObserve).slice(0, 300));
+  const topSnapshot = (topObserve as { receipt?: { snapshot?: { regions: Array<SnapshotRegion & { rootRef?: string }> } } }).receipt!.snapshot!;
+  // The span's text lives in a Text child (no element children) — the
+  // observer discloses root-local identity, not a composed text sample.
+  const inner = topSnapshot.regions.find((r) => (r as SnapshotRegion & { rootRef?: string }).rootRef !== 'document' && r.semantics.tag === 'p');
+  assert.ok(inner, `the shadow-internal region is observed with its root: ${JSON.stringify(topSnapshot.regions.map((r) => ({ tag: r.semantics.tag, root: (r as SnapshotRegion & { rootRef?: string }).rootRef })))}`);
+  assert.notEqual(inner!.rootRef, 'document', 'the region carries its root-local identity');
+  const row4 = await freshTopRow();
+  const sheetReceipt = await applyBatch(ws, { documentKey: row4.documentKey, routeEpoch: row4.routeEpoch ?? 0 }, {
+    batchId: 's83-shadow-b1',
+    customizationId: 's83-shadow',
+    revisionId: 's83-shadow-r1',
+    operations: [{ kind: 'style', rules: [{ target: { targetRef: inner!.targetRef }, surface: 'element', state: 'none', declarations: [{ property: 'color', value: 'red', priority: 'important' }], conditions: [] }] }],
+  });
+  assert.equal(sheetReceipt.status, 'accepted', JSON.stringify(sheetReceipt).slice(0, 400));
+  assert.equal(await page.evaluate(() => {
+    const sheet = document.getElementById('host')!.shadowRoot!.querySelector('style');
+    return sheet !== null && sheet.getAttribute('data-rv2-local') === '1';
+  }), true, 'the root-local stylesheet was installed inside the open shadow root');
+  assert.equal(await page.evaluate(() => getComputedStyle(document.getElementById('host')!.shadowRoot!.getElementById('inner-label')!).color), 'rgb(255, 0, 0)', 'the measured postcondition holds across the shadow boundary');
+
+  // 4. Save the shadow customization (a hand-built revision whose rootPath
+  //    hop resolves through the open root — the save boundary's unit tests
+  //    own the observation-layer boundary) then disable: the replay release
+  //    removes the root-local sheet exactly, and the site's own inline
+  //    baseline (black) holds again.
+  const origin = new URL(page.url()).origin;
+  const rec0 = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord;
+  const saved = await workspaceSend(ws, controlEnvelope({
+    command: 'SaveRevision',
+    origin,
+    customizationId: 's83-shadow',
+    title: 'Shadow widget label',
+    scope: { mode: 'exactPath', path: new URL(page.url()).pathname },
+    contentSensitivity: 'page-only',
+    grants: [],
+    revision: {
+      revisionId: 's83-shadow-saved',
+      capabilityVersion: 1,
+      targetDescriptors: [
+        { descriptorVersion: 1, rootPath: ['my-widget'], selection: 'single', anchor: { tag: 'p' }, relation: 'self', matchBounds: { min: 1, max: 1 }, routeScopeRef: origin, continuityPolicy: 'stable-single' },
+      ],
+      operations: [{ kind: 'style', rules: [{ target: { targetRef: 'd0' }, surface: 'element', state: 'none', declarations: [{ property: 'color', value: 'red', priority: 'important' }], conditions: [] }] }],
+      savedAt: Date.now(),
+      source: 'user-planned',
+    },
+    expectedRecordRevision: rec0?.recordRevision ?? 0,
+    mutationId: 's83-save-1',
+  }));
+  assert.equal((saved as { ok?: boolean }).ok, true, JSON.stringify(saved).slice(0, 400));
+  await page.waitForTimeout(400); // the saved record replays through the runtime
+  const rec = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord;
+  const disabled = await workspaceSend(ws, controlEnvelope({
+    command: 'SetEnabled', origin, customizationId: 's83-shadow', enabled: false, expectedRecordRevision: rec?.recordRevision ?? 0, mutationId: 's83-disable-1',
+  }));
+  assert.equal((disabled as { ok?: boolean }).ok, true, JSON.stringify(disabled).slice(0, 300));
+  await waitFor(ws, async () => (await page.evaluate(() => {
+    const sheet = document.getElementById('host')!.shadowRoot!.querySelector('style');
+    const color = getComputedStyle(document.getElementById('host')!.shadowRoot!.getElementById('inner-label')!).color;
+    return sheet === null && color === 'rgb(0, 0, 0)';
+  })), 'disable removed the root-local sheet and restored the site baseline');
+});

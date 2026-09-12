@@ -1492,3 +1492,76 @@ test('S8.2: a rolled-back relocation reattaches the exact node to its recorded a
   assert.equal(node.parentElement, originalParent, 'the exact node reattached to its original parent');
   assert.equal(dest.children.length, 0);
 });
+
+// ── S8.3: root-local stylesheet fallback (T06, plan/12 §3) ───────────────
+
+test('S8.3: a style target inside an open shadow root delivers a root-local stylesheet and releases exactly', async () => {
+  const w = makeWorld();
+  const host = el('widget');
+  w.doc.appendChild(host);
+  const shadowRoot = makeNode(11, '#shadow-root');
+  // A shadow boundary: the root has no parentNode edge — getRootNode stops
+  // at the root itself (the real DOM's shadow boundary).
+  shadowRoot.__connected = true;
+  const label = el('span');
+  shadowRoot.appendChild(label);
+  const rootId = w.deps.targets.registerRoot(shadowRoot as unknown as ShadowRoot);
+  assert.notEqual(rootId, 'document', 'the second registered root is the shadow root');
+  const labelRef = w.deps.targets.register(label as unknown as Element, rootId, undefined, 0);
+
+  const r = await w.txn.applyBatch(req('b1', 'c1', [styleOp(labelRef, 'color', 'red')]));
+  assert.equal(r.status, 'accepted', JSON.stringify(r));
+  const sheet = shadowRoot.childNodes.find((c) => c.tagName === 'STYLE');
+  assert.ok(sheet, 'the root-local style node was installed inside the shadow root');
+  assert.equal(sheet!.getAttribute('data-rv2-local'), '1');
+  assert.ok(((sheet as unknown as { textContent?: string }).textContent ?? '').length > 0, 'the root-local sheet carries the compiled fragment');
+  assert.equal(label.getAttribute(TOKEN_ATTRIBUTE) !== null, true, 'the shadow-internal target carries the composition token');
+  assert.equal(w.calls.some((c) => c.op === 'stage'), true, 'the document fragment still delivered through the style client');
+
+  // Release removes the root-local sheet exactly; the root keeps its own children.
+  const before = shadowRoot.childNodes.filter((c) => c !== sheet).length;
+  const rel = await w.txn.releaseCustomization('c1');
+  assert.equal(rel.status, 'accepted');
+  assert.equal(shadowRoot.childNodes.find((c) => c.tagName === 'STYLE'), undefined, 'the root-local sheet was removed exactly');
+  assert.equal(shadowRoot.childNodes.length, before, 'nothing else in the root was touched');
+});
+
+test('S8.3: a root that cannot host the sheet records the inline-override fallback and restores baselines on release', async () => {
+  const w = makeWorld();
+  const host = el('widget');
+  w.doc.appendChild(host);
+  const shadowRoot = makeNode(11, '#shadow-root');
+  shadowRoot.__connected = true;
+  const label = el('span');
+  shadowRoot.appendChild(label);
+  // The root turns hostile between observation and apply (site interference).
+  shadowRoot.appendChild = () => { throw new Error('the root refuses children'); };
+  const rootId = w.deps.targets.registerRoot(shadowRoot as unknown as ShadowRoot);
+  const labelRef = w.deps.targets.register(label as unknown as Element, rootId, undefined, 0);
+
+  const r = await w.txn.applyBatch(req('b1', 'c1', [styleOp(labelRef, 'color', 'red')]));
+  assert.equal(r.status, 'accepted', JSON.stringify(r));
+  assert.equal(shadowRoot.childNodes.find((c) => c.tagName === 'STYLE'), undefined, 'no sheet node could be installed');
+
+  // The override ledger held the exact baseline (absent); release restores it.
+  const rel = await w.txn.releaseCustomization('c1');
+  assert.equal(rel.status, 'accepted');
+  assert.equal(label.getAttribute('style'), null, 'the absent inline baseline was restored exactly');
+});
+
+test('S8.3: text/insert operations stay document-root — shadow internals are an honest unsupported capability', async () => {
+  const w = makeWorld();
+  const host = el('widget');
+  w.doc.appendChild(host);
+  const shadowRoot = makeNode(11, '#shadow-root');
+  shadowRoot.__connected = true;
+  const label = el('span');
+  shadowRoot.appendChild(label);
+  const rootId = w.deps.targets.registerRoot(shadowRoot as unknown as ShadowRoot);
+  const labelRef = w.deps.targets.register(label as unknown as Element, rootId, undefined, 0);
+
+  const r = await w.txn.applyBatch(req('b1', 'c1', [textOp(labelRef, 'new text')]));
+  assert.equal(r.status, 'not-applied');
+  assert.equal(r.error?.code, 'unsupported-capability');
+  assert.match(r.error?.message ?? '', /only style\/hide operations reach shadow descendants/);
+});

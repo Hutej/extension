@@ -222,6 +222,7 @@ const basePlan = (overrides: Partial<VerifyPlan> = {}): VerifyPlan => ({
   staged: false,
   styles: [],
   hides: [],
+  localSheets: [],
   projections: [],
   bindings: [],
   collapses: [],

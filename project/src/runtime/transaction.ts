@@ -169,10 +169,20 @@ interface RevisionRecord {
   /** Bounded effect samples for the COMBINED revision verification (T30):
    *  what this revision's fragment declares, on which exact element. */
   decls: Array<{ el: Element; property: string; value: string }>;
+  /** S8.3: root-local author stylesheets installed in open shadow roots
+   *  (exact ownership: this node, this root — release/rollback remove it). */
+  localSheets: Array<{ root: ShadowRoot; node: Element }>;
+  /** S8.3: approved narrow inline override fallback (the root could not host
+   *  the local node): exact inline style attribute baselines, restored on
+   *  release/rollback. */
+  inlineOverrides: Array<{ el: Element; baseline: string | null }>;
 }
 
 /** plan/08 §3: up to 64 logical style fragments per document. */
 export const MAX_REVISIONS = 64;
+/** S8.3: the approved narrow inline override ceiling (plan/12 §3 — the
+ *  fallback tier when a root cannot host the root-local stylesheet). */
+export const MAX_INLINE_OVERRIDE_DECLS = 32;
 /** Retained terminal receipts for dedupe/GetOperation (plan/06 §4). */
 const MAX_RETAINED_RECEIPTS = 128;
 
@@ -359,9 +369,18 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     entryEpoch: number;
     documentKey: DocumentKey;
     styleOps: StyleOperation[];
+    /** The candidate's resolved style targets (ref → element) — the S8.3
+     *  inline override fallback maps rules back to exact elements. */
+    styleTargets: Map<string, Element>;
     candidateElements: Element[];
     fragmentCss: string;
     highImpact: Array<{ property: string; value: string; risk: HighImpactRisk }>;
+    /** S8.3: open shadow roots whose targets need the root-local sheet. */
+    localSheetRoots: Array<ShadowRoot>;
+    /** S8.3: apply-side state — installed sheets + inline override baselines
+     *  (empty until the write section). */
+    localSheets: Array<{ root: ShadowRoot; node: Element }>;
+    inlineOverrides: Array<{ el: Element; baseline: string | null }>;
     textPreps: Array<{ node: Text; installed: string; predecessorValue: string | null; siteBaseline: string; claimedNew: boolean }>;
     inserts: Array<{ anchor: Element; position: 'before' | 'after' | 'first-child' | 'last-child'; roots: Element[] }>;
     bindPreps: Array<{ spec: BindingSpec }>;
@@ -433,21 +452,27 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     const relocatePreps: PreparedBatch['relocatePreps'] = [];
     const floatPreps: PreparedBatch['floatPreps'] = [];
     const highImpact: PreparedBatch['highImpact'] = [];
+    // S8.3: open shadow roots whose style targets need the root-local sheet.
+    const involvedRoots = new Set<ShadowRoot>();
     const newClaims = new Set<Text>();
     const styleRuleEls: Element[][] = [];
     const hideScope: Element[] = [];
     const protectedMap = new Map<string, Element>();
     const ownedTextSamples: Array<{ el: Element; sample: string }> = [];
 
-    const resolveTarget = (spec: { targetRef?: string; localRef?: string }, path: string): { ok: true; el: Element; key: string } | { ok: false; error: ErrorRecord } => {
+    // S8.3: style/hide targets may live in open shadow roots — their rules
+    // deliver as a root-local author stylesheet (plan/12 §3). Every other
+    // operation stays document-root: insertion, relocation and keyboard
+    // targeting of shadow internals are not owned by this slice.
+    const resolveTarget = (spec: { targetRef?: string; localRef?: string }, path: string, allowRoots = false): { ok: true; el: Element; key: string } | { ok: false; error: ErrorRecord } => {
       if (spec.targetRef !== undefined) {
         const r = deps.targets.resolve(spec.targetRef, epoch);
         if (!r.ok) {
           const code = r.reason === 'missing' ? 'unknown-target' : 'stale-target';
           return { ok: false, error: err(code, 'validate', `${path}: ${r.detail}`, 're-observe for fresh target refs') };
         }
-        if (r.rootId !== 'document') {
-          return { ok: false, error: err('unsupported-capability', 'validate', `${path}: the target lives in root "${r.rootId}"; document-root sheets do not reach shadow descendants (open-root sheets arrive with a later slice)`) };
+        if (r.rootId !== 'document' && !allowRoots) {
+          return { ok: false, error: err('unsupported-capability', 'validate', `${path}: the target lives in root "${r.rootId}"; only style/hide operations reach shadow descendants (a root-local stylesheet delivers there)`) };
         }
         return { ok: true, el: r.node, key: spec.targetRef };
       }
@@ -479,10 +504,14 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           // targets keep their exact error codes (no compile-diag laundering).
           const ruleEls: Element[] = [];
           for (const [ri, rule] of op.rules.entries()) {
-            const r = resolveTarget(rule.target, `${path}.rules[${ri}].target`);
+            const r = resolveTarget(rule.target, `${path}.rules[${ri}].target`, true);
             if (!r.ok) return { ok: false, receipt: refuse(req, digest, r.error) };
             styleTargets.set(rule.target.targetRef ?? rule.target.localRef ?? `${i}:${ri}`, r.el);
             ruleEls.push(r.el);
+            // S8.3: a target inside an open shadow root needs a root-local
+            // sheet — the document fragment cannot match across the boundary.
+            const ruleRoot = r.el.getRootNode();
+            if (ruleRoot !== deps.doc) involvedRoots.add(ruleRoot as ShadowRoot);
             for (const d of rule.declarations) {
               const dp = d.property.toLowerCase();
               const dv = d.value.trim().toLowerCase();
@@ -500,9 +529,11 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         case 'hide': {
           // A hide IS a display fragment through the same compiled path
           // (plan/08 §1: same target/risk policy as style — I17).
-          const hideTarget = resolveTarget(op.target, `${path}.target`);
+          const hideTarget = resolveTarget(op.target, `${path}.target`, true);
           if (!hideTarget.ok) return { ok: false, receipt: refuse(req, digest, hideTarget.error) };
           styleTargets.set(op.target.targetRef ?? op.target.localRef ?? `${i}`, hideTarget.el);
+          const hideRoot = hideTarget.el.getRootNode();
+          if (hideRoot !== deps.doc) involvedRoots.add(hideRoot as ShadowRoot);
           hideScope.push(hideTarget.el);
           styleRuleEls.push([hideTarget.el]);
           styleOps.push({
@@ -1130,6 +1161,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         container: p.container,
       })),
       tokenChecks: candidateElements.map((el, j) => ({ key: `delivery:token:${j}`, el, ns: nsNew })),
+      localSheets: [...involvedRoots].map((root, j) => ({ key: `delivery:local-sheet:${j}`, root, node: null })),
       unmeasuredDecls: unmeasured,
     };
 
@@ -1140,6 +1172,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         entryEpoch,
         documentKey: dk,
         styleOps,
+        styleTargets,
         candidateElements,
         fragmentCss,
         highImpact,
@@ -1155,6 +1188,9 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         floatPreps,
         floatWiring: [],
         collapseWiring: [],
+        localSheetRoots: [...involvedRoots],
+        localSheets: [],
+        inlineOverrides: [],
         ruleHandles: [],
         droppedTexts,
         aggregateCss,
@@ -1360,6 +1396,47 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       for (const p of prepared.floatPreps) {
         prepared.floatWiring.push(wireFloatButton(p.button as HTMLElement, p.target));
       }
+      // S8.3: root-local author stylesheets (plan/12 §3) — the document
+      // fragment cannot match across a shadow boundary. The SAME validated,
+      // namespace-scoped fragment installs as an owned style node inside
+      // each involved root; the token attribute makes it inert until
+      // activation. A root that cannot host the node falls back to the
+      // approved narrow inline override (the rule's own validated
+      // declarations, exact inline baseline recorded, ≤32 per fragment).
+      for (const root of prepared.localSheetRoots) {
+        try {
+          const node = deps.doc.createElement('style');
+          node.setAttribute('data-rv2-local', '1');
+          node.textContent = prepared.fragmentCss;
+          root.appendChild(node);
+          if (node.parentNode !== root) throw new Error('the root did not host the node');
+          prepared.localSheets.push({ root, node });
+          const entry = prepared.plan.localSheets.find((ls) => ls.root === root);
+          if (entry) entry.node = node;
+        } catch {
+          // The approved narrow inline override (plan/12 §3): the rule's own
+          // validated declarations, written through CSSOM with exact inline
+          // attribute baselines (never a text splice). The effect is MEASURED
+          // by this batch's style checks; the baseline restores exactly on
+          // release/rollback.
+          const done = new Set<Element>();
+          let decls = 0;
+          for (const op of prepared.styleOps) {
+            for (const rule of op.rules) {
+              const el = prepared.styleTargets.get(rule.target.targetRef ?? rule.target.localRef ?? '') ?? null;
+              if (!el || done.has(el) || el.getRootNode() !== root || !el.isConnected || decls >= MAX_INLINE_OVERRIDE_DECLS) continue;
+              done.add(el);
+              const baseline = el.getAttribute('style');
+              for (const d of rule.declarations) {
+                if (decls >= MAX_INLINE_OVERRIDE_DECLS) break;
+                (el as HTMLElement).style?.setProperty(d.property, d.value, 'important');
+                decls += 1;
+              }
+              prepared.inlineOverrides.push({ el, baseline });
+            }
+          }
+        }
+      }
       // S7.1: bindings install AFTER all other native writes, in batch order —
       // exact registry entries under the transaction's ownership.
       for (const bind of prepared.bindPreps) prepared.bindHandles.push(deps.behavior.install(bind.spec));
@@ -1419,6 +1496,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         if (!prepared.textPreps.some((p) => p.node === t.node)) textClaims.delete(t.node);
       }
       deps.content.remove(replacedOwned);
+      // S8.3: the predecessor's root-local delivery retires exactly.
+      teardownLocalDelivery(prepared.replaces, conflicts);
     // The replaced revision's bindings, rules and collapse wiring retire
     // with it (its toggle nodes go with replacedOwned; its attribute state
     // was already yielded to the successor's declaration in the write
@@ -1503,6 +1582,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       elements: prepared.candidateElements,
       highImpact: prepared.highImpact,
       decls: prepared.candidateDecls,
+      localSheets: prepared.localSheets,
+      inlineOverrides: prepared.inlineOverrides,
     };
     revisions.set(req.customizationId, record);
 
@@ -1566,6 +1647,23 @@ export function createTransaction(deps: TransactionDeps): Transaction {
    *  reverse creation order (compare-and-restore), exact-clean the staged
    *  bundle, keep every conflict visible. Independent accepted revisions are
    *  never touched. */
+  /** S8.3 exact cleanup: root-local sheets + inline override baselines. */
+  const teardownLocalDelivery = (
+    rev: { localSheets: Array<{ root: ShadowRoot; node: Element }>; inlineOverrides: Array<{ el: Element; baseline: string | null }> },
+    conflicts: string[],
+  ): void => {
+    for (const ls of rev.localSheets) {
+      if (ls.node.parentNode === ls.root) ls.node.remove();
+    }
+    rev.localSheets = [];
+    for (const io of rev.inlineOverrides) {
+      if (!io.el.isConnected) { conflicts.push(`inline override: a target left the document before its baseline was restored`); continue; }
+      if (io.baseline === null) io.el.removeAttribute('style');
+      else io.el.setAttribute('style', io.baseline);
+    }
+    rev.inlineOverrides = [];
+  };
+
   const rollbackCandidate = async (
     prepared: PreparedBatch,
     req: BatchRequest,
@@ -1586,6 +1684,9 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       // Restore the accepted aggregate's membership.
       for (const el of oldSet) if (el.isConnected) deps.tokens.activate(oldNs, [el]);
     }
+    // S8.3: the candidate's root-local sheets + inline overrides reverse
+    // exactly (the same field shape as a RevisionRecord).
+    teardownLocalDelivery(prepared, conflicts);
     // Reverse creation order: inserts after texts are removed first;
     // candidate bindings uninstall exactly, then the predecessor's bindings
     // re-install from their specs (a same-chord replacement overwrote the
@@ -1676,6 +1777,9 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       };
     }
     const conflicts: string[] = [];
+    // S8.3: the root-local sheets remove exactly; the inline override
+    // baselines restore (a newer site value is never overwritten).
+    teardownLocalDelivery(rev, conflicts);
     for (const t of rev.texts) {
       textClaims.delete(t.node);
       if (!t.node.isConnected) { conflicts.push('a released text node left the document; nothing was overwritten'); continue; }

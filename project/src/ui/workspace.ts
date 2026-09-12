@@ -83,6 +83,10 @@ export interface WorkspaceSettings {
    *  (plan/05 §1): a pin whose document no longer registers is dropped,
    *  never guessed onto another tab. */
   pinnedTabId: number | null;
+  /** S8.3: the pinned target's exact frame (plan/12 §3 — the user pins a
+   *  frame document explicitly). 0 = the top document; old persisted pins
+   *  resolve to the top document. */
+  pinnedFrameId: number;
   /** The real model opt-out (AC-07): off means no planning fetch happens at
    *  all; deterministic saved customizations stay manageable. */
   aiEnabled: boolean;
@@ -95,6 +99,7 @@ export const DEFAULT_SETTINGS: WorkspaceSettings = {
   activeProfileId: null,
   consentAcks: [],
   pinnedTabId: null,
+  pinnedFrameId: 0,
   aiEnabled: true,
 };
 
@@ -128,6 +133,12 @@ export const decodeWorkspaceSettings = (
       consentAcks: decodeArray(decodeDisclosureAck, 64),
       pinnedTabId: optional((v: unknown, p = 'pinnedTabId') => {
         if (v === null) return { ok: true as const, value: null };
+        const n = decodeFiniteNumber({ integer: true, min: 0, max: 2 ** 31 })(v, p);
+        return n.ok ? { ok: true as const, value: n.value } : n;
+      }),
+      pinnedFrameId: optional((v: unknown, p = 'pinnedFrameId') => {
+        // Missing in old persisted settings — resolves to the top document.
+        if (v === undefined) return { ok: true as const, value: 0 };
         const n = decodeFiniteNumber({ integer: true, min: 0, max: 2 ** 31 })(v, p);
         return n.ok ? { ok: true as const, value: n.value } : n;
       }),
@@ -445,6 +456,9 @@ export interface DocumentInfo {
   frameId: number;
   routeEpoch: number;
   origin: string | null;
+  /** S8.3 permission display: the enclosing frame's origin (browser-derived).
+   *  Null for top documents or when the frame tree is unavailable. */
+  parentOrigin?: string | null;
   runOwner: boolean;
   title?: string;
   url?: string;
@@ -491,7 +505,7 @@ export interface WorkspaceCore {
   subscribe(listener: (state: WorkspaceState) => void): () => void;
   init(): Promise<void>;
   refreshDocuments(): Promise<void>;
-  setPinnedTab(tabId: number | null): void;
+  setPinnedTab(tabId: number | null, frameId?: number): void;
   start(goal: string): Promise<void>;
   stop(): Promise<void>;
   answerQuestion(answer: string): Promise<void>;
@@ -515,6 +529,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
   let blocked: BlockReason | null = null;
   let documents: DocumentInfo[] = [];
   let pinnedTabId: number | null = null;
+  let pinnedFrameId = 0;
   let live: Record<string, LiveDocState> = {};
   let run: WorkspaceState['run'] = null;
   let pendingQuestion: WorkspaceState['pendingQuestion'] = null;
@@ -560,7 +575,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
   };
 
   const pinnedDocumentOf = (): DocumentInfo | null =>
-    documents.find((d) => (pinnedTabId !== null ? d.tabId === pinnedTabId : false)) ?? null;
+    documents.find((d) => d.tabId === pinnedTabId && d.frameId === pinnedFrameId) ?? null;
 
   const docKeyString = (dk: DocumentKey): string => `${dk.tabId}:${dk.frameId}:${dk.browserDocumentId}`;
 
@@ -633,14 +648,16 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
         frameId: key.frameId,
         routeEpoch: (d.routeEpoch as number) ?? 0,
         origin: (d.origin as string | null) ?? null,
+        parentOrigin: (d.parentOrigin as string | null) ?? null,
         runOwner: d.runOwner === true,
         ...(tab?.title !== undefined ? { title: tab.title } : {}),
         ...(tab?.url !== undefined ? { url: tab.url } : {}),
       };
     });
-    if (pinnedTabId !== null && !documents.some((d) => d.tabId === pinnedTabId)) {
+    if (pinnedTabId !== null && !documents.some((d) => d.tabId === pinnedTabId && d.frameId === pinnedFrameId)) {
       pinnedTabId = null; // the pinned document is gone — never silently re-pin
-      void persistSettings({ ...settings, pinnedTabId: null }).catch(() => undefined);
+      pinnedFrameId = 0;
+      void persistSettings({ ...settings, pinnedTabId: null, pinnedFrameId: 0 }).catch(() => undefined);
     }
     // Resynchronize live state for every registered document (close/reopen).
     for (const doc of documents) {
@@ -997,6 +1014,16 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
       emit('failed', 'the accepted work lost its save context');
       return;
     }
+    // S8.3 frame boundary (plan/12 §3): frame transformations are
+    // session-only in the first frame release. The applied change stays live
+    // until the run ends; no persistent frame scope is saved (never a saved
+    // frame index — a later scope-schema ADR owns that boundary).
+    const runDoc = pinnedDocumentOf();
+    if (runDoc !== null && runDoc.frameId !== 0) {
+      pendingSave = null;
+      emit('applied-unsaved', 'Frame transformations are session-only in this release: the change stays applied in this frame until the run ends or the tab reloads, but it is not saved — a persistent frame scope is a future capability.');
+      return;
+    }
     emit('saving');
     // Fresh expected revision right before the write (plan/06 §2 boundary 3).
     let expectedRecordRevision = 0;
@@ -1173,6 +1200,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
     // The persisted pin is adopted provisionally and revalidated against
     // live registrations inside refreshDocuments (plan/05 §1).
     pinnedTabId = settings.pinnedTabId ?? null;
+    pinnedFrameId = settings.pinnedFrameId ?? 0;
     try {
       await refreshDocuments();
     } catch (err) {
@@ -1208,10 +1236,11 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
     },
     init,
     refreshDocuments,
-    setPinnedTab(tabId) {
+    setPinnedTab(tabId, frameId = 0) {
       pinnedTabId = tabId;
+      pinnedFrameId = frameId;
       // plan/05 §1: the selection persists but is revalidated on next load.
-      void persistSettings({ ...settings, pinnedTabId: tabId }).catch(() => undefined);
+      void persistSettings({ ...settings, pinnedTabId: tabId, pinnedFrameId: frameId }).catch(() => undefined);
       publish();
       void refreshRecord();
     },
@@ -1463,7 +1492,7 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
   let ignoreRadioEvents = false;
 
   const renderTargets = (s: WorkspaceState): void => {
-    const selected = s.pinnedDocument?.tabId ?? null;
+    const selected = s.pinnedDocument !== null ? `${s.pinnedDocument.tabId}:${s.pinnedDocument.frameId}` : null;
     ignoreRadioEvents = true;
     for (const label of [...radiosBox.querySelectorAll('label')]) {
       if (label !== noneLabel) label.remove();
@@ -1478,10 +1507,19 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
       const radio = doc.createElement('input');
       radio.type = 'radio';
       radio.name = 'rv-target';
-      radio.value = String(d.tabId);
-      if (d.tabId === selected) radio.checked = true;
+      // One radio per exact document (plan/12 §3): "tabId:frameId".
+      radio.value = `${d.tabId}:${d.frameId}`;
+      if (`${d.tabId}:${d.frameId}` === selected) radio.checked = true;
       const name = d.title ? d.title.slice(0, 60) : 'untitled page';
-      label.append(radio, doc.createTextNode(` ${name} — ${d.origin ?? 'unknown origin'} (tab ${d.tabId}${d.runOwner ? ', run active' : ''})`));
+      // S8.3 permission display: embedded frames are marked explicitly —
+      // the user is choosing to send content from inside another origin's
+      // page (explicit consent, never a first-frame fallback).
+      const embedded = d.frameId !== 0
+        ? ` (embedded frame of ${d.parentOrigin ?? 'unknown enclosing origin'})`
+        : '';
+      const owner = d.runOwner ? ', run active' : '';
+      const frameTag = d.frameId !== 0 ? ` [frame ${d.frameId}]` : '';
+      label.append(radio, doc.createTextNode(` ${name}${frameTag} — ${d.origin ?? 'unknown origin'}${embedded} (tab ${d.tabId}${owner})`));
       radiosBox.append(label);
     }
     noneRadio.checked = selected === null;
@@ -1795,7 +1833,8 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
   radiosBox.addEventListener('change', () => {
     if (ignoreRadioEvents) return;
     const checked = radiosBox.querySelector<HTMLInputElement>('input[type=radio]:checked');
-    core.setPinnedTab(checked !== null && checked.value !== '' ? Number(checked.value) : null);
+    const parsed = checked !== null && checked.value !== '' ? checked.value.split(':') : null;
+    core.setPinnedTab(parsed ? Number(parsed[0]) : null, parsed ? Number(parsed[1] ?? 0) : 0);
   });
 
   refreshBtn.addEventListener('click', () => void core.refreshDocuments());

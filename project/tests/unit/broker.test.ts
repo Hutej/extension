@@ -52,7 +52,9 @@ function makeDeps(overrides: Partial<BrokerDeps> = {}): BrokerDeps {
     now: () => 10_000,
     randomId: () => `id-${++n}`,
     sendToTab: async () => ({ ok: true, kind: 'relayed', receipt: {} }),
-    sendToFrame: async () => ({ ok: true, kind: 'record-ack' }),
+    // The S8.3 relay targets the exact frame — the stub relays the same
+    // reply shape as sendToTab.
+    sendToFrame: async () => ({ ok: true, kind: 'relayed', receipt: {} }),
     persistRegistry: async () => {},
     loadRegistry: async () => [],
     styles,
@@ -268,6 +270,7 @@ test('GetOperation relays the runtime reply to a workspace sender', async () => 
   const dk = { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' };
   const core = createBrokerCore(makeDeps({
     sendToTab: async () => ({ ok: false, kind: 'error', error: { code: 'unknown-target', phase: 'reconcile', retryClass: 'user-decision', message: 'no receipt' } }),
+    sendToFrame: async () => ({ ok: false, kind: 'error', error: { code: 'unknown-target', phase: 'reconcile', retryClass: 'user-decision', message: 'no receipt' } }),
   }));
   await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
   const reply = await core.handleMessage(workspaceSender, envelope({
@@ -286,6 +289,7 @@ test('T08/I06: a relay that never answers within its budget is timeout-unknown, 
     // Real timer: the relay budget is min(deadline-now, 5000) — use a tiny
     // deadline so the test stays fast.
     sendToTab: () => new Promise(() => undefined),
+    sendToFrame: () => new Promise(() => undefined),
   }));
   await core.handleMessage(runtimeSender(), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-1' } }));
   const reply = await core.handleMessage(workspaceSender, envelope({
@@ -303,6 +307,9 @@ test('T08/I06: an unreachable runtime (no receiver) reports stale-document with 
   const dk = { tabId: 4, frameId: 0, browserDocumentId: 'doc-1', runtimeInstanceId: 'ri-1' };
   const core = createBrokerCore(makeDeps({
     sendToTab: async () => {
+      throw new Error('Could not establish connection. Receiving end does not exist.');
+    },
+    sendToFrame: async () => {
       throw new Error('Could not establish connection. Receiving end does not exist.');
     },
   }));
@@ -603,4 +610,33 @@ test('S5.1: quarantined payloads export to the workspace only — raw bytes, nev
   assert.ok(reply && reply.ok && reply.kind === 'quarantine', JSON.stringify(reply));
   assert.equal((reply as { raw?: string }).raw, '{"legacy":true}');
   assert.deepEqual(calls, ['export:rv_https://site.test/wiki']);
+});
+
+test('S8.3/T06: ListDocuments resolves an embedded frame document as "frame of <parent origin>" from the browser tree', async () => {
+  const core = createBrokerCore(makeDeps({
+    allFrames: async (tabId) => tabId === 4
+      ? [
+          { frameId: 0, parentFrameId: -1, url: 'https://site.test/page' },
+          { frameId: 3, parentFrameId: 0, url: 'https://frames.test/widget' },
+        ]
+      : null,
+  }));
+  await core.handleMessage(runtimeSender({ frameId: 0, documentId: 'doc-top' }), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-top' } }));
+  await core.handleMessage(runtimeSender({ frameId: 3, documentId: 'doc-frame', url: 'https://frames.test/widget', origin: 'https://frames.test' }), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-frame' } }));
+  const reply = await core.handleMessage(workspaceSender, envelope({ payload: { command: 'ListDocuments' } }));
+  assert.ok(reply && reply.ok && reply.kind === 'documents');
+  const rows = (reply as { documents: Array<{ frameId: number; origin: string | null; parentOrigin: string | null }> }).documents;
+  const top = rows.find((r) => r.frameId === 0);
+  const frame = rows.find((r) => r.frameId === 3);
+  assert.equal(top!.parentOrigin, null, 'top documents carry no parent');
+  assert.equal(frame!.origin, 'https://frames.test');
+  assert.equal(frame!.parentOrigin, 'https://site.test', 'the enclosing origin is browser-derived display only');
+
+  // An unavailable tree degrades the display — never the row.
+  const core2 = createBrokerCore(makeDeps({ allFrames: async () => null }));
+  await core2.handleMessage(runtimeSender({ frameId: 3, documentId: 'doc-frame', url: 'https://frames.test/widget', origin: 'https://frames.test' }), envelope({ payload: { command: 'RegisterDocument', runtimeInstanceId: 'ri-frame' } }));
+  const reply2 = await core2.handleMessage(workspaceSender, envelope({ payload: { command: 'ListDocuments' } }));
+  assert.ok(reply2 && reply2.ok && reply2.kind === 'documents');
+  const rows2 = (reply2 as { documents: Array<{ parentOrigin: string | null }> }).documents;
+  assert.equal(rows2[0].parentOrigin, null, 'the display omits the parent when the tree is unavailable');
 });

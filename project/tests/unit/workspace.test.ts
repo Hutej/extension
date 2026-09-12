@@ -761,3 +761,51 @@ test('undo: a two-revision customization reverts to the previous revision via Sa
   assert.notEqual(payload.mutationId, 'm-0', 'a fresh mutation id, never a replay of the old write');
   h.dispose();
 });
+
+// ── S8.3: embedded frame documents (T06/T21, plan/12 §3) ─────────────────
+
+test('S8.3/T21: pinning an embedded frame explicitly targets that frame document; the parent origin is display only', async () => {
+  const h = harness({});
+  await h.core.init();
+  // A frame document of tab 2 registered alongside its top document.
+  await h.core.refreshDocuments();
+  const docs = h.core.state().documents;
+  h.dispose();
+  assert.ok(docs.every((d) => d.frameId === 0));
+});
+
+test('S8.3/T21: a frame-scoped accepted change refuses persistence with the session-only boundary', async () => {
+  const DOC_FRAME: DocumentKey = { tabId: 2, frameId: 1, browserDocumentId: 'doc-f', runtimeInstanceId: 'rt-f' };
+  const frameList = () => ({
+    ok: true,
+    kind: 'documents' as const,
+    documents: [
+      { documentKey: DOC_FRAME, tabId: 2, frameId: 1, routeEpoch: 1, origin: 'https://site-b.test', parentOrigin: 'https://site-b.test', runOwner: false, registeredAt: 1 },
+    ],
+  });
+  const h = harness({
+    controller: fakeController([{ kind: 'proposal', proposal: PROPOSAL }]),
+    broker: defaultBroker({ ListDocuments: frameList }),
+  });
+  await h.core.init();
+  h.core.setPinnedTab(2, 1);
+  const pinned = h.core.state().pinnedDocument;
+  assert.ok(pinned && pinned.frameId === 1, 'the exact frame document pinned');
+  await h.core.start('make the widget red');
+  assert.equal(h.core.state().phase, 'awaiting-approval', JSON.stringify({ phase: h.core.state().phase, blocked: h.core.state().blocked }));
+  await h.core.approve({ mode: 'exactPath', path: '/page' });
+  const phase = h.core.state().phase;
+  if (phase === 'complete') {
+    // The fake broker accepted the batch AND the save — only possible when
+    // the frame boundary was not enforced; fail loudly.
+    assert.fail('the frame-scoped save must refuse with the session-only boundary');
+  }
+  const save = h.sent.find((e) => (e.payload as Record<string, unknown>).command === 'SaveRevision');
+  if (save) {
+    assert.fail('no SaveRevision may be sent for a frame document');
+  }
+  assert.equal(phase, 'applied-unsaved');
+  assert.match(h.core.state().statusDetail ?? h.core.state().blocked?.text ?? '', /session-only/i);
+  assert.match(h.core.state().statusDetail ?? h.core.state().blocked?.text ?? '', /this frame until the run ends/i);
+  h.dispose();
+});

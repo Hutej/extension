@@ -61,7 +61,7 @@ export type BrokerReply =
   | { ok: true; kind: 'record-revision'; recordRevision: number }
   | { ok: true; kind: 'origin-record'; originRecord: Record<string, unknown> | null }
   | { ok: true; kind: 'quarantine'; entries: Array<{ key: string; reason: string; bytes: number }>; raw?: string }
-  | { ok: true; kind: 'documents'; documents: Array<{ documentKey: DocumentKey; tabId: number; frameId: number; routeEpoch: number; origin: string | null; runOwner: boolean; registeredAt: number }> }
+  | { ok: true; kind: 'documents'; documents: Array<{ documentKey: DocumentKey; tabId: number; frameId: number; routeEpoch: number; origin: string | null; parentOrigin: string | null; runOwner: boolean; registeredAt: number }> }
   | { ok: false; kind: 'error'; error: ErrorRecord; conflict?: Record<string, unknown> };
 
 export function errorRecord(
@@ -307,6 +307,10 @@ export interface BrokerDeps {
   sendToTab(tabId: number, message: unknown): Promise<unknown>;
   /** Deliver to a specific frame of a tab (S5.2 broadcast targeting). */
   sendToFrame(tabId: number, frameId: number, message: unknown): Promise<unknown>;
+  /** S8.3 permission display: the browser's frame tree for a tab (frame ids,
+   *  parent ids and URLs). Browser-derived only — a payload can never name
+   *  frame identity. Returns null when webNavigation cannot serve the tree. */
+  allFrames?(tabId: number): Promise<Array<{ frameId: number; parentFrameId: number; url: string }> | null>;
   /** Reconcile pending writes at startup; surfaced for diagnostics. */
   onStoreHydrated?(result: { quarantined: number; pending: Array<{ outcome: string }>; totalBytes: number }): void;
 }
@@ -540,7 +544,7 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
         if (!('record' in resolved)) return resolved;
         const p = APPLY_BATCH_PAYLOAD(envelope.payload, 'payload');
         if (!p.ok) return deny('invalid-schema', 'decode', firstIssue(p.issues));
-        return relayToRuntime(deps, resolved.record.documentKey.tabId, envelope);
+        return relayToRuntime(deps, resolved.record.documentKey.tabId, envelope, resolved.record.documentKey.frameId);
       }
 
       case 'GetOperation': {
@@ -575,7 +579,7 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
         // Relay to the registered runtime and bound the wait. The envelope is
         // forwarded unchanged: the runtime fences it against its own identity
         // (documentKey + expectedRouteEpoch) independently (I04).
-        return relayToRuntime(deps, record.documentKey.tabId, envelope);
+        return relayToRuntime(deps, record.documentKey.tabId, envelope, record.documentKey.frameId);
       }
 
       case 'Observe':
@@ -599,7 +603,7 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
         }
         // Observation executes in the registered runtime, which owns the
         // snapshot/cursor/target registry. Relay is deadline-bounded (I06).
-        return relayToRuntime(deps, resolved.record.documentKey.tabId, envelope);
+        return relayToRuntime(deps, resolved.record.documentKey.tabId, envelope, resolved.record.documentKey.frameId);
       }
 
       case 'StageStyle': {
@@ -722,19 +726,38 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
         // (plan/16 §1: the user pins a document explicitly — never a tab-id
         // guess). The registry carries no page content: keys/epochs/origins
         // only, exactly what broadcasts already expose.
-        return {
-          ok: true,
-          kind: 'documents',
-          documents: [...registry.values()].map((r) => ({
+        // S8.3: the parent origin is tracked for permission DISPLAY only
+        // (plan/12 §3) — the workspace shows embedded-frame documents as
+        // "frame N of <parent origin>". It is browser-derived and never part
+        // of any targeting or saved intent (no frame-index guess, I19/I26).
+        const trees = new Map<number, Array<{ frameId: number; parentFrameId: number; url: string }> | null>();
+        const documents: Array<{ documentKey: DocumentKey; tabId: number; frameId: number; routeEpoch: number; origin: string | null; parentOrigin: string | null; runOwner: boolean; registeredAt: number }> = [];
+        for (const r of registry.values()) {
+          let parentOrigin: string | null = null;
+          if (r.documentKey.frameId !== 0) {
+            const tabId = r.documentKey.tabId;
+            if (!trees.has(tabId)) trees.set(tabId, (deps.allFrames ? await deps.allFrames(tabId) : null) ?? null);
+            const tree = trees.get(tabId);
+            const self = tree?.find((f) => f.frameId === r.documentKey.frameId);
+            const parent = self ? tree?.find((f) => f.frameId === self.parentFrameId) : undefined;
+            try {
+              parentOrigin = parent?.url ? new URL(parent.url).origin : null;
+            } catch {
+              parentOrigin = null;
+            }
+          }
+          documents.push({
             documentKey: r.documentKey,
             tabId: r.documentKey.tabId,
             frameId: r.documentKey.frameId,
             routeEpoch: r.routeEpoch,
             origin: r.origin,
+            parentOrigin,
             runOwner: r.run !== null,
             registeredAt: r.registeredAt,
-          })),
-        };
+          });
+        }
+        return { ok: true, kind: 'documents', documents };
       }
 
       case 'GetState': {
@@ -746,7 +769,7 @@ export function createBrokerCore(deps: BrokerDeps): BrokerCore {
         // clean state (I10).
         const resolved = resolveDocument(envelope);
         if (!('record' in resolved)) return resolved;
-        return relayToRuntime(deps, resolved.record.documentKey.tabId, envelope);
+        return relayToRuntime(deps, resolved.record.documentKey.tabId, envelope, resolved.record.documentKey.frameId);
       }
 
       default:
@@ -898,6 +921,7 @@ function relayToRuntime(
   deps: BrokerDeps,
   tabId: number,
   envelope: Envelope,
+  frameId = 0,
 ): Promise<BrokerReply> {
   const budgetMs = Math.max(0, Math.min(envelope.deadlineAt - deps.now(), 5000));
   let raced = false;
@@ -909,7 +933,14 @@ function relayToRuntime(
   });
   return (async () => {
     try {
-      const reply = await Promise.race([deps.sendToTab(tabId, envelope), timeout]);
+      // S8.3: the relay targets the registered document's EXACT frame — a
+      // frame document's commands reach that frame's runtime (plan/12 §3).
+      // frameId 0 uses the EXACT top-frame context too: a bare sendToTab
+      // broadcasts to every frame, and another frame's synchronous fence
+      // rejection would race ahead of the addressed runtime's queued
+      // acceptance (the first answer would be a rejection — T06).
+      const deliver = deps.sendToFrame(tabId, frameId, envelope);
+      const reply = await Promise.race([deliver, timeout]);
       if (reply !== null && typeof reply === 'object' && 'ok' in (reply as Record<string, unknown>)) {
         return { ok: true, kind: 'relayed', receipt: reply as Record<string, unknown> };
       }
@@ -996,6 +1027,15 @@ export function installBroker(): void {
           else resolve(reply as unknown);
         });
       }),
+    // S8.3 permission display: the browser's frame tree (never a payload).
+    allFrames: async (tabId) => {
+      try {
+        const frames = await chrome.webNavigation.getAllFrames({ tabId });
+        return (frames ?? []).map((f: { frameId: number; parentFrameId: number; url: string }) => ({ frameId: f.frameId, parentFrameId: f.parentFrameId, url: f.url }));
+      } catch {
+        return null; // the tree is unavailable — the display omits the parent
+      }
+    },
     persistRegistry: async (records) => {
       await chrome.storage.session.set({ [REGISTRY_KEY]: records });
     },

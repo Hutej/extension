@@ -135,6 +135,9 @@ export interface VerifyPlan {
   /** New extension-authored text (insertUI) for the WCAG AA contrast check. */
   ownedText: Array<{ el: Element; sample: string }>;
   tokenChecks: Array<{ key: string; el: Element; ns: string }>;
+  /** S8.3: root-local author stylesheets — installed inside each open shadow
+   *  root whose targets the document fragment cannot reach (plan/12 §3). */
+  localSheets: Array<{ key: string; root: Node; node: Element | null }>;
   /** Declarations skipped by design (custom properties) — disclosed, never silently. */
   unmeasuredDecls: number;
 }
@@ -439,6 +442,20 @@ export function createVerifier(deps: VerifierDeps): Verifier {
         outcomes.push({ key: t.key, section: 'delivery', status: 'pass' });
       } else {
         outcomes.push({ key: t.key, section: 'delivery', status: 'fail', detail: 'a candidate target lost its composition token (site interference)' });
+      }
+    }
+
+    for (const [j, ls] of plan.localSheets.entries()) {
+      const key = ls.key ?? `delivery:local-sheet:${j}`;
+      if (!want(key)) continue;
+      if (ls.node === null) {
+        outcomes.push({ key, section: 'delivery', status: 'unknown', detail: 'the root-local stylesheet was not installed (the root could not host it)' });
+      } else if (!ls.node.isConnected || ls.node.parentNode !== ls.root) {
+        outcomes.push({ key, section: 'delivery', status: 'fail', detail: 'the root-local stylesheet left its shadow root (site interference)' });
+      } else if ((ls.node.textContent ?? '').length === 0) {
+        outcomes.push({ key, section: 'delivery', status: 'fail', detail: 'the root-local stylesheet carries no bytes' });
+      } else {
+        outcomes.push({ key, section: 'delivery', status: 'pass' });
       }
     }
 

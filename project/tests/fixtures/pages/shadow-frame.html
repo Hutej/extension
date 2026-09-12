@@ -1,0 +1,15 @@
+<!doctype html>
+<html>
+  <head><title>Shadow and frame host</title></head>
+  <body>
+    <section id="top-area">
+      <p id="top-note">Top document content</p>
+      <my-widget id="host">Fallback (the shadow root replaces this)</my-widget>
+    </section>
+    <iframe id="frame-child" src="frame-child.html" title="Embedded frame" width="320" height="120"></iframe>
+    <script>
+      document.getElementById('host').attachShadow({ mode: 'open' }).innerHTML =
+        '<p id="inner-label" style="color: black;">Widget label</p>';
+    </script>
+  </body>
+</html>

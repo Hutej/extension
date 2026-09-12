@@ -361,3 +361,30 @@ test('S5.2/T23: two rolled-back replays within the window pause the group — vi
   await replay.onRouteChanged();
   assert.equal(txn.applied.length, appliedCount, 'paused groups are not auto-retried');
 });
+
+test('S8.3/T06: rootPath hops reach open shadow descendants; closed or absent roots stay explicitly unsupported', () => {
+  const label = el('span', { id: 'inner-label' });
+  const innerScope = makeDoc(label);
+  const host = el('widget');
+  (host as StubNode & { shadowRoot?: unknown }).shadowRoot = innerScope.doc; // the stub's open-root interface
+  const { doc } = makeDoc(host);
+  const realDoc = asDoc(doc);
+
+  const hop = resolveDescriptor(realDoc, { rootPath: ['widget'], selection: 'single', anchor: { tag: 'span', stableId: 'inner-label' }, relation: 'self', matchBounds: { min: 1, max: 1 } });
+  assert.ok(hop.ok, JSON.stringify(hop));
+  if (hop.ok) assert.equal((hop.elements[0] as unknown as StubNode), label, 'the hop resolved inside the shadow root');
+
+  // A closed or absent root is an explicit unsupported outcome — never a
+  // best-effort light-DOM guess (I26).
+  (host as StubNode & { shadowRoot?: unknown }).shadowRoot = null;
+  const closed = resolveDescriptor(realDoc, { rootPath: ['widget'], selection: 'single', anchor: { tag: 'span' }, relation: 'self', matchBounds: { min: 1, max: 1 } });
+  assert.equal(closed.ok, false);
+  if (!closed.ok) assert.equal(closed.reason, 'unsupported');
+  if (!closed.ok) assert.match(closed.detail, /closed or absent/);
+
+  // A missing host segment is unsupported too — the path never broadens.
+  (host as StubNode & { shadowRoot?: unknown }).shadowRoot = innerScope.doc;
+  const missingHost = resolveDescriptor(realDoc, { rootPath: ['widget', 'panel'], selection: 'single', anchor: { tag: 'span' }, relation: 'self', matchBounds: { min: 1, max: 1 } });
+  assert.equal(missingHost.ok, false);
+  if (!missingHost.ok) assert.equal(missingHost.reason, 'unsupported');
+});
