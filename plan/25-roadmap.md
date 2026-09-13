@@ -5,7 +5,7 @@
 ## Current checkpoint
 
 - Current phase: **S8 — workflow and layout breadth**.
-- Next task: **S8.4**.
+- Next task: **S9.1**.
 
 ## User-directed UX rework (2026-09-13, between S8.3 and S8.4)
 
