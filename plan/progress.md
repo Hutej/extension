@@ -740,3 +740,57 @@ validation/consent/safety bounds are untouched (never weakened).
 - Gates ×2 green (354 unit + 36 browser); built chunk verified (seed 600s +
   token). User action: re-load the unpacked extension to re-seed (fresh
   storage) or note existing seeded profiles keep the old 180s deadline.
+
+## S8.4 — Bounded owned Canvas 2D — `complete`
+
+- Date: 2026-09-13. Source: `main` `487f1b6` (clean tree).
+- **Contracts** (`contracts.ts`): `CanvasScene`/`CanvasDrawRecord` (closed
+  rect/circle/polyline/text records) + `decodeCanvasScene` — bounded data
+  only (≤256 records, ≤2048 polyline points, ≤4 KiB text/scene, ≤4096
+  viewBox, solid colors via `parseColor` + a bounded named-color table, font
+  family as one bounded name, no script strings/method names/context
+  properties/images). `scene` joined `INSERT_UI_TAGS`; the scene record rides
+  ONLY the scene node (structural pairing at decode, text/children policy
+  refusals at compile). New LIMITS: `maxCanvasDrawRecords`,
+  `maxCanvasPolylinePoints`, `maxCanvasTextBytes`, `maxViewBoxExtent`,
+  `maxCanvasDescriptionChars`, `maxCanvasFallbackChars`.
+- **Compile** (`compile.ts`): scene passthrough on the plan; no new policy.
+- **Renderer** (`runtime/content.ts` — inside the ONE generic creator, no new
+  module/dependency): buildScene creates the owned host + `data-rv2-canvas`
+  own canvas (role=img + the scene description) + `data-rv2-canvas-fallback`
+  text; native page canvases are never touched (I18). Lifecycle per plan/28
+  §3: coalesced one-shot redraw (ResizeObserver + scheduled callback, never a
+  rAF loop); zero-size/hidden boxes wait with no allocation; backing = box ×
+  min(2, dpr) lowered to fit 1M pixels/canvas and 2M pixels/document with
+  explicit `data-rv2-canvas-scale`/`data-rv2-canvas-lowered` receipts;
+  contain+center transform; records painted in order from saved data only; no
+  model/network calls during redraw (redraw reads only captured scene data).
+  Unavailability/context loss → the accessible fallback SHOWS with
+  `canvas-unavailable` (never canvas success, I26); restoration redraws once.
+  Release disconnects the observer and frees the EXACT document pixel budget;
+  a late-scheduled redraw after release is guarded (never repaints a detached
+  host or corrupts the budget).
+- **Transaction**: the canvas accessible fallback is excluded from the WCAG
+  AA owned-text check (scene content, not authored text — a low-contrast
+  fallback can never roll back a valid scene batch).
+- **Tests**: new `tests/unit/canvas.test.ts` (13 tests: decode round-trip +
+  14 refusal shapes, compile policy, renderer draw order/transform/receipts,
+  backing-cap lowering, exact document budget release/reuse, zero-size wait,
+  context loss/restoration, no-context fallback, exact release, unrelated
+  native canvas untouched) + browser T32 ×2 on the real path
+  (`canvas-fixture.html` with the page's OWN native canvas): known draw
+  output (crimson at the rect's logical center on the OWN canvas), backing =
+  box × receipted scale, fallback hidden, aria-label, viewport resize → one
+  redraw with a new receipt while the site canvas backing/pixels never move,
+  save+disable release removes the scene exactly (site canvas survives the
+  full cycle), oversized scene refused at the relay decode with nothing
+  created. Fallback AA exclusion proven: the fixture's text color is
+  deliberately low-contrast and the batch still applies.
+- **Evidence**: gates ×2 green — unit **367/367** (21 suites, inventory
+  complete), browser **38/38** (2 suites), 0 known-red, 0 unexpected.
+  `npm run typecheck`/`lint`/`build` pass.
+- Residual: canvas ANIMATION means CSS animation of the element only; scoped
+  internals of EXISTING page canvases stay unsupported (plan/28 §3 table);
+  backing scale >2 (superresolution) is not promised.
+
+Next task: **S9.1 — Measure stress, compatibility, performance and product quality**.

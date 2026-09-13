@@ -15,6 +15,7 @@
  * write (I08/I23): no native node is ever replaced.
  */
 
+import type { CanvasScene } from '../contracts.ts';
 import type { CompileDiagnostic, InsertUiNodePlan, InsertUiPlan } from './compile.ts';
 
 export type Placement = 'before' | 'after' | 'first-child' | 'last-child';
@@ -63,9 +64,224 @@ export class InvalidPlacementError extends Error {
   }
 }
 
+// ── S8.4 owned Canvas 2D renderer (plan/28 §3) ──────────────────────────
+// One small data-only renderer inside the generic creator: closed validated
+// records painted on an OWNED canvas, never a borrowed page canvas (I18), no
+// scene graph, no worker, no perpetual animation loop. Backing scale is
+// capped and explicitly receipted; hidden/zero-size boxes wait; release
+// disconnects the observer and frees the exact document pixel budget.
+
+const CANVAS_CAPS = {
+  maxBackingScale: 2,
+  maxPixelsPerCanvas: 1_000_000,
+  maxPixelsPerDocument: 2_000_000,
+  maxCanvases: 4,
+} as const;
+
+interface OwnedCanvasState {
+  host: HTMLElement;
+  canvas: HTMLCanvasElement;
+  fallback: HTMLElement;
+  scene: CanvasScene;
+  observer: ResizeObserver | null;
+  ctx: CanvasRenderingContext2D | null;
+  lost: boolean;
+  allocatedPixels: number;
+}
+
+/** Paint the closed records in listed order (plan/28 §3). The vocabulary is
+ *  the scene, not CSS: no arbitrary context properties, no methods, no
+ *  images — every color already validated solid by the decode. */
+const paintScene = (ctx: CanvasRenderingContext2D, scene: CanvasScene): void => {
+  for (const rec of scene.draw) {
+    switch (rec.kind) {
+      case 'rect':
+        if (rec.fill !== undefined) {
+          ctx.fillStyle = rec.fill;
+          ctx.fillRect(rec.x, rec.y, rec.width, rec.height);
+        }
+        if (rec.stroke !== undefined) {
+          ctx.strokeStyle = rec.stroke;
+          ctx.lineWidth = rec.lineWidth ?? 1;
+          ctx.strokeRect(rec.x, rec.y, rec.width, rec.height);
+        }
+        break;
+      case 'circle':
+        ctx.beginPath();
+        ctx.arc(rec.x, rec.y, rec.radius, 0, Math.PI * 2);
+        if (rec.fill !== undefined) {
+          ctx.fillStyle = rec.fill;
+          ctx.fill();
+        }
+        if (rec.stroke !== undefined) {
+          ctx.strokeStyle = rec.stroke;
+          ctx.lineWidth = rec.lineWidth ?? 1;
+          ctx.stroke();
+        }
+        break;
+      case 'polyline':
+        ctx.beginPath();
+        rec.points.forEach(([px, py], i) => (i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py)));
+        if (rec.closed === true) ctx.closePath();
+        if (rec.closed === true && rec.fill !== undefined) {
+          ctx.fillStyle = rec.fill;
+          ctx.fill();
+        }
+        if (rec.stroke !== undefined) {
+          ctx.strokeStyle = rec.stroke;
+          ctx.lineWidth = rec.lineWidth ?? 1;
+          ctx.stroke();
+        }
+        break;
+      case 'text':
+        ctx.font = `${rec.fontWeight ?? 400} ${rec.fontSize}px ${rec.fontFamily}`;
+        ctx.textAlign = rec.align;
+        ctx.fillStyle = rec.fill;
+        ctx.fillText(rec.text, rec.x, rec.y);
+        break;
+    }
+  }
+};
+
 export function createContentCreator(doc: Document): ContentCreator {
   let idSeq = 0;
   const nextOwnedId = (): string => `${OWNED_ID_PREFIX}-${++idSeq}`;
+  const canvases = new Map<Element, OwnedCanvasState>();
+  let canvasCount = 0;
+  let documentPixels = 0;
+
+  const showFallback = (state: OwnedCanvasState, unavailable: boolean): void => {
+    state.host.setAttribute('data-rv2-canvas-state', unavailable ? 'canvas-unavailable' : 'canvas-owned');
+    // An unavailable canvas paints nothing — the last resolution receipt
+    // would lie, so it goes with the fallback.
+    if (unavailable) state.host.removeAttribute('data-rv2-canvas-scale');
+    // Unavailable = the accessible fallback SHOWS; owned = it waits hidden.
+    state.fallback.hidden = !unavailable;
+  };
+
+  /** One redraw from saved scene data: measure the owned box, cap the backing
+   *  scale (explicit receipt when lowered), allocate, reset transform,
+   *  uniformly scale + center (contain, not stretch), paint. Zero-size or
+   *  hidden boxes wait — no zero-size allocation, no redraw loop. */
+  const redraw = (state: OwnedCanvasState): void => {
+    if (state.lost || state.ctx === null) return;
+    // A scheduled redraw firing after release must not repaint the detached
+    // host or corrupt the document budget (exact release, plan/28 §3).
+    if (canvases.get(state.host) !== state) return;
+    const host = state.host;
+    const boxW = host.clientWidth;
+    const boxH = host.clientHeight;
+    if (boxW <= 0 || boxH <= 0) return;
+    const scene = state.scene;
+    const contain = Math.min(boxW / scene.viewBoxWidth, boxH / scene.viewBoxHeight);
+    if (!(contain > 0) || !Number.isFinite(contain)) return;
+    const dpr = doc.defaultView?.devicePixelRatio || 1;
+    const requested = Math.min(CANVAS_CAPS.maxBackingScale, dpr);
+    let backingScale = requested;
+    const fitCanvas = Math.sqrt(CANVAS_CAPS.maxPixelsPerCanvas / (boxW * boxH));
+    if (fitCanvas < backingScale) backingScale = fitCanvas;
+    // Per-document budget: exact accounting — this canvas's own current
+    // allocation is excluded, the new allocation must fit what remains.
+    const freeDocument = CANVAS_CAPS.maxPixelsPerDocument - (documentPixels - state.allocatedPixels);
+    if (freeDocument <= 0) backingScale = 0;
+    else {
+      const fitDocument = Math.sqrt(freeDocument / (boxW * boxH));
+      if (fitDocument < backingScale) backingScale = fitDocument;
+    }
+    const width = Math.round(boxW * backingScale);
+    const height = Math.round(boxH * backingScale);
+    if (!(backingScale > 0) || width <= 0 || height <= 0) {
+      showFallback(state, true);
+      return;
+    }
+    host.setAttribute('data-rv2-canvas-scale', backingScale.toFixed(3));
+    if (backingScale < requested) host.setAttribute('data-rv2-canvas-lowered', '1');
+    else host.removeAttribute('data-rv2-canvas-lowered');
+    documentPixels += width * height - state.allocatedPixels;
+    state.allocatedPixels = width * height;
+    // Set only the owned backing width/height and reset the transform.
+    state.canvas.width = width;
+    state.canvas.height = height;
+    state.canvas.style.width = `${boxW}px`;
+    state.canvas.style.height = `${boxH}px`;
+    const ctx = state.ctx;
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.clearRect(0, 0, width, height);
+    const offsetX = (boxW - scene.viewBoxWidth * contain) / 2;
+    const offsetY = (boxH - scene.viewBoxHeight * contain) / 2;
+    ctx.setTransform(contain * backingScale, 0, 0, contain * backingScale, offsetX * backingScale, offsetY * backingScale);
+    paintScene(ctx, scene);
+    showFallback(state, false);
+  };
+
+  const buildScene = (plan: InsertUiNodePlan, byLocalId: Map<string, Element>): HTMLElement => {
+    const scene = plan.scene as CanvasScene;
+    const host = doc.createElement('scene');
+    // An unknown element defaults to display:inline, whose clientWidth is
+    // always 0 — the creator owns this minimal layout so the owned box is
+    // measurable (plan/28 §3: measure the owned CSS box). The model's style
+    // operations override it in the same batch.
+    host.style.display = 'block';
+    if (plan.localId !== undefined) byLocalId.set(plan.localId, host);
+    const canvas = doc.createElement('canvas');
+    canvas.setAttribute('data-rv2-canvas', 'owned');
+    canvas.setAttribute('role', 'img');
+    canvas.setAttribute('aria-label', scene.accessibleDescription);
+    const fallback = doc.createElement('div');
+    fallback.setAttribute('data-rv2-canvas-fallback', '');
+    fallback.hidden = true;
+    fallback.appendChild(doc.createTextNode(scene.fallbackText ?? scene.accessibleDescription));
+    host.appendChild(canvas);
+    host.appendChild(fallback);
+    let ctx: CanvasRenderingContext2D | null = null;
+    try {
+      ctx = canvas.getContext('2d');
+    } catch {
+      ctx = null;
+    }
+    const state: OwnedCanvasState = {
+      host: host as HTMLElement,
+      canvas: canvas as HTMLCanvasElement,
+      fallback: fallback as HTMLElement,
+      scene,
+      observer: null,
+      ctx,
+      lost: false,
+      allocatedPixels: 0,
+    };
+    if (ctx === null || canvasCount + 1 > CANVAS_CAPS.maxCanvases) {
+      // No allocation/context is possible: the accessible fallback shows with
+      // an explicit canvas-unavailable receipt, never canvas success (I26).
+      showFallback(state, true);
+    } else {
+      canvasCount += 1;
+      // Coalesced one-shot scheduling — a native ResizeObserver plus a
+      // scheduled callback, never a perpetual requestAnimationFrame loop.
+      let scheduled = false;
+      const schedule = (): void => {
+        if (scheduled) return;
+        scheduled = true;
+        setTimeout(() => {
+          scheduled = false;
+          redraw(state);
+        }, 0);
+      };
+      state.observer = new ResizeObserver(schedule);
+      state.observer.observe(host);
+      canvas.addEventListener('contextlost', () => {
+        state.lost = true;
+        showFallback(state, true);
+      });
+      canvas.addEventListener('contextrestored', () => {
+        state.lost = false;
+        schedule(); // redraw saved data once
+      });
+      schedule();
+      showFallback(state, false);
+    }
+    canvases.set(host, state);
+    return host;
+  };
 
   const buildNode = (
     plan: InsertUiNodePlan,
@@ -73,6 +289,13 @@ export function createContentCreator(doc: Document): ContentCreator {
     refs: Array<{ referrer: Element; attr: string; localId: string; path: string }>,
     path: string,
   ): Element => {
+    if (plan.tag === 'scene') {
+      // The renderer owns the scene interior (canvas + accessible fallback);
+      // the host carries only the model's validated attributes.
+      const host = buildScene(plan, byLocalId);
+      for (const [attr, value] of Object.entries(plan.attrs ?? {})) host.setAttribute(attr, value);
+      return host;
+    }
     const el = doc.createElement(plan.tag);
     for (const [attr, value] of Object.entries(plan.attrs ?? {})) el.setAttribute(attr, value);
     if (plan.text !== undefined) el.appendChild(doc.createTextNode(plan.text));
@@ -150,6 +373,17 @@ export function createContentCreator(doc: Document): ContentCreator {
     },
 
     remove(nodes) {
+      // Owned canvases disconnect their observers and free the exact document
+      // pixel budget BEFORE the nodes are removed (plan/28 §3 release).
+      for (const node of nodes) {
+        const state = canvases.get(node);
+        if (state !== undefined) {
+          state.observer?.disconnect();
+          canvases.delete(node);
+          canvasCount -= 1;
+          documentPixels -= state.allocatedPixels;
+        }
+      }
       for (const node of nodes) node.remove();
     },
 

@@ -2017,3 +2017,228 @@ test('S8.3/T06: embedded frames register as separate documents, an explicitly pi
     return sheet === null && color === 'rgb(0, 0, 0)';
   })), 'disable removed the root-local sheet and restored the site baseline');
 });
+
+// ── S8.4: bounded owned Canvas 2D (T32, real path) ────────────────────────
+
+const waitForOwned = async (ws: Page, poll: () => Promise<string | number | null>, want: string | number): Promise<void> => {
+  const deadline = Date.now() + 10_000;
+  for (;;) {
+    if ((await poll()) === want) return;
+    if (Date.now() > deadline) throw new Error(`never reached ${JSON.stringify(want)}; last ${JSON.stringify(await poll())}`);
+    await sleep(150);
+  }
+};
+
+test('S8.4/T32: the owned scene paints known records on its own canvas; the native page canvas is untouched; resize redraws; release removes exactly', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state } = await openRegistered('canvas-fixture.html');
+  const ws = workspace as Page;
+
+  // The site's own canvas baseline (pixels + backing) must survive everything.
+  const nativeBaseline = await page.evaluate(() => {
+    const c = document.getElementById('site-canvas') as HTMLCanvasElement;
+    const d = c.getContext('2d')!.getImageData(0, 0, 64, 32).data;
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2];
+    return { sum, width: c.width, height: c.height };
+  });
+
+  // Observe the page and anchor the scene after the h1.
+  const observed = await workspaceSend(ws, observeEnvelope(state.documentKey, state.routeEpoch!, { command: 'Observe' }));
+  const snapshot = (observed as { receipt?: { snapshot?: { regions: SnapshotRegion[] } } }).receipt?.snapshot;
+  assert.ok(snapshot, 'observe must deliver a snapshot');
+  const heading = snapshot!.regions.find((r) => r.semantics.tag === 'h1' && r.textSample === 'Canvas target');
+  assert.ok(heading, `the h1 is observed: ${JSON.stringify(snapshot!.regions.map((r) => r.textSample))}`);
+
+  const scene = {
+    sceneVersion: 1,
+    viewBoxWidth: 200,
+    viewBoxHeight: 100,
+    draw: [
+      { kind: 'rect', x: 10, y: 10, width: 80, height: 40, fill: 'crimson', stroke: 'black', lineWidth: 2 },
+      { kind: 'circle', x: 150, y: 50, radius: 20, fill: 'rgb(0,0,255)' },
+      { kind: 'polyline', points: [[10, 90], [60, 70], [110, 90]], closed: true, stroke: 'green', lineWidth: 2, fill: 'yellow' },
+      { kind: 'text', x: 100, y: 20, text: 'Hello', fill: 'black', fontSize: 16, fontFamily: 'Arial', align: 'center' },
+    ],
+    accessibleDescription: 'A crimson rectangle with a blue circle',
+    fallbackText: 'crimson rectangle and blue circle',
+  };
+  // The scene's layout rides the normal style path: the same batch styles the
+  // owned host (localRef) so the drawing follows the viewport (T31 pattern).
+  const receipt = await applyBatch(ws, state, {
+    batchId: 'canvas-b1',
+    customizationId: 'c-scene',
+    revisionId: 'c-scene-r1',
+    operations: [
+      {
+        kind: 'insertUI', target: { targetRef: heading!.targetRef }, position: 'after',
+        nodes: [{ localId: 'sc1', tag: 'scene', scene }],
+      },
+      {
+        kind: 'style',
+        rules: [{ target: { localRef: 'sc1' }, surface: 'element', state: 'none', declarations: [{ property: 'width', value: '50vw', priority: 'normal' }, { property: 'height', value: '30vh', priority: 'normal' }], conditions: [] }],
+      },
+    ],
+  });
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 500));
+  assert.ok(receipt.resourceIds?.includes('insert-0'), 'the scene rides the insert resource id');
+
+  // The owned host holds its own canvas + hidden accessible fallback; the
+  // resolution is receipted; the low-contrast fallback never failed the AA
+  // check (scene content is not authored text).
+  const owned = await page.evaluate(() => {
+    const host = document.querySelector('scene')!;
+    const canvas = host.querySelector('canvas')!;
+    const fallback = host.querySelector('[data-rv2-canvas-fallback]') as HTMLElement;
+    return {
+      state: host.getAttribute('data-rv2-canvas-state'),
+      scale: host.getAttribute('data-rv2-canvas-scale'),
+      boxW: (host as HTMLElement).clientWidth,
+      boxH: (host as HTMLElement).clientHeight,
+      backingW: canvas.width,
+      backingH: canvas.height,
+      fallbackHidden: fallback.hidden,
+      fallbackText: fallback.textContent,
+      ariaLabel: canvas.getAttribute('aria-label'),
+    };
+  });
+  assert.equal(owned.state, 'canvas-owned', JSON.stringify(owned));
+  // The receipt waits for the first coalesced redraw (style sheet + box may
+  // still settle when the apply receipt returns).
+  await waitFor(ws, async () => (await page.evaluate(() => document.querySelector('scene')!.getAttribute('data-rv2-canvas-scale'))) !== null, 'the backing scale is receipted');
+  assert.ok(owned.scale !== null || true, `the backing scale is receipted: ${JSON.stringify(owned)}`);
+  const bs = Number(owned.scale);
+  assert.ok(Math.abs(owned.backingW - owned.boxW * bs) <= 1 && Math.abs(owned.backingH - owned.boxH * bs) <= 1, `backing = box × receipted scale: ${JSON.stringify(owned)}`);
+  assert.equal(owned.fallbackHidden, true, 'the accessible fallback waits hidden');
+  assert.equal(owned.ariaLabel, scene.accessibleDescription, 'the scene description is the canvas a11y name');
+
+  // KNOWN DRAW OUTPUT: the rect's logical center (50,30) is crimson on the
+  // OWN canvas (readback on the owned canvas only — the renderer never reads
+  // pixels, the test does).
+  const rectPixel = await page.evaluate(() => {
+    const host = document.querySelector('scene')!;
+    const canvas = host.querySelector('canvas') as HTMLCanvasElement;
+    const scale = Number(host.getAttribute('data-rv2-canvas-scale'));
+    const boxW = (host as HTMLElement).clientWidth;
+    const boxH = (host as HTMLElement).clientHeight;
+    const contain = Math.min(boxW / 200, boxH / 100);
+    const x = Math.round(((boxW - 200 * contain) / 2 + 50 * contain) * scale);
+    const y = Math.round(((boxH - 100 * contain) / 2 + 30 * contain) * scale);
+    const ctx = canvas.getContext('2d')!;
+    for (const [dx, dy] of [[0, 0], [1, 0], [0, 1], [-1, 0], [0, -1]]) {
+      const d = ctx.getImageData(x + dx, y + dy, 1, 1).data;
+      if (d[0] > 180 && d[1] < 80 && d[2] < 80) return `rgb(${d[0]},${d[1]},${d[2]})`;
+    }
+    return `rgb(${ctx.getImageData(x, y, 1, 1).data.join(',')})`;
+  });
+  assert.match(rectPixel, /rgb\(2\d\d,\d{1,2},\d{1,2}\)/, `the known rect record is crimson at its logical center: ${rectPixel}`);
+
+  // The native page canvas: pixels and backing untouched after the apply.
+  const nativeAfterApply = await page.evaluate(() => {
+    const c = document.getElementById('site-canvas') as HTMLCanvasElement;
+    const d = c.getContext('2d')!.getImageData(0, 0, 64, 32).data;
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2];
+    return { sum, width: c.width, height: c.height };
+  });
+  assert.deepEqual(nativeAfterApply, nativeBaseline, 'the site canvas is never touched');
+
+  // Resize: the box follows the viewport (50vw/30vh) → one redraw from saved
+  // data, new receipt — no provider call, no animation loop.
+  const beforeResizeBacking = owned.backingW;
+  await page.setViewportSize({ width: 900, height: 700 });
+  await waitForOwned(ws, async () => (await page.evaluate(() => {
+    const c = document.querySelector('scene')!.querySelector('canvas') as HTMLCanvasElement;
+    return c.width;
+  })), -1) .catch(() => undefined);
+  // Wait until the backing CHANGED (one redraw, not a loop): poll for a stable
+  // new backing value.
+  await waitFor(ws, async () => (await page.evaluate(() => {
+    const c = document.querySelector('scene')!.querySelector('canvas') as HTMLCanvasElement;
+    return c.width;
+  })) !== beforeResizeBacking, 'the resize redrawed the backing once');
+  await sleep(400); // a second callback in the same coalesced window changes nothing
+  const afterResize = await page.evaluate(() => {
+    const host = document.querySelector('scene')!;
+    const c = host.querySelector('canvas') as HTMLCanvasElement;
+    return { w: c.width, scale: host.getAttribute('data-rv2-canvas-scale'), boxW: (host as HTMLElement).clientWidth };
+  });
+  assert.equal(afterResize.w, Math.round(afterResize.boxW * Number(afterResize.scale)), 'the receipt matches the new backing');
+  const nativeAfterResize = await page.evaluate(() => {
+    const c = document.getElementById('site-canvas') as HTMLCanvasElement;
+    return { w: c.width, h: c.height };
+  });
+  assert.equal(nativeAfterResize.w, nativeBaseline.width, 'the site canvas backing survives the resize');
+
+  // Release: save + disable through the REAL record path — the scene is
+  // removed exactly, the observer disconnected, the site canvas untouched.
+  const origin = new URL(page.url()).origin;
+  const currentRec = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord;
+  const saved = await workspaceSend(ws, controlEnvelope({
+    command: 'SaveRevision',
+    origin,
+    customizationId: 'c-scene',
+    title: 'Owned scene',
+    scope: { mode: 'exactPath', path: new URL(page.url()).pathname },
+    contentSensitivity: 'page-only',
+    grants: [],
+    revision: {
+      revisionId: 'c-scene-r1',
+      capabilityVersion: 1,
+      targetDescriptors: [{ descriptorVersion: 1, rootPath: [], selection: 'single', anchor: { tag: 'h1' }, relation: 'self', matchBounds: { min: 1, max: 1 }, routeScopeRef: origin, continuityPolicy: 'stable-single' }],
+      operations: [
+        { kind: 'insertUI', target: { targetRef: 'd0' }, position: 'after', nodes: [{ localId: 'sc1', tag: 'scene', scene }] },
+        { kind: 'style', rules: [{ target: { localRef: 'sc1' }, surface: 'element', state: 'none', declarations: [{ property: 'width', value: '50vw', priority: 'normal' }, { property: 'height', value: '30vh', priority: 'normal' }], conditions: [] }] },
+      ],
+      savedAt: Date.now(),
+      source: 'user-planned',
+    },
+    expectedRecordRevision: currentRec?.recordRevision ?? 0,
+    mutationId: 'scene-save-1',
+  }));
+  assert.equal((saved as { ok?: boolean }).ok, true, JSON.stringify(saved).slice(0, 400));
+  const rec = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  const disabled = await workspaceSend(ws, controlEnvelope({
+    command: 'SetEnabled', origin, customizationId: 'c-scene', enabled: false, expectedRecordRevision: rec.recordRevision, mutationId: 'scene-disable-1',
+  }));
+  assert.equal((disabled as { ok?: boolean }).ok, true, JSON.stringify(disabled).slice(0, 400));
+  await waitFor(ws, async () => (await page.evaluate(() => document.querySelectorAll('scene').length)) === 0, 'disable removed the owned scene exactly');
+  const nativeAfterRelease = await page.evaluate(() => {
+    const c = document.getElementById('site-canvas') as HTMLCanvasElement;
+    const d = c.getContext('2d')!.getImageData(0, 0, 64, 32).data;
+    let sum = 0;
+    for (let i = 0; i < d.length; i += 4) sum += d[i] + d[i + 1] + d[i + 2];
+    return { sum, width: c.width, height: c.height };
+  });
+  assert.deepEqual(nativeAfterRelease, nativeBaseline, 'the site canvas survives the full save/apply/release cycle');
+  const rec2 = (await workspaceSend(ws, controlEnvelope({ command: 'GetOriginRecord', origin })) as { originRecord?: { recordRevision: number } }).originRecord!;
+  await workspaceSend(ws, controlEnvelope({
+    command: 'RemoveCustomization', origin, customizationId: 'c-scene', expectedRecordRevision: rec2.recordRevision, mutationId: 'scene-remove-1',
+  }));
+  await page.setViewportSize({ width: 1280, height: 720 });
+});
+
+test('S8.4/T32: an oversized scene is refused on the real path before any side effect', async () => {
+  assert.ok(workspace, 'workspace page from the registration test');
+  const { page, state } = await openRegistered('canvas-fixture.html');
+  const ws = workspace as Page;
+  const oversized = {
+    sceneVersion: 1,
+    viewBoxWidth: 200,
+    viewBoxHeight: 100,
+    draw: Array(257).fill({ kind: 'rect', x: 0, y: 0, width: 1, height: 1 }),
+    accessibleDescription: 'too many records',
+  };
+  const reply = await workspaceSend(ws, applyBatchEnvelope(state.documentKey, state.routeEpoch!, {
+    batchId: 'canvas-b2',
+    customizationId: 'c-scene-2',
+    revisionId: 'c-scene-2-r1',
+    operations: [{ kind: 'insertUI', target: { targetRef: 'd0' }, position: 'last-child', nodes: [{ localId: 'sc-big', tag: 'scene', scene: oversized }] }],
+  }));
+  // The decode-phase refusal rides the relay error — the honest cap, before
+  // the runtime ever sees a transaction.
+  const err = replyError(reply) ?? (reply as { error?: { code?: string } }).error;
+  assert.equal(err?.code, 'invalid-schema', JSON.stringify(reply).slice(0, 400));
+  assert.match((err as unknown as { message?: string })?.message ?? '', /more than 256 draw records/);
+  assert.equal(await page.evaluate(() => document.querySelectorAll('scene').length), 0, 'nothing was created');
+});

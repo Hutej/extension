@@ -273,7 +273,12 @@ const collectOwnedText = (roots: Element[]): Array<{ el: Element; sample: string
     let t = '';
     for (const c of el.childNodes) if (c.nodeType === 3) t += c.textContent ?? '';
     if (t.trim()) out.push({ el, sample: t.slice(0, 200) });
-    for (const c of Array.from(el.children ?? [])) walk(c, depth + 1);
+    for (const c of Array.from(el.children ?? [])) {
+      // S8.4: an owned canvas's accessible fallback is scene content, not
+      // extension-authored text — it never enters the AA contrast check.
+      if (typeof c.hasAttribute === 'function' && c.hasAttribute('data-rv2-canvas-fallback')) continue;
+      walk(c, depth + 1);
+    }
   };
   for (const r of roots) walk(r, 0);
   return out;

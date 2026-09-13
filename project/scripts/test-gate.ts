@@ -39,6 +39,7 @@ export const EXPECTED_UNIT_SUITES = [
   'behavior.test.ts',
   'projection.test.ts',
   'compile.test.ts',
+  'canvas.test.ts',
   'gate.test.ts',
 ];
 

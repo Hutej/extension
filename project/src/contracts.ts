@@ -16,6 +16,8 @@
  * never mutates the page and never grants authority (I01/I04).
  */
 
+import { parseColor } from './shared/color.ts';
+
 // ── 1. Named limits (plan/15 §2, plan/08 §7, plan/04) ───────────────────
 
 export const LIMITS = {
@@ -35,6 +37,13 @@ export const LIMITS = {
   maxInsertNodes: 200, // plan/15 generic owned UI
   maxInsertDepth: 12,
   maxInsertTextBytes: 16 * 1024,
+  // S8.4 owned Canvas 2D (plan/28 §3): bounded data-only drawing records.
+  maxCanvasDrawRecords: 256,
+  maxCanvasPolylinePoints: 2048,
+  maxCanvasTextBytes: 4096, // per scene
+  maxViewBoxExtent: 4096, // logical viewBox units, each
+  maxCanvasDescriptionChars: 500,
+  maxCanvasFallbackChars: 2000,
   maxBindActions: 4, // bindKey actionIds 1..4
   maxLocalPredicates: 8,
   maxPredicateLiteralChars: 120,
@@ -597,6 +606,8 @@ export interface InsertUiNode {
   labelFor?: string; // local accessibility reference within the same tree
   ariaDescribedBy?: string;
   ariaLabelledBy?: string;
+  /** S8.4 (plan/28 §3): owned Canvas 2D — valid only on tag 'scene'. */
+  scene?: CanvasScene;
 }
 
 export interface InsertUiOperation {
@@ -678,6 +689,8 @@ export const INSERT_UI_TAGS = [
   'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'ul', 'ol', 'li', 'strong', 'em', 'small',
   'code', 'pre', 'blockquote', 'br', 'hr', 'a', 'button', 'label', 'input',
   'select', 'option', 'details', 'summary', 'table', 'thead', 'tbody', 'tr', 'th', 'td',
+  // S8.4 (plan/28 §3): the owned canvas host tag.
+  'scene',
 ] as const;
 
 export const INSERT_UI_INPUT_TYPES = ['text', 'search', 'checkbox', 'radio', 'range', 'number'] as const;
@@ -690,6 +703,198 @@ const SAFE_ATTRIBUTES = new Set([
 ]);
 
 const decodeNodeTag = decodeLiteral(INSERT_UI_TAGS);
+
+// ── S8.4 owned Canvas 2D scene (plan/28 §3) ───────────────────────────────
+// Closed drawing records, painted in listed order. Every field is bounded
+// plain data: no script strings, method names, arbitrary context properties,
+// images/URLs, pixel readback or page-fetched data ever crosses this boundary
+// (I18). Colors are validated solid CSS colors (parseColor), never
+// gradients/functions — the canvas vocabulary is the scene, not CSS.
+
+export const CANVAS_ALIGN = ['start', 'center', 'end'] as const;
+export type CanvasAlign = (typeof CANVAS_ALIGN)[number];
+
+export type CanvasDrawRecord =
+  | { kind: 'rect'; x: number; y: number; width: number; height: number; fill?: string; stroke?: string; lineWidth?: number }
+  | { kind: 'circle'; x: number; y: number; radius: number; fill?: string; stroke?: string; lineWidth?: number }
+  | { kind: 'polyline'; points: Array<[number, number]>; closed?: boolean; stroke?: string; lineWidth?: number; fill?: string }
+  | { kind: 'text'; x: number; y: number; text: string; fill: string; fontSize: number; fontFamily: string; fontWeight?: number; align: CanvasAlign };
+
+export interface CanvasScene {
+  sceneVersion: 1;
+  viewBoxWidth: number; // logical units, 1..LIMITS.maxViewBoxExtent
+  viewBoxHeight: number;
+  draw: CanvasDrawRecord[]; // ≤ maxCanvasDrawRecords, painted in order
+  accessibleDescription: string;
+  fallbackText?: string;
+}
+
+const CANVAS_FONT_FAMILY = /^[a-zA-Z][a-zA-Z0-9 _-]{0,63}$/; // single bounded family name, never a list/var()
+
+/** Bounded named-color table — parseColor bounds rgb/hex/hsl; these common
+ *  CSS keyword names are the whole named extension (never `currentcolor`,
+ *  `var()`, system colors or lists). */
+const CANVAS_NAMED_COLORS = new Set(
+  [
+    'black', 'white', 'red', 'green', 'blue', 'yellow', 'orange', 'purple',
+    'crimson', 'teal', 'navy', 'gold', 'pink', 'brown', 'gray', 'grey',
+    'silver', 'maroon', 'olive', 'lime', 'aqua', 'cyan', 'magenta', 'indigo',
+    'violet', 'coral', 'khaki', 'plum', 'orchid', 'salmon', 'chocolate',
+    'darkred', 'darkgreen', 'darkblue', 'lightgray', 'lightgrey', 'darkgray',
+    'darkgrey', 'beige', 'ivory', 'turquoise', 'skyblue', 'slategray',
+    'slategrey', 'steelblue', 'royalblue', 'seagreen', 'tomato', 'thistle',
+    'tan',
+  ],
+);
+
+/** Validate one solid CSS color for a scene record (plan/28 §3); gradients,
+ *  functions and anything parseColor cannot bound are refused. */
+const decodeSceneColor = (v: unknown, path = 'color'): DecodeResult<string> => {
+  const s = decodeString({ max: 64 })(v, path);
+  if (!s.ok) return s;
+  if (parseColor(s.value) === null && !CANVAS_NAMED_COLORS.has(s.value.trim().toLowerCase())) {
+    return fail(path, 'unknown-value', `"${s.value.slice(0, 32)}" is not a solid CSS color`);
+  }
+  return ok(s.value);
+};
+
+const decodeCanvasDrawRecord = (
+  v: unknown,
+  path = 'draw',
+  budget: { textBytes: number },
+): DecodeResult<CanvasDrawRecord> => {
+  const kind = decodeLiteral(['rect', 'circle', 'polyline', 'text'])(isPlainObject(v) ? (v as { kind?: unknown }).kind : undefined, `${path}.kind`);
+  if (!kind.ok) return kind;
+  switch (kind.value) {
+    case 'rect': {
+      const r = decodeRecord(
+        {
+          kind: decodeLiteral(['rect']),
+          x: decodeFiniteNumber({ min: -16384, max: 16384 }),
+          y: decodeFiniteNumber({ min: -16384, max: 16384 }),
+          width: decodeFiniteNumber({ min: 0, max: 16384 }),
+          height: decodeFiniteNumber({ min: 0, max: 16384 }),
+          fill: optional(decodeSceneColor),
+          stroke: optional(decodeSceneColor),
+          lineWidth: optional(decodeFiniteNumber({ min: 0, max: 4096 })),
+        },
+        { maxDepth: 8 },
+      )(v, path);
+      return r.ok ? ok(r.value as CanvasDrawRecord) : r;
+    }
+    case 'circle': {
+      const r = decodeRecord(
+        {
+          kind: decodeLiteral(['circle']),
+          x: decodeFiniteNumber({ min: -16384, max: 16384 }),
+          y: decodeFiniteNumber({ min: -16384, max: 16384 }),
+          radius: decodeFiniteNumber({ min: 0, max: 16384 }),
+          fill: optional(decodeSceneColor),
+          stroke: optional(decodeSceneColor),
+          lineWidth: optional(decodeFiniteNumber({ min: 0, max: 4096 })),
+        },
+        { maxDepth: 8 },
+      )(v, path);
+      return r.ok ? ok(r.value as CanvasDrawRecord) : r;
+    }
+    case 'polyline': {
+      const r = decodeRecord(
+        {
+          kind: decodeLiteral(['polyline']),
+          points: (pv: unknown, ppath = 'points') => {
+            if (!Array.isArray(pv)) return fail(ppath, 'type', 'expected an array of [x, y] coordinate pairs');
+            if (pv.length > LIMITS.maxCanvasPolylinePoints) {
+              return fail(ppath, 'out-of-bounds', `a polyline carries more than ${LIMITS.maxCanvasPolylinePoints} points`);
+            }
+            const out: Array<[number, number]> = [];
+            const issues: DecodeIssue[] = [];
+            for (const [pi, pair] of pv.entries()) {
+              if (!Array.isArray(pair) || pair.length !== 2) {
+                issues.push({ path: `${ppath}[${pi}]`, code: 'type', message: 'expected a finite [x, y] pair' });
+                continue;
+              }
+              const xr = decodeFiniteNumber({ min: -16384, max: 16384 })(pair[0], `${ppath}[${pi}].x`);
+              const yr = decodeFiniteNumber({ min: -16384, max: 16384 })(pair[1], `${ppath}[${pi}].y`);
+              if (!xr.ok) issues.push(...xr.issues);
+              else if (!yr.ok) issues.push(...yr.issues);
+              else out.push([xr.value, yr.value]);
+            }
+            return issues.length ? { ok: false as const, issues } : ok(out);
+          },
+          closed: optional(decodeBoolean),
+          stroke: optional(decodeSceneColor),
+          lineWidth: optional(decodeFiniteNumber({ min: 0, max: 4096 })),
+          fill: optional(decodeSceneColor),
+        },
+        { maxDepth: 8 },
+      )(v, path);
+      return r.ok ? ok(r.value as CanvasDrawRecord) : r;
+    }
+    case 'text': {
+      const tr = decodeString({ max: LIMITS.maxCanvasTextBytes })(isPlainObject(v) ? (v as { text?: unknown }).text : undefined, `${path}.text`);
+      if (!tr.ok) return tr;
+      budget.textBytes += tr.value.length;
+      if (budget.textBytes > LIMITS.maxCanvasTextBytes) {
+        return fail(`${path}.text`, 'out-of-bounds', `scene text exceeds ${LIMITS.maxCanvasTextBytes} bytes in total`);
+      }
+      const r = decodeRecord(
+        {
+          kind: decodeLiteral(['text']),
+          x: decodeFiniteNumber({ min: -16384, max: 16384 }),
+          y: decodeFiniteNumber({ min: -16384, max: 16384 }),
+          text: () => tr, // already validated above (bounded, budgeted)
+          fill: decodeSceneColor,
+          fontSize: decodeFiniteNumber({ min: 1, max: 4096 }),
+          fontFamily: decodeString({ max: 64, pattern: CANVAS_FONT_FAMILY }),
+          fontWeight: optional(decodeFiniteNumber({ integer: true, min: 100, max: 900 })),
+          align: decodeLiteral(CANVAS_ALIGN),
+        },
+        { maxDepth: 8 },
+      )(v, path);
+      return r.ok ? ok(r.value as CanvasDrawRecord) : r;
+    }
+  }
+};
+
+export const decodeCanvasScene: Decoder<CanvasScene> = (v, path = 'scene') => {
+  if (!isPlainObject(v)) return fail(path, 'type', 'expected a scene record');
+  const budget = { textBytes: 0 };
+  const vb = decodeRecord(
+    {
+      sceneVersion: decodeFiniteNumber({ integer: true, min: 1, max: 1 }),
+      viewBoxWidth: decodeFiniteNumber({ integer: true, min: 1, max: LIMITS.maxViewBoxExtent }),
+      viewBoxHeight: decodeFiniteNumber({ integer: true, min: 1, max: LIMITS.maxViewBoxExtent }),
+      accessibleDescription: decodeString({ max: LIMITS.maxCanvasDescriptionChars }),
+      fallbackText: optional(decodeString({ max: LIMITS.maxCanvasFallbackChars })),
+      draw: (dv: unknown, dpath = 'draw') => {
+        if (!Array.isArray(dv)) return fail(dpath, 'type', 'expected an array of closed drawing records');
+        if (dv.length > LIMITS.maxCanvasDrawRecords) {
+          return fail(dpath, 'out-of-bounds', `a scene carries more than ${LIMITS.maxCanvasDrawRecords} draw records`);
+        }
+        const out: CanvasDrawRecord[] = [];
+        const issues: DecodeIssue[] = [];
+        for (const [i, rec] of dv.entries()) {
+          const r = decodeCanvasDrawRecord(rec, `${dpath}[${i}]`, budget);
+          if (r.ok) out.push(r.value);
+          else issues.push(...r.issues);
+        }
+        return issues.length ? ({ ok: false as const, issues } as const) : ok(out);
+      },
+    },
+    { maxDepth: 8 },
+  )(v, path);
+  if (!vb.ok) return vb;
+  const value = vb.value as { viewBoxWidth: number; viewBoxHeight: number; accessibleDescription: string; fallbackText?: string; draw: CanvasDrawRecord[] };
+  return ok({
+    sceneVersion: 1,
+    viewBoxWidth: value.viewBoxWidth,
+    viewBoxHeight: value.viewBoxHeight,
+    draw: value.draw,
+    accessibleDescription: value.accessibleDescription,
+    ...(value.fallbackText !== undefined ? { fallbackText: value.fallbackText } : {}),
+  });
+};
+
 const decodeAttrKey = (v: unknown, path = 'attribute'): DecodeResult<string> => {
   const s = decodeString({ max: 64, pattern: /^[a-zA-Z][a-zA-Z0-9-]*$/ })(v, path);
   if (!s.ok) return s;
@@ -735,11 +940,17 @@ function decodeInsertNode(depth: number): Decoder<InsertUiNode> {
         labelFor: optional(LOCAL_ID),
         ariaDescribedBy: optional(LOCAL_ID),
         ariaLabelledBy: optional(LOCAL_ID),
+        scene: optional(decodeCanvasScene),
       },
       { maxDepth: LIMITS.maxJsonDepth },
     )(v, path);
     if (!r.ok) return r;
     const node = r.value;
+    // S8.4 structural pairing (plan/28 §3): the scene record rides ONLY the
+    // scene node, and a scene node never exists without one.
+    if ((node.tag === 'scene') !== (node.scene !== undefined)) {
+      return fail(`${path}.scene`, 'conflict', 'tag "scene" requires a complete scene record; only scene nodes may carry one');
+    }
     // Buttons are always type=button; credential/payment input types are never
     // accepted (plan/17 §2, plan/28 §2).
     if (node.tag === 'input' && node.attributes?.type !== undefined) {

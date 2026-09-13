@@ -493,6 +493,9 @@ export interface InsertUiNodePlan {
   children?: InsertUiNodePlan[];
   localId?: string;
   actionId?: string;
+  /** S8.4 (plan/28 §3): the complete validated scene — present only on tag
+   *  'scene' (contracts decode enforces the pairing). */
+  scene?: import('../contracts.ts').CanvasScene;
   /** Accessibility references to local ids; S4.2 rewrites them to runtime IDs. */
   refTargets?: Array<{ attr: 'for' | 'aria-describedby' | 'aria-labelledby'; localId: string }>;
 }
@@ -509,6 +512,8 @@ const INSERT_TAGS = new Set([
   'code', 'pre', 'blockquote', 'br', 'hr', 'a', 'button', 'label', 'input',
   'select', 'option', 'details', 'summary', 'table', 'thead', 'tbody', 'tr',
   'th', 'td',
+  // S8.4 (plan/28 §3): the owned canvas host tag.
+  'scene',
 ]);
 
 const ALLOWED_ATTRS = new Set([
@@ -603,6 +608,20 @@ function validateInsertNode(
   if (tag === 'button') attrs['type'] = 'button'; // always (plan/28 §2)
   if (tag === 'input' && attrs['type'] === undefined) attrs['type'] = 'text';
 
+  if (tag === 'scene') {
+    if (node.scene === undefined) {
+      diagnostics.push({ path: `${path}.scene`, code: 'policy', message: 'a scene node requires a complete scene record' });
+    }
+    if (node.text !== undefined) {
+      diagnostics.push({ path: `${path}.text`, code: 'policy', message: 'a scene node has no text — its accessible fallback is part of the scene record' });
+    }
+    if ((node.children ?? []).length > 0) {
+      diagnostics.push({ path: `${path}.children`, code: 'policy', message: 'a scene node has no model children — the renderer owns its interior' });
+    }
+  } else if (node.scene !== undefined) {
+    diagnostics.push({ path: `${path}.scene`, code: 'policy', message: `only scene nodes may carry a scene record (tag is "${tag}")` });
+  }
+
   const children: InsertUiNodePlan[] = [];
   for (const [ci, child] of (node.children ?? []).entries()) {
     const childPlan = validateInsertNode(child, `${path}.children[${ci}]`, diagnostics, depth + 1);
@@ -635,6 +654,7 @@ function validateInsertNode(
     ...(children.length ? { children } : {}),
     ...(node.localId !== undefined ? { localId: node.localId } : {}),
     ...(node.actionId !== undefined ? { actionId: node.actionId } : {}),
+    ...(node.scene !== undefined ? { scene: node.scene } : {}),
     ...(refTargets.length ? { refTargets } : {}),
   };
 }
