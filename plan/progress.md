@@ -794,3 +794,31 @@ validation/consent/safety bounds are untouched (never weakened).
   backing scale >2 (superresolution) is not promised.
 
 Next task: **S9.1 — Measure stress, compatibility, performance and product quality**.
+
+## Fix — "The model provider failed (truncated)" (owner screenshot, Wikipedia neobrutelism) — every model, every request size
+
+- Date: 2026-09-13. Root cause chain: `finish_reason === 'length'` →
+  provider-error code `truncated` → the planner treated it as TERMINAL (no
+  second chance), and the output budget was 16384 with no per-profile
+  outputLimit on the seeded built-in profile.
+- **Owner-directed fixes (2026-09-13, "fullest"):**
+  1. `DEFAULT_OUTPUT_TOKENS` 16384 → **65536** and the seeded profile now
+     carries `outputLimit: 65536` — ask at the ecosystem max (an over-ask is
+     safe: fix 2 clamps it, a server-side cap lands in fix 3).
+  2. **Value-clamp negotiation** (`providers.ts` `detectTokenLimitClamp`): a
+     400 whose body names the token parameter with a numeric cap clamps the
+     requested limit to the provider's own cap and retries once, receipted
+     (`max_tokens-value`) — an over-asked output limit never fails a request
+     on a capped model. No parseable cap → no negotiation (honest error).
+  3. **Truncation is no longer terminal** (`planning/controller.ts`): a
+     `truncated` provider result rides the shared repair budget with a
+     "COMPLETE and SMALLER plan" instruction — the model re-plans smaller and
+     finishes within its cap, so big requests (Wikipedia restyles) work on
+     capped models too. Exhausted budget stays an honest provider-error.
+- Tests: providers ×2 (clamp + retry with the provider cap receipted;
+  no-parseable-cap never negotiates) + controller ×1 (truncated → smaller-plan
+  retry lands the proposal with the correction spent; four truncations →
+  honest provider-error with the budget really spent).
+- Gates ×2 green (unit 370/370, browser 38/38). Build verified.
+- Residual: a model that truncates 4 times still fails honestly — that is the
+  architecture's anti-hang ceiling, not a work limit.

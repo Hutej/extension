@@ -39,8 +39,11 @@ async function seedBuiltInCloudflare(): Promise<unknown> {
     endpoint: `https://api.cloudflare.com/client/v4/accounts/${cf.accountId}/ai/v1/chat/completions`,
     modelId: cf.model,
     auth: { kind: 'bearer' },
-    // DeepSeek on complex pages needs longer than the 45s user-profile
-    // default; 10 minutes is the architecture's per-call ceiling (controller).
+    // Owner-directed 2026-09-13: ask at the ecosystem max — the provider's
+    // own 400 clamps an over-ask (providers negotiation), a server-side cap
+    // truncates into the planner's smaller-plan retry, and 10 minutes is the
+    // architecture's per-call ceiling (controller).
+    outputLimit: 65536,
     callTimeoutMs: 600_000,
   };
   const ack: DisclosureAck = {

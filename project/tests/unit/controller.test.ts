@@ -54,9 +54,10 @@ const DOCUMENT_KEY = { tabId: 1, frameId: 0, browserDocumentId: 'doc-1', runtime
 const VALID_ACK = { disclosureVersion: 1, endpoint: PROFILE.endpoint, acknowledgedAt: 1 };
 
 interface ScriptedReply {
-  text: string;
+  text?: string;
   httpAttempts?: number;
   downgradedParameter?: string;
+  error?: { code: string; message: string };
 }
 
 function fakeClient(replies: ScriptedReply[], log: string[]) {
@@ -68,6 +69,9 @@ function fakeClient(replies: ScriptedReply[], log: string[]) {
       i += 1;
       if (!reply) throw new Error('script exhausted');
       await new Promise<void>((resolve) => setTimeout(resolve, 5));
+      if (reply.error !== undefined) {
+        return { ok: false, code: reply.error.code, message: reply.error.message, httpAttempts: 1, wallMs: 5 };
+      }
       return {
         ok: true,
         text: reply.text,
@@ -270,4 +274,22 @@ test('T20: the evidence block is bounded and names its omissions honestly', () =
   assert.ok(block.length < 4000, `the block respects the budget (${block.length})`);
   assert.match(block, /older regions omitted \(evidence budget\)/, 'omissions are disclosed, never silent');
   assert.match(block, /partial|complete/, 'coverage is stated');
+});
+
+// ── owner-directed: truncation rides the repair budget, never terminal ──
+
+test('T02/owner: a truncated response gets a smaller-plan retry and lands the proposal; exhausted truncations stay honest', async () => {
+  const truncated = { error: { code: 'truncated', message: 'the response hit its output token limit and was truncated' } };
+  const log: string[] = [];
+  const run = await start(makeDeps([truncated, { text: PROPOSAL_JSON }], log));
+  assert.equal(run.outcome.kind, 'proposal', JSON.stringify(run.outcome).slice(0, 200));
+  assert.equal(run.outcome.counters.correctionsUsed, 1, 'the truncation spent one correction');
+  assert.match(log[1] ?? '', /cut at the output token limit/, 'the retry tells the model to produce a COMPLETE SMALLER plan');
+  assert.match(log[1] ?? '', /SMALLER/, 'the retry names the shrink instruction');
+
+  // Repeated truncation exhausts the shared budget honestly (never fake success).
+  const run2 = await start(makeDeps([truncated, truncated, truncated, truncated]));
+  assert.equal(run2.outcome.kind, 'provider-error');
+  assert.equal((run2.outcome as { code?: string }).code, 'truncated');
+  assert.equal(run2.outcome.counters.correctionsUsed, 3, 'the shared repair budget was really spent');
 });

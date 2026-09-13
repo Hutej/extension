@@ -289,6 +289,22 @@ export function anthropicMessagesResponse(status: number, bodyText: string): { o
   return { ok: true, value: { text, ...(stopReason !== undefined ? { finishReason: stopReason } : {}), ...(usage ? { usage } : {}) } };
 }
 
+/**
+ * Owner-directed 2026-09-13 value-clamp negotiation: a 400 whose body names
+ * the token parameter with a numeric cap parses that cap, so an over-asked
+ * output limit clamps to the provider's own cap and retries — the request
+ * must never fail just because a model caps output lower than we ask. No
+ * cap in the body → no negotiation (honest error).
+ */
+export function detectTokenLimitClamp(bodyText: string): number | null {
+  if (bodyText === '') return null;
+  if (!/(max[_ -]?completion[_ -]?tokens|max[_ -]?tokens|completion tokens|token limit)/i.test(bodyText)) return null;
+  const m = bodyText.match(/(?:at most|maximum(?: of)?|max(?:imum)? is|cannot exceed|exceeds|up to|less than or equal to|must be ≤?|supported)\s*:?\s*\**\s*(\d{2,7})/i);
+  if (!m) return null;
+  const cap = Number(m[1]);
+  return cap >= 256 && Number.isFinite(cap) ? cap : null;
+}
+
 /** Specific unsupported-parameter detection (plan/11 §4.3): a 400 whose body
  *  names the offending parameter. Everything else is NOT negotiation. */
 export function detectUnsupportedParameter(protocol: ProviderProfile['protocol'], status: number, bodyText: string): string | null {
@@ -480,6 +496,20 @@ export function createProviderClient(deps: ProviderClientDeps) {
             ...(downgradedParameter !== undefined ? { downgradedParameter } : {}),
             wallMs: deps.now() - startedAt,
           };
+        }
+        // Owner-directed value-clamp negotiation: a 400 naming the token
+        // parameter with a numeric cap clamps the requested limit once and
+        // retries (an over-asked output limit must never fail the request).
+        if (outcome.status === 400 && !downgradedParameter && retries < MAX_RETRIES) {
+          const cap = detectTokenLimitClamp(outcome.body);
+          const tokenParam = c.profile.capabilities?.tokenParameter ?? 'max_tokens';
+          const tokenRe = new RegExp(`"${tokenParam}"\\s*:\\s*\\d+`);
+          if (cap !== null && tokenRe.test(request.body)) {
+            request = { ...request, body: request.body.replace(tokenRe, `"${tokenParam}": ${cap}`) };
+            downgradedParameter = `${tokenParam}-value`;
+            retries += 1;
+            continue;
+          }
         }
         // Specific unsupported-parameter downgrade: drop exactly ONE optional
         // parameter and retry once (plan/11 §4.3).

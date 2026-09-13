@@ -168,7 +168,11 @@ export interface PlanningRun {
 const MAX_MODEL_RESPONSES = 8;
 const MAX_EVIDENCE_REQUESTS = 4;
 const MAX_CORRECTIONS = 3;
-const DEFAULT_OUTPUT_TOKENS = 16384;
+// Owner-directed 2026-09-13: ask at the ecosystem max — an over-ask clamps
+// down via the provider's own 400 (providers value-clamp negotiation) and a
+// server-side cap truncates into the planner's smaller-plan retry, so no
+// model and no request size is ever blocked by the requested budget.
+const DEFAULT_OUTPUT_TOKENS = 65536;
 
 export function createPlanningController(deps: PlanningControllerDeps) {
   const client: ProviderClient = deps.client ?? createProviderClient({ now: deps.now, randomId: deps.randomId, sleep: deps.sleep });
@@ -266,6 +270,18 @@ export function createPlanningController(deps: PlanningControllerDeps) {
           return finish({ kind: 'cannot-complete', reason: 'the planning budget was exhausted before a valid proposal', counters });
         }
         if (!result.ok) {
+          // Truncation is NOT terminal (owner-directed 2026-09-13): the model
+          // rides its correction budget to produce a COMPLETE but SMALLER
+          // plan, so a capped model can still deliver a valid batch.
+          if (result.code === 'truncated' && counters.correctionsUsed < MAX_CORRECTIONS) {
+            counters.correctionsUsed += 1;
+            latestDiagnostic = [
+              'your previous response was cut at the output token limit and never completed',
+              'Answer again with EXACTLY ONE JSON object that is COMPLETE and SMALLER: fewer, broader operations (the batch composes — styles/hides group, rules stay within the caps) so it finishes within the output limit.',
+              'Do not weaken the schema or the safety rules.',
+            ].join('\n');
+            continue;
+          }
           return finish({
             kind: 'provider-error',
             code: result.code ?? 'internal',

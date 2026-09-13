@@ -375,3 +375,35 @@ test('T20: Stop aborts the call locally — the outcome is stopped, never a fake
   assert.equal(out.ok, false);
   assert.equal(out.code, 'aborted');
 });
+
+// ── owner-directed value-clamp negotiation (2026-09-13) ──────────────────
+
+test('T20/owner: a 400 naming a lower provider cap clamps the token parameter and retries', async () => {
+  const bodies: string[] = [];
+  const url = await listen((req, res, data) => {
+    bodies.push(data);
+    if (bodies.length === 1) {
+      res.writeHead(400, { 'content-type': 'application/json' });
+      res.end('{"error":{"message":"This model supports at most 8192 completion tokens, but you requested 65536"}}');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(OPENAI_BODY);
+  });
+  const out = await callEndpoint(`${url}/v1/chat/completions`, { outputTokens: 65536, deadlineAt: Date.now() + 10_000 });
+  assert.ok(out.ok, JSON.stringify(out).slice(0, 300));
+  assert.equal(out.downgradedParameter, 'max_tokens-value', 'the clamp is receipted');
+  assert.ok(bodies[1].includes('"max_tokens": 8192'), `the retry clamped to the provider cap: ${bodies[1].slice(0, 200)}`);
+});
+
+test('T20/owner: a 400 with no parseable cap never negotiates — honest refusal', async () => {
+  let attempts = 0;
+  const url = await listen((req, res) => {
+    attempts += 1;
+    res.writeHead(400, { 'content-type': 'application/json' });
+    res.end('{"error":{"message":"bad request"}}');
+  });
+  const out = await callEndpoint(`${url}/v1/chat/completions`, { outputTokens: 65536 });
+  assert.equal(out.ok, false);
+  assert.equal(attempts, 1, 'no cap, no retry');
+});
