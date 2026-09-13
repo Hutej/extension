@@ -684,3 +684,27 @@ Next task: **S8.4 — Add bounded owned Canvas 2D, not a graphics framework**.
   not get the seed (remove the extension + load unpacked again, or clear
   rv2_workspaceSettings, to re-seed). Provider QUALITY is a separate
   measurement (DeepSeek output validated by the runtime as usual).
+
+## Fix — built-in model deadline (owner screenshot: "The model provider failed (deadline)")
+
+- Date: 2026-09-13. No agent-browser run (owner instruction); root cause read
+  from source.
+- **Root cause**: the planning call deadline chain is
+  `req.callTimeoutMs ?? req.profile.callTimeoutMs ?? 45_000`
+  (controller.ts) — the seeded `builtin-cloudflare` profile never set
+  `callTimeoutMs`, so big pages (the screenshot's ChatGPT-share DOM with a
+  "neubrutelism" restyle goal) exceeded 45s and the honest
+  "the shared deadline expired" failure surfaced. The architecture already
+  bounds one provider call at 180s (`Math.min(now+timeout, now+180_000)`);
+  example.com succeeded in ~8s earlier, so 45s was the binding constraint,
+  not the endpoint/credential/consent.
+- **Fix**: the seeded profile carries `callTimeoutMs: 180_000` (the
+  architecture's per-call cap). The 45s default for user-entered profiles is
+  unchanged (deliberate bounded deadline; user profiles can raise it in the
+  form's stored profile as before). Baked chunk verified
+  (`builtin-cloudflare` + token + the profile object); gates ×2 green
+  (354 unit + 36 browser).
+- Residual: a user whose OLD seeded profile (no callTimeoutMs) persists in
+  storage keeps the 45s deadline (the seed never overwrites existing
+  settings) — remove the extension + load unpacked again to re-seed, or
+  raise the profile's stored callTimeoutMs.

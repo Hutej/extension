@@ -39,6 +39,9 @@ async function seedBuiltInCloudflare(): Promise<unknown> {
     endpoint: `https://api.cloudflare.com/client/v4/accounts/${cf.accountId}/ai/v1/chat/completions`,
     modelId: cf.model,
     auth: { kind: 'bearer' },
+    // DeepSeek on complex pages needs longer than the 45s user-profile
+    // default; 180s is the architecture's hard per-call cap (controller).
+    callTimeoutMs: 180_000,
   };
   const ack: DisclosureAck = {
     disclosureVersion: PROVIDER_DISCLOSURE_VERSION,
