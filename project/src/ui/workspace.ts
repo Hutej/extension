@@ -796,15 +796,18 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
         return;
       case 'cannot-complete':
         finishCounters(outcome.counters);
+        void releaseRun();
         emit('failed', outcome.reason);
         return;
       case 'provider-error':
         finishCounters(outcome.counters);
         ring.add({ context: 'workspace', phase: 'provider', resultCode: outcome.code, detail: outcome.message });
+        void releaseRun();
         emit('failed', `The model provider failed (${outcome.code}): ${outcome.message}`);
         return;
       case 'stopped':
         finishCounters(outcome.counters);
+        void releaseRun();
         emit('stopped');
         return;
     }
@@ -920,6 +923,22 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
     await handleOutcome(planningRun.outcome);
   };
 
+  // The broker holds ONE run owner per document (StartRun); it is released
+  // ONLY by CancelRun. Every terminal outcome of a planning run must release
+  // it, or the NEXT StartRun is refused as a conflict and the workspace is
+  // stuck in 'busy' ("Something is already running") with no way out —
+  // worst UX (owner report, 2026-09-13). Best-effort + idempotent.
+  const releaseRun = async (): Promise<void> => {
+    const doc = targetDocumentOf();
+    if (run?.runId !== null && doc !== null) {
+      try {
+        await send(envelope('run-command', { command: 'CancelRun' }, doc.documentKey, currentEpoch(doc)));
+      } catch {
+        // best-effort; the runtime fence and page lifecycle bound any work.
+      }
+    }
+  };
+
   const stop = async (withDetail?: string): Promise<void> => {
     clearQuestionTimer();
     pendingQuestion = null;
@@ -983,6 +1002,10 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
     // The broker relays the runtime receipt twice-wrapped for run commands
     // (runtime → broker wraps → reply.receipt.receipt); the state/snapshot
     // projections come through singly. Accept both shapes.
+    // The planning run's purpose is fulfilled the moment ApplyBatch is
+    // dispatched — release the broker owner now (ApplyBatch is not gated by
+    // run ownership), so a new run can start regardless of the receipt.
+    void releaseRun();
     const receiptEnvelope = reply.receipt as Record<string, unknown> | undefined;
     const receipt = (receiptEnvelope?.receipt ?? receiptEnvelope) as Record<string, unknown> | undefined ?? {};
     const status = String(receipt.status ?? '');
@@ -1010,6 +1033,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
   const discardProposal = (): void => {
     if (pendingProposal === null) return;
     pendingProposal = null;
+    void releaseRun();
     emit('idle', 'Proposal discarded; nothing was applied.');
   };
 
@@ -2019,7 +2043,9 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
       renderChanges(s);
     }
     // Input state + the stable status oracle.
-    const inFlight = ['starting', 'observing', 'planning', 'awaiting-question', 'awaiting-approval', 'applying', 'saving'].includes(s.phase);
+    // 'busy' (another run owns the document) must offer Stop, else "Press
+    // Stop first" is a dead-end with the button disabled (owner report).
+    const inFlight = ['starting', 'observing', 'planning', 'awaiting-question', 'awaiting-approval', 'applying', 'saving', 'busy'].includes(s.phase);
     sendBtn.disabled = inFlight;
     stopBtn.disabled = !inFlight;
     const statusView = statusFor(s.phase, {

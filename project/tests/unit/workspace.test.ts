@@ -623,6 +623,35 @@ test('T27: provider error and cannot-complete are surfaced with their real reaso
   h2.dispose();
 });
 
+test('T27/owner: a failed run releases the broker owner — the NEXT run starts clean, never stuck in busy (worst UX fix)', async () => {
+  const h = harness({ controller: fakeController([{ kind: 'provider-error', message: '408' }]) });
+  await h.core.init();
+  await h.core.start('make it red');
+  assert.equal(h.core.state().phase, 'failed');
+  // The planning run terminated — its broker owner MUST be released, or the
+  // next StartRun is refused as a conflict and the workspace is stuck in
+  // 'busy' with Stop disabled (the reported dead-end).
+  assert.ok(commandsOf(h.sent).includes('CancelRun'), 'the failed run released its broker owner');
+
+  // A second run must start without a conflict.
+  await h.core.start('make it blue');
+  assert.notEqual(h.core.state().phase, 'busy', 'a finished run never shows "Something is already running"');
+  h.dispose();
+});
+
+test('T27/owner: approving a proposal releases the broker owner too — the next run starts clean', async () => {
+  const h = harness({ controller: fakeController([{ kind: 'proposal', proposal: PROPOSAL }]) });
+  await h.core.init();
+  await h.core.start('make it red');
+  assert.equal(h.core.state().phase, 'awaiting-approval');
+  await h.core.approve({ mode: 'exactPath', path: '/page' });
+  assert.equal(h.core.state().phase, 'complete');
+  assert.ok(commandsOf(h.sent).includes('CancelRun'), 'ownership released after the apply');
+  await h.core.start('make it blue');
+  assert.notEqual(h.core.state().phase, 'busy');
+  h.dispose();
+});
+
 test('T27: Stop mid-run keeps accepted work — stopped wording, run cancelled at the broker', async () => {
   const h = harness({ controller: fakeController([{ kind: 'proposal', proposal: PROPOSAL }]) });
   await h.core.init();

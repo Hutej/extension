@@ -262,7 +262,7 @@ test('T20/owner: HTTP 408 (provider inference timeout) is transient — retries 
   });
   const bad = await callEndpoint(`${hardUrl}/v1/chat/completions`);
   assert.equal(bad.ok, false);
-  assert.match(bad.message, /HTTP 408/);
+  assert.match(bad.message!, /HTTP 408/);
   assert.equal(always, 3, 'retries stop at the transient cap');
 });
 

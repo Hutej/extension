@@ -947,3 +947,32 @@ from the set. Added 408 to TRANSIENT_STATUS; retries stay within the shared
 deadline and the attempt budget (6). Unit test: 408×2 → success on attempt 3;
 persistent 408 stays an honest provider error at the cap. Gates ×2 green
 (370 unit + 39 browser).
+
+## 2026-09-13 (late) — run-ownership leak → stuck 'busy' dead-end (owner report)
+
+Owner: after an HTTP 408 error, sending a new message returned "Something is
+already running on this page. Press stop first" with nothing running and the
+Stop button not open — "worst UX".
+
+Root cause: the broker holds ONE run owner per document (StartRun → record.run
+= runId), released ONLY by CancelRun. The workspace sent CancelRun only on
+explicit stop() and the observe-failure path — never on a natural termination
+(provider-error, cannot-complete, stopped) nor after an approved/rolled-back
+apply. So after the 408, the broker still held the owner → the next StartRun
+returned conflict → the workspace set phase 'busy' ("Something is already
+running"). Worse, the Stop button was DISABLED unless in an active phase
+(starting/observing/planning/awaiting-question/awaiting-approval/applying/
+saving) — 'busy' and 'failed' were NOT in that set — so "Press Stop first"
+with Stop disabled = a true dead-end.
+
+Fix (src/ui/workspace.ts):
+- releaseRun(): best-effort + idempotent CancelRun, called on EVERY terminal
+  outcome — cannot-complete, provider-error, stopped (handleOutcome),
+  discardProposal, and approve (right after ApplyBatch is dispatched; the
+  planning run's purpose is fulfilled, ApplyBatch is not run-ownership-gated).
+  stop() already releases. The owner is now never leaked past a finished run.
+- 'busy' added to the inFlight set so Stop is ALWAYS usable when a run could
+  be stuck — "Press Stop first" is never a dead-end even in a genuine conflict.
+- Regression tests: a provider-error releases the owner and the NEXT run
+  starts clean (never 'busy'); approving a proposal also releases the owner
+  and the next run starts clean. Gates ×2 green (372 unit + 39 browser).
