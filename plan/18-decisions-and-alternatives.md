@@ -116,3 +116,12 @@ Accumulated per-path journals are easy but unversioned/concurrent; server persis
 ## Decision change rules
 
 File naming, private helper extraction and purely internal iteration techniques may change with tests. Ownership, operation grammar, trust boundaries, provider execution host, persistence schema, fallback visibility and acceptance requirements require ADR amendment plus roadmap/test/traceability updates. Changes need evidence of a real failure or requirement; “the model performs better without guards” is not sufficient.
+
+## Owner-directed model budgets (2026-09-13)
+
+Decision: the planning model path must never be blocked by budget magnitudes
+— output tokens, per-call deadline, run response/correction/evidence budgets,
+evidence block size and the response body ceiling were all raised (see
+plan/progress.md "work freely" table). The bounds remain anti-hang ceilings;
+runtime validation bounds (plan/15 batch shape) are unchanged — a large
+restyle is staged as batches, and raising those needs a separate ADR.

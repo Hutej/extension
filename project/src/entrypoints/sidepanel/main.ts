@@ -40,8 +40,8 @@ async function seedBuiltInCloudflare(): Promise<unknown> {
     modelId: cf.model,
     auth: { kind: 'bearer' },
     // DeepSeek on complex pages needs longer than the 45s user-profile
-    // default; 180s is the architecture's hard per-call cap (controller).
-    callTimeoutMs: 180_000,
+    // default; 10 minutes is the architecture's per-call ceiling (controller).
+    callTimeoutMs: 600_000,
   };
   const ack: DisclosureAck = {
     disclosureVersion: PROVIDER_DISCLOSURE_VERSION,

@@ -81,7 +81,7 @@ export const PLANNER_SYSTEM_PREFIX = [
 
 /** Bounded evidence serialization for the user payload (plan/11 §6): newest
  *  detail survives, optional old detail is dropped first, no raw page HTML. */
-export function buildEvidenceBlock(snapshot: PageSnapshot, budgetChars = 12_000): string {
+export function buildEvidenceBlock(snapshot: PageSnapshot, budgetChars = 48_000): string {
   const lines: string[] = [];
   lines.push(`origin: ${snapshot.documentMetadata.origin}`);
   lines.push(`viewport: ${snapshot.viewport.width}x${snapshot.viewport.height}`);
@@ -161,10 +161,14 @@ export interface PlanningRun {
   answer(answer: string): Promise<RunOutcome>;
 }
 
-const MAX_MODEL_RESPONSES = 4;
-const MAX_EVIDENCE_REQUESTS = 2;
-const MAX_CORRECTIONS = 1;
-const DEFAULT_OUTPUT_TOKENS = 4096;
+// Owner-directed 2026-09-13: model budgets raised so big pages and big
+// restyles are never blocked by the budget (the old 4/2/1/4096 magnitudes
+// truncated large plans and starved repairs). The bounds remain so a broken
+// loop can still terminate — anti-hang ceilings, not work limits.
+const MAX_MODEL_RESPONSES = 8;
+const MAX_EVIDENCE_REQUESTS = 4;
+const MAX_CORRECTIONS = 3;
+const DEFAULT_OUTPUT_TOKENS = 16384;
 
 export function createPlanningController(deps: PlanningControllerDeps) {
   const client: ProviderClient = deps.client ?? createProviderClient({ now: deps.now, randomId: deps.randomId, sleep: deps.sleep });
@@ -209,7 +213,7 @@ export function createPlanningController(deps: PlanningControllerDeps) {
       }
       if (req.signal?.aborted) return { stop: true };
       const timeoutMs = req.callTimeoutMs ?? req.profile.callTimeoutMs ?? 45_000;
-      const deadlineAt = Math.min(deps.now() + timeoutMs, deps.now() + 180_000);
+      const deadlineAt = Math.min(deps.now() + timeoutMs, deps.now() + 600_000);
       let result: ProviderCallResult;
       try {
         result = await client.call({
@@ -217,7 +221,7 @@ export function createPlanningController(deps: PlanningControllerDeps) {
           credential: req.credential,
           system: PLANNER_SYSTEM_PREFIX,
           user: userPayload,
-          outputTokens: Math.min(req.profile.outputLimit ?? DEFAULT_OUTPUT_TOKENS, DEFAULT_OUTPUT_TOKENS),
+          outputTokens: req.profile.outputLimit ?? DEFAULT_OUTPUT_TOKENS,
           jsonObjectMode: allowJsonMode && (req.profile.capabilities?.jsonObjectMode ?? false),
           deadlineAt,
           signal: req.signal,
@@ -242,17 +246,6 @@ export function createPlanningController(deps: PlanningControllerDeps) {
       }
       return { ok: true, value: decoded.value };
     };
-
-    const repairPrompt = (badText: string, detail: string): string =>
-      [
-        `Your previous response was not a valid planning response: ${detail}`,
-        `It began with: ${badText.slice(0, 120).replace(/\s+/g, ' ')}`,
-        'Answer again with EXACTLY ONE JSON object from the response union. Do not weaken the schema or the safety rules.',
-        '',
-        evidenceBlock,
-        '',
-        `goal: ${req.goal}`,
-      ].join('\n');
 
     const runLoop = async (): Promise<PlanningRun> => {
       for (;;) {
@@ -303,31 +296,23 @@ export function createPlanningController(deps: PlanningControllerDeps) {
           const evidence = value as RequestEvidence;
           counters.evidenceRequests += 1;
           const gathered = await gatherEvidence(evidence);
-          evidenceBlock = `${evidenceBlock}\nadditional evidence: ${gathered}`.slice(0, 16_000);
+          evidenceBlock = `${evidenceBlock}\nadditional evidence: ${gathered}`.slice(0, 200_000);
           continue;
         }
 
-        // Invalid output: ONE shared correction (plan/11 §7).
+        // Invalid output: bounded shared corrections (plan/11 §7 — owner-directed
+        // 2026-09-13 budget of 3; the failure rides the loop as the latest
+        // diagnostic so every budgeted repair really happens).
         if (counters.correctionsUsed >= MAX_CORRECTIONS) {
           return finish({ kind: 'cannot-complete', reason: `cannot-produce-valid-proposal: ${decoded.detail}`, counters });
         }
         counters.correctionsUsed += 1;
-        const repair = await callProvider(repairPrompt(result.text ?? '', decoded.detail), false);
-        if ('stop' in repair) {
-          return finish({ kind: 'cannot-complete', reason: 'the planning budget was exhausted before a valid proposal', counters });
-        }
-        if (!repair.ok) {
-          return finish({ kind: 'provider-error', code: repair.code ?? 'internal', message: repair.message ?? 'the repair call failed', counters });
-        }
-        const repaired = decodeResponse(repair.text ?? '');
-        if (repaired.ok && repaired.value.kind === 'proposal') {
-          return finish({ kind: 'proposal', proposal: repaired.value, counters, ...(repair.downgradedParameter !== undefined ? { downgradedParameter: repair.downgradedParameter } : {}) });
-        }
-        return finish({
-          kind: 'cannot-complete',
-          reason: `cannot-produce-valid-proposal: ${repaired.ok ? 'the repaired answer was not a proposal' : repaired.detail}`,
-          counters,
-        });
+        latestDiagnostic = [
+          `your previous response was not a valid planning response: ${decoded.detail}`,
+          `it began with: ${(result.text ?? '').slice(0, 120).replace(/\s+/g, ' ')}`,
+          'Answer again with EXACTLY ONE JSON object from the response union. Do not weaken the schema or the safety rules.',
+        ].join('\n');
+        continue;
       }
     };
 
@@ -335,7 +320,7 @@ export function createPlanningController(deps: PlanningControllerDeps) {
       try {
         if (evidence.queryKind === 'expand-regions') {
           const fresh = await deps.observe(req.documentKey);
-          return buildEvidenceBlock(fresh, 6000);
+          return buildEvidenceBlock(fresh, 24_000);
         }
         if (evidence.queryKind === 'inspect-target' || evidence.queryKind === 'inspect-fields') {
           const ref = evidence.targetRef ?? '';

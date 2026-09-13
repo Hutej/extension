@@ -299,11 +299,11 @@ test('T20: the shared deadline covers slow headers — an aborted attempt is rep
 test('T20: an oversized response body is rejected at the byte cap', async () => {
   const url = await listen((req, res) => {
     res.writeHead(200, { 'content-type': 'application/json' });
-    res.end('{"choices":[{"message":{"content":"' + 'x'.repeat(200 * 1024) + '"}}]}');
+    res.end('{"choices":[{"message":{"content":"' + 'x'.repeat(2 * 1024 * 1024) + '"}}]}');
   });
   const out = await callEndpoint(`${url}/v1/chat/completions`);
   assert.equal(out.ok, false);
-  assert.match(out.message ?? '', /128.*byte cap|exceeded/i);
+  assert.match(out.message ?? '', /byte cap|exceeded/i);
 });
 
 test('T25: a cross-origin redirect is refused — credentials never follow it; same-origin is allowed', async () => {

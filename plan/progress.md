@@ -708,3 +708,35 @@ Next task: **S8.4 — Add bounded owned Canvas 2D, not a graphics framework**.
   storage keeps the 45s deadline (the seed never overwrites existing
   settings) — remove the extension + load unpacked again to re-seed, or
   raise the profile's stored callTimeoutMs.
+
+## Owner-directed: model budget magnitudes raised — "work freely" (2026-09-13)
+
+The owner: remove nonsense limits (max tokens, time, anything blocking real
+work). Bounds that prevent infinite hangs stay, at generous magnitudes;
+validation/consent/safety bounds are untouched (never weakened).
+
+| Limit | Old | New | Where |
+|---|---|---|---|
+| Output tokens (default) | 4096 HARD clamp (even if the profile asked for more) | 16384 default, profile `outputLimit` decides (decode cap 1_000_000) | controller.ts (the Math.min clamp removed) |
+| Per-call deadline ceiling | 180s | 600s (10 min) | controller.ts + seeded profile `callTimeoutMs: 600_000` |
+| Model responses per run | 4 | 8 | controller.ts |
+| Evidence continuations | 2 | 4 | controller.ts |
+| Corrections (repairs) | 1 (and the code terminated after ONE repair regardless) | 3, and every budgeted repair really happens — the failure now rides the loop as the latest diagnostic instead of terminating inside the repair path | controller.ts |
+| Evidence block budget | 12k chars initial / 6k per continuation / 16k total | 48k / 24k / 200k | controller.ts `buildEvidenceBlock` |
+| Response body cap | 128 KiB | 1 MiB | providers.ts |
+
+- plan/11 §5/§7 contracts updated in spirit by owner direction; magnitude
+  changes recorded here (plan/18: owner-directed model budgets, 2026-09-13).
+- Tests updated where they asserted the old budgets (controller: evidence
+  cap 4 + exhaustion at 8 responses; corrections: 3 budgeted repairs with
+  the fourth terminal, and a repair CAN land the proposal; providers:
+  oversized fixture now 2 MiB vs the 1 MiB ceiling).
+- Untouched on purpose: runtime operation/validation bounds (maxOperations
+  64/batch, declarations, sheet bytes — plan/15 design bounds, staged
+  batches are the intended big-restyle shape), transport retry bounds,
+  bounded body reads, the 15s broker command deadline (fast document
+  commands), question-answer human wait (5 min). If a huge restyle ever hits
+  maxOperations, that is a separate ADR-owned change.
+- Gates ×2 green (354 unit + 36 browser); built chunk verified (seed 600s +
+  token). User action: re-load the unpacked extension to re-seed (fresh
+  storage) or note existing seeded profiles keep the old 180s deadline.

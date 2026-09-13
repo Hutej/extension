@@ -137,38 +137,47 @@ test('T20: a requestEvidence continuation gathers bounded evidence and continues
   const run = await start(makeDeps([evidenceReply, evidenceReply, { text: PROPOSAL_JSON }], log));
   assert.equal(run.outcome.kind, 'proposal', JSON.stringify(run.outcome).slice(0, 300));
   assert.equal(run.outcome.counters.modelResponses, 3);
-  assert.equal(run.outcome.counters.evidenceRequests, 2, 'the cap is 2 evidence continuations');
+  assert.equal(run.outcome.counters.evidenceRequests, 2, 'continuations are honored within the cap');
   assert.match(log.find((l) => l.startsWith('call#2')) ?? '', /goal:/, 'the proposal call carries goal + evidence');
 
-  // A third evidence request is refused — the model is told to decide with
-  // current evidence and gets exactly one final response within the ≤4 budget.
+  // The cap is 4 continuations (owner-directed 2026-09-13 budget); a fifth
+  // request is refused — the model is told to decide with current evidence.
   const greedy = { text: JSON.stringify({ kind: 'requestEvidence', queryKind: 'expand-regions' }) };
   const run2 = await start(makeDeps([greedy, greedy, greedy, { text: PROPOSAL_JSON }]));
   assert.equal(run2.outcome.kind, 'proposal', 'the capped model still gets its one final response');
-  assert.equal(run2.outcome.counters.modelResponses, 4, 'never more than 4 model responses');
-  assert.equal(run2.outcome.counters.evidenceRequests, 2, 'only 2 evidence requests were honored');
+  assert.equal(run2.outcome.counters.modelResponses, 4, 'never more than 8 model responses');
+  assert.equal(run2.outcome.counters.evidenceRequests, 3, 'only 3 evidence requests were honored');
 
   // And if it keeps asking instead of deciding: honest budget exhaustion.
-  const run3 = await start(makeDeps([greedy, greedy, greedy, greedy]));
+  const run3 = await start(makeDeps(Array(8).fill(greedy)));
   assert.equal(run3.outcome.kind, 'cannot-complete');
   assert.match((run3.outcome as { reason: string }).reason, /budget was exhausted/);
-  assert.equal(run3.outcome.counters.modelResponses, 4);
+  assert.equal(run3.outcome.counters.modelResponses, 8);
 });
 
 // ── the shared correction budget (plan/11 §7) ────────────────────────────
 
-test('T02/T20: one malformed response gets exactly one repair call; a second failure is terminal', async () => {
+test('T02/T20: malformed responses get budgeted repairs (owner-directed budget of 3); the fourth failure is terminal', async () => {
   const log: string[] = [];
   const run = await start(makeDeps([{ text: 'I would love to help, but let me explain first: no JSON here.' }, { text: PROPOSAL_JSON }], log));
   assert.equal(run.outcome.kind, 'proposal');
   assert.equal(run.outcome.counters.correctionsUsed, 1);
   assert.match(log[1] ?? '', /not a valid planning response/, 'the repair prompt names the failure');
 
+  const malformed = { text: '{"kind":"proposal"' };
   const log2: string[] = [];
-  const run2 = await start(makeDeps([{ text: '{"kind":"proposal"' }, { text: '{"kind":"nonsense"}' }], log2));
+  const run2 = await start(makeDeps([malformed, malformed, malformed, malformed], log2));
   assert.equal(run2.outcome.kind, 'cannot-complete');
   assert.match((run2.outcome as { reason: string }).reason, /cannot-produce-valid-proposal/);
-  assert.equal(run2.outcome.counters.modelResponses, 2, 'one initial + one repair, then honest termination');
+  assert.equal(run2.outcome.counters.correctionsUsed, 3, 'the repair budget of 3 is really spent');
+  assert.equal(run2.outcome.counters.modelResponses, 4, 'one initial + three repairs, then honest termination');
+
+  // Every budgeted repair really happens — the failure rides the loop (the
+  // old code terminated after one repair regardless of the budget).
+  const log3: string[] = [];
+  const ok3 = await start(makeDeps([malformed, malformed, malformed, { text: PROPOSAL_JSON }], log3));
+  assert.equal(ok3.outcome.kind, 'proposal', 'the third repair can still land the proposal');
+  assert.equal(ok3.outcome.counters.modelResponses, 4);
 });
 
 test('T02: a response containing TWO candidate objects is ambiguous — rejected, never first-plausible', async () => {

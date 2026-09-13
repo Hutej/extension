@@ -319,7 +319,9 @@ export function detectUnsupportedParameter(protocol: ProviderProfile['protocol']
 
 // ── bounded HTTP client ──────────────────────────────────────────────────
 
-const MAX_RESPONSE_BYTES = 128 * 1024; // plan/11 §5 response byte cap
+// Owner-directed 2026-09-13: 1 MiB — the bound stays a memory ceiling, not a
+// work limit (plan/11 §5 cap, magnitude raised so large model plans never clip).
+const MAX_RESPONSE_BYTES = 1024 * 1024;
 const MAX_HTTP_ATTEMPTS = 6;
 const MAX_RETRIES = 2;
 const BACKOFF_BASE_MS = 500;
