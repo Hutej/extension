@@ -902,3 +902,37 @@ Owner-directed integrity cut (same report, "cut off overengineering"):
   now produce a low-contrast or overflowing result without a revert — the
   model's own review + the user's preview remain the quality gates (owner
   chose this trade-off explicitly).
+
+## 2026-09-13 (night) — transient states never revert approved work (owner-directed)
+
+Owner: "transformation increasing page size or anything — let it be, it might
+be the design need… verification should check if the page is breaking or
+collapsing." Audit of the remaining revert triggers after the integrity cut:
+
+- highImpact properties (position:fixed etc.): disclosure-only, never a
+  refusal — kept as-is.
+- Compile/validation bounds (64 ops, 256 rules, 2048 declarations, 256KB
+  sheet): generous anti-hang ceilings; a whole-site transform fits — kept.
+- THE REAL HARM FOUND: the first verify pass measured mid-CSS-transition
+  (apply → 250ms settle → measure; default transitions run 200-400ms) and the
+  ONE bounded recheck covered only UNKNOWN outcomes — a transient FAIL
+  (mid-animation computed value) reverted the whole batch instantly. This is
+  the "apply and then quickly error" class on any site with transitions.
+- Fix: when ANY check is non-pass, the whole set is re-measured ONCE after
+  the settle wait and that settled measurement is the verdict. A clean first
+  pass adds zero latency; a transient (transition, font swap, lazy layout) is
+  rescued; only failure that PERSISTS across the recheck reverts. Key-scoped
+  re-runs were rejected deliberately: projection sub-checks sit behind parent
+  `want()` gates, so a key-scoped re-run silently skips them (a rechecked
+  fail vanishes → false pass — caught by the S8.1 unit test during this
+  change). Production recheckWait 60ms → 450ms (session.ts).
+- "Page breaking/collapsing" detection stays exactly the honest checks:
+  declared effects must hold on their targets, the composition token must
+  survive (site interference), previously-accepted revisions must keep
+  holding, owned trees must stay connected at their anchors. The compiled
+  CSS cannot affect any element without its token, so global collapse is
+  structurally impossible from a candidate; per-target breakage is what the
+  effect checks measure.
+- Tests: new verify unit test (transient fail rescued by exactly one
+  recheck; persistent fail still reverts honestly). Gates ×2 green
+  (369 unit + 39 browser).

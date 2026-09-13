@@ -447,7 +447,10 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     canonicalOf: probeCanonicalOf(document),
     canonicalAllOf: probeCanonicalAllOf(document),
     rectOf: (el) => el.getBoundingClientRect(),
-    recheckWait: () => new Promise((resolve) => setTimeout(resolve, 60)),
+    // One bounded recheck after the settle: default CSS transitions run
+    // 200-400ms — the recheck must land after they finish (owner direction:
+    // a mid-transition read never reverts approved work).
+    recheckWait: () => new Promise((resolve) => setTimeout(resolve, 450)),
     isBound: (normalized: string) => behavior.isBound(normalized),
     hasRule: (customizationId: string) => behavior.hasRule(customizationId),
   });

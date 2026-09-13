@@ -1414,8 +1414,10 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     }
 
     // 6. S4.3 mandatory structured verification: delivery/effect/integrity
-    //    against the captured baseline, one bounded recheck of unknowns; the
-    //    aggregate gates acceptance (I11 — unknown is never accepted).
+    //    against the captured baseline; every non-pass outcome gets ONE
+    //    bounded recheck after the settle wait (a transient never reverts
+    //    approved work); the aggregate gates acceptance (I11 — unknown is
+    //    never accepted).
     let report: VerificationReport;
     try {
       report = await verifier.verify(prepared.plan, captured.baseline);

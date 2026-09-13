@@ -21,8 +21,10 @@
  * Truthfulness rules (I11/T13): a missing, throwing or malformed verifier is
  * UNKNOWN, never pass; an empty check set is unknown, never an empty-array
  * pass; pre-existing breakage is exempt and disclosed, never silently
- * dropped. One bounded recheck after settle; a still-unknown result rolls
- * the provisional candidate back. No probe modifies native content: the
+ * dropped. When any check is non-pass, the whole set is re-measured once
+ * after the settle wait and the settled measurement is the verdict — a
+ * transient (CSS transition, font swap) never reverts approved work; only
+ * failure that persists across the recheck does. No probe modifies native content: the
  * owned probe element is removed in `finally`. The user's window is never
  * resized or moved (I22) — measurements are read-only.
  */
@@ -143,8 +145,11 @@ export interface Verifier {
   /** Capture the mandatory pre-write baseline (A4 step 2). Any measurement
    *  failure refuses the batch BEFORE activation. */
   captureBaseline(plan: VerifyPlan): { ok: true; baseline: VerifyBaseline } | { ok: false; detail: string };
-  /** Verify the candidate against the baseline. Unknown outcomes get ONE
-   *  bounded recheck; the aggregate is fail > unknown > pass. */
+  /** Verify the candidate against the baseline. Every non-pass outcome gets
+   *  ONE bounded recheck after the settle wait — a transient state (CSS
+   *  transition, font swap, lazy layout) never reverts approved work; only
+   *  failure that PERSISTS across the recheck does (owner direction,
+   *  2026-09-13). The aggregate is fail > unknown > pass. */
   verify(plan: VerifyPlan, baseline: VerifyBaseline): Promise<VerificationReport>;
 }
 
@@ -489,14 +494,17 @@ export function createVerifier(deps: VerifierDeps): Verifier {
   const verify = async (plan: VerifyPlan, baseline: VerifyBaseline): Promise<VerificationReport> => {
     let first: CheckRun = runChecks(plan, baseline, null);
     let rechecked = false;
-    const unknownKeys = new Set<string>(first.outcomes.filter((o) => o.status === 'unknown').map((o) => o.key));
-    if (unknownKeys.size > 0) {
+    // Transient states (CSS transitions, font swaps, lazy layout) read as a
+    // FAIL or UNKNOWN mid-flight — they must never revert approved work.
+    // When anything is non-pass, re-run the WHOLE set after the settle wait
+    // and take that settled measurement as the verdict (sub-checks sit
+    // behind parent gates, so a key-scoped re-run can silently skip them).
+    // Only failure that PERSISTS across the recheck reverts the candidate
+    // (owner direction, 2026-09-13); a clean first pass adds zero latency.
+    if (first.outcomes.some((o) => o.status === 'fail' || o.status === 'unknown')) {
       await (deps.recheckWait ? deps.recheckWait() : Promise.resolve());
-      const second = runChecks(plan, baseline, unknownKeys);
+      first = runChecks(plan, baseline, null);
       rechecked = true;
-      // Replace the rechecked outcomes; keep the rest from the first pass.
-      const kept = first.outcomes.filter((o) => !unknownKeys.has(o.key));
-      first = { outcomes: [...kept, ...second.outcomes], preExistingBroken: first.preExistingBroken + second.preExistingBroken };
     }
 
     const counts = { pass: 0, satisfied: 0, fail: 0, unknown: 0 };

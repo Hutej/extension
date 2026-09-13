@@ -199,6 +199,7 @@ function makeWorld() {
   doc.appendChild(docEl);
   const styles = new FakeStyles();
   let rechecks = 0;
+  let onRecheck: (() => void) | null = null;
   const deps: VerifierDeps = {
     doc: doc as unknown as Document,
     now: () => Date.now(),
@@ -235,12 +236,13 @@ function makeWorld() {
     rectOf: (target: Element) => (target as unknown as StubNode).rect,
     recheckWait: async () => {
       rechecks += 1;
+      onRecheck?.();
     },
     isBound: () => true,
     hasRule: () => true,
   };
   const verifier = createVerifier(deps);
-  return { doc, docEl, styles, verifier, deps, recheckCount: () => rechecks };
+  return { doc, docEl, styles, verifier, deps, recheckCount: () => rechecks, setOnRecheck: (fn: (() => void) | null) => { onRecheck = fn; } };
 }
 
 const basePlan = (overrides: Partial<VerifyPlan> = {}): VerifyPlan => ({
@@ -307,6 +309,35 @@ test('T13: an unknown measurement gets ONE bounded recheck, then passes or rolls
   assert.equal(report.status, 'pass', JSON.stringify(report.issues));
   assert.equal(report.coverage.rechecked, true, 'the one recheck ran');
   assert.equal(w.recheckCount(), 1, 'exactly one recheck — never an endless loop');
+});
+
+test('T13/owner: a transient fail (mid-transition read) is rescued by the one recheck; a persistent fail still reverts', async () => {
+  const w = makeWorld();
+  const h = el('h1');
+  w.doc.appendChild(h);
+  w.styles.set(h, 'color', 'rgb(0, 0, 255)'); // mid-transition: declared red not yet holding
+  const captured = w.verifier.captureBaseline(basePlan());
+  assert.ok(captured.ok);
+  // The transition completes during the recheck wait.
+  w.setOnRecheck(() => w.styles.set(h, 'color', 'rgb(255, 0, 0)'));
+  const report = await w.verifier.verify(basePlan({
+    styles: [{ key: 'effect:style:op0:decl:color', el: h as unknown as Element, property: 'color', value: 'red' }],
+  }), captured.baseline);
+  assert.equal(report.status, 'pass', JSON.stringify(report.issues));
+  assert.equal(w.recheckCount(), 1, 'exactly one bounded recheck ran');
+
+  // A failure that PERSISTS across the recheck still reverts (honest).
+  const w2 = makeWorld();
+  const h2 = el('h1');
+  w2.doc.appendChild(h2);
+  w2.styles.set(h2, 'color', 'rgb(0, 0, 255)');
+  const captured2 = w2.verifier.captureBaseline(basePlan());
+  assert.ok(captured2.ok);
+  const report2 = await w2.verifier.verify(basePlan({
+    styles: [{ key: 'effect:style:op0:decl:color', el: h2 as unknown as Element, property: 'color', value: 'red' }],
+  }), captured2.baseline);
+  assert.equal(report2.status, 'fail');
+  assert.equal(report2.issues[0].key, 'effect:style:op0:decl:color');
 });
 
 // ── T30: combined revision verification ──────────────────────────────────
