@@ -10,6 +10,16 @@
 
 import { mountWorkspace, WORKSPACE_SETTINGS_KEY } from '../../ui/workspace.ts';
 
+/** The last activated ordinary web tab — the workspace-as-tab fallback. */
+let lastWebTabId: number | null = null;
+let ownTabId: number | undefined;
+void chrome.tabs.getCurrent?.().then((t) => { ownTabId = t?.id; }).catch(() => undefined);
+chrome.tabs?.onActivated?.addListener((activeInfo) => {
+  // Remember non-self activations so the fallback target tracks the page
+  // the user was actually on (never this workspace's own tab).
+  if (activeInfo.tabId !== ownTabId) lastWebTabId = activeInfo.tabId;
+});
+
 const root = document.getElementById('workspace');
 if (root !== null) {
   mountWorkspace(root, {
@@ -23,6 +33,25 @@ if (root !== null) {
     listTabs: async () => {
       const tabs = await chrome.tabs.query({});
       return tabs.map((t) => ({ id: t.id as number, ...(t.url !== undefined ? { url: t.url } : {}), ...(t.title !== undefined ? { title: t.title } : {}) }));
+    },
+    // The page the user is on IS the target (no manual picking). In the
+    // side panel the active tab of this window is the web page. When this
+    // page runs as a tab (the fallback), tabs.query reports THIS tab with
+    // an EMPTY url (extension pages are not disclosed to tabs.query) — so
+    // identify our own tab with tabs.getCurrent() and fall back to the last
+    // real web tab the user activated.
+    activeTabId: async () => {
+      try {
+        const own = await chrome.tabs.getCurrent?.();
+        const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+        const t = tabs[0];
+        if (t?.id === undefined) return lastWebTabId;
+        if (own?.id === t.id) return lastWebTabId;
+        lastWebTabId = t.id;
+        return t.id;
+      } catch {
+        return lastWebTabId;
+      }
     },
     loadSettings: async () => {
       const stored = await chrome.storage.local.get(WORKSPACE_SETTINGS_KEY);

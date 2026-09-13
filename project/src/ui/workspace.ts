@@ -82,11 +82,6 @@ export interface WorkspaceSettings {
    *  its record again, but always REVALIDATED against live registrations
    *  (plan/05 §1): a pin whose document no longer registers is dropped,
    *  never guessed onto another tab. */
-  pinnedTabId: number | null;
-  /** S8.3: the pinned target's exact frame (plan/12 §3 — the user pins a
-   *  frame document explicitly). 0 = the top document; old persisted pins
-   *  resolve to the top document. */
-  pinnedFrameId: number;
   /** The real model opt-out (AC-07): off means no planning fetch happens at
    *  all; deterministic saved customizations stay manageable. */
   aiEnabled: boolean;
@@ -98,8 +93,6 @@ export const DEFAULT_SETTINGS: WorkspaceSettings = {
   credentials: {},
   activeProfileId: null,
   consentAcks: [],
-  pinnedTabId: null,
-  pinnedFrameId: 0,
   aiEnabled: true,
 };
 
@@ -131,13 +124,15 @@ export const decodeWorkspaceSettings = (
       credentials: decodeCredentialMap,
       activeProfileId: optional(decodeString({ max: 128, pattern: /^[A-Za-z0-9._:-]+$/ })),
       consentAcks: decodeArray(decodeDisclosureAck, 64),
+      // Legacy pin fields (S8.3): still accepted so settings persisted by an
+      // earlier build decode cleanly — the values are ignored (the target now
+      // follows the browser's active tab; no manual pin exists).
       pinnedTabId: optional((v: unknown, p = 'pinnedTabId') => {
         if (v === null) return { ok: true as const, value: null };
         const n = decodeFiniteNumber({ integer: true, min: 0, max: 2 ** 31 })(v, p);
         return n.ok ? { ok: true as const, value: n.value } : n;
       }),
       pinnedFrameId: optional((v: unknown, p = 'pinnedFrameId') => {
-        // Missing in old persisted settings — resolves to the top document.
         if (v === undefined) return { ok: true as const, value: 0 };
         const n = decodeFiniteNumber({ integer: true, min: 0, max: 2 ** 31 })(v, p);
         return n.ok ? { ok: true as const, value: n.value } : n;
@@ -438,8 +433,14 @@ export interface WorkspaceDeps {
   sendToBroker(raw: unknown): Promise<unknown>;
   /** chrome.runtime.onMessage — subscription feed (RuntimeState pushes). */
   onMessage(handler: (raw: unknown) => void): () => void;
-  /** chrome.tabs.query — titles/urls for the target picker display. */
+  /** chrome.tabs.query — titles/urls for the target chip display. */
   listTabs(): Promise<WorkspaceTabInfo[]>;
+  /** The browser's ACTIVE tab of this window (the side panel attaches to
+   *  the window the user is working in — the page the user is on is the
+   *  target, never a manual pick). The implementation may fall back to the
+   *  last real web tab when the workspace itself is the active tab (the
+   *  extension-tab fallback). */
+  activeTabId(): Promise<number | null>;
   loadSettings(): Promise<unknown>;
   saveSettings(settings: WorkspaceSettings): Promise<void>;
   /** Controller factory override (unit tests inject a fake). */
@@ -475,7 +476,8 @@ export interface WorkspaceState {
   phase: WorkspacePhase;
   blocked: BlockReason | null;
   documents: DocumentInfo[];
-  pinnedDocument: DocumentInfo | null;
+  /** The ACTIVE tab's registered document — the one and only target. */
+  targetDocument: DocumentInfo | null;
   live: Record<string, LiveDocState>;
   run: {
     runId: string | null;
@@ -505,7 +507,9 @@ export interface WorkspaceCore {
   subscribe(listener: (state: WorkspaceState) => void): () => void;
   init(): Promise<void>;
   refreshDocuments(): Promise<void>;
-  setPinnedTab(tabId: number | null, frameId?: number): void;
+  /** Re-read the browser's active tab and re-target (the UI polls this).
+   *  A run in flight keeps its document — the run owns one target. */
+  refreshTarget(): Promise<void>;
   start(goal: string): Promise<void>;
   stop(): Promise<void>;
   answerQuestion(answer: string): Promise<void>;
@@ -528,8 +532,9 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
   let phase: WorkspacePhase = 'idle';
   let blocked: BlockReason | null = null;
   let documents: DocumentInfo[] = [];
-  let pinnedTabId: number | null = null;
-  let pinnedFrameId = 0;
+  /** The browser-reported active tab — the one and only target (the user
+   *  never picks a page manually; user-decided UX change, plan/16 §1). */
+  let activeTab: number | null = null;
   let live: Record<string, LiveDocState> = {};
   let run: WorkspaceState['run'] = null;
   let pendingQuestion: WorkspaceState['pendingQuestion'] = null;
@@ -558,7 +563,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
       phase,
       blocked,
       documents,
-      pinnedDocument: pinnedDocumentOf(),
+      targetDocument: targetDocumentOf(),
       live,
       run,
       pendingQuestion,
@@ -574,8 +579,14 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
     for (const l of listeners) l(state);
   };
 
-  const pinnedDocumentOf = (): DocumentInfo | null =>
-    documents.find((d) => d.tabId === pinnedTabId && d.frameId === pinnedFrameId) ?? null;
+  /** The current target = the ACTIVE tab's registered document. The top
+   *  document (frameId 0) is preferred; a frame-only registration falls
+   *  back to that frame (an honest edge, never a guess onto another tab). */
+  const targetDocumentOf = (): DocumentInfo | null => {
+    if (activeTab === null) return null;
+    const mine = documents.filter((d) => d.tabId === activeTab);
+    return mine.find((d) => d.frameId === 0) ?? mine[0] ?? null;
+  };
 
   const docKeyString = (dk: DocumentKey): string => `${dk.tabId}:${dk.frameId}:${dk.browserDocumentId}`;
 
@@ -654,11 +665,6 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
         ...(tab?.url !== undefined ? { url: tab.url } : {}),
       };
     });
-    if (pinnedTabId !== null && !documents.some((d) => d.tabId === pinnedTabId && d.frameId === pinnedFrameId)) {
-      pinnedTabId = null; // the pinned document is gone — never silently re-pin
-      pinnedFrameId = 0;
-      void persistSettings({ ...settings, pinnedTabId: null, pinnedFrameId: 0 }).catch(() => undefined);
-    }
     // Resynchronize live state for every registered document (close/reopen).
     for (const doc of documents) {
       try {
@@ -691,7 +697,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
   };
 
   const refreshRecord = async (): Promise<void> => {
-    const doc = pinnedDocumentOf();
+    const doc = targetDocumentOf();
     if (doc === null || doc.origin === null) {
       record = null;
       recordError = null;
@@ -809,14 +815,14 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
       return; // a run is already in flight — Stop first
     }
     blocked = null;
-    const doc = pinnedDocumentOf();
+    const doc = targetDocumentOf();
     if (doc === null) {
-      blocked = { reason: 'no-target', text: 'Select the exact target page first.' };
+      blocked = { reason: 'no-target', text: 'Open the web page you want to change, then type here. If nothing appears, reload that page once.' };
       publish();
       return;
     }
     if (goal.trim() === '') {
-      blocked = { reason: 'no-goal', text: 'Type what should change first.' };
+      blocked = { reason: 'no-goal', text: 'Type what you want changed on the page, then press Send.' };
       publish();
       return;
     }
@@ -824,13 +830,13 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
     if (!settings.aiEnabled) {
       blocked = {
         reason: 'ai-off',
-        text: 'AI planning is off — saved customizations keep working. Turn it on in Settings to plan new changes.',
+        text: 'AI planning is off. Saved changes keep working — turn AI on in Settings to make new changes.',
       };
       publish();
       return;
     }
     if (profile === null) {
-      blocked = { reason: 'no-profile', text: 'No provider profile is configured. Open Settings and add one.' };
+      blocked = { reason: 'no-profile', text: 'You need an AI provider first. Tap Settings (top right), add one, then try again. Nothing was sent.' };
       publish();
       return;
     }
@@ -920,7 +926,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
     pendingProposal = null;
     abort?.abort();
     abort = null;
-    const doc = pinnedDocumentOf();
+    const doc = targetDocumentOf();
     if (run?.runId !== null && doc !== null) {
       try {
         await send(envelope('run-command', { command: 'CancelRun' }, doc.documentKey, currentEpoch(doc)));
@@ -946,7 +952,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
 
   const approve = async (scope: RouteScope): Promise<void> => {
     const proposal = pendingProposal;
-    const doc = pinnedDocumentOf();
+    const doc = targetDocumentOf();
     if (proposal === null || doc === null || run === null) return;
     const customizationId = newCustomizationId();
     const revisionId = newRevisionId();
@@ -1018,7 +1024,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
     // session-only in the first frame release. The applied change stays live
     // until the run ends; no persistent frame scope is saved (never a saved
     // frame index — a later scope-schema ADR owns that boundary).
-    const runDoc = pinnedDocumentOf();
+    const runDoc = targetDocumentOf();
     if (runDoc !== null && runDoc.frameId !== 0) {
       pendingSave = null;
       emit('applied-unsaved', 'Frame transformations are session-only in this release: the change stays applied in this frame until the run ends or the tab reloads, but it is not saved — a persistent frame scope is a future capability.');
@@ -1088,7 +1094,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
   const mutateRecord = async (
     build: (ctx: { record: OriginRecord | null; expectedRecordRevision: number }) => Record<string, unknown> | { error: string },
   ): Promise<void> => {
-    const doc = pinnedDocumentOf();
+    const doc = targetDocumentOf();
     if (doc === null || doc.origin === null) return;
     try {
       const read = await send(envelope('control', { command: 'GetOriginRecord', origin: doc.origin }));
@@ -1118,7 +1124,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
   const setEnabled = (customizationId: string, enabled: boolean): Promise<void> =>
     mutateRecord((ctx) => ({
       command: 'SetEnabled',
-      origin: pinnedDocumentOf()?.origin ?? '',
+      origin: targetDocumentOf()?.origin ?? '',
       customizationId,
       enabled,
       expectedRecordRevision: ctx.expectedRecordRevision,
@@ -1128,7 +1134,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
   const removeCustomization = (customizationId: string): Promise<void> =>
     mutateRecord((ctx) => ({
       command: 'RemoveCustomization',
-      origin: pinnedDocumentOf()?.origin ?? '',
+      origin: targetDocumentOf()?.origin ?? '',
       customizationId,
       expectedRecordRevision: ctx.expectedRecordRevision,
       mutationId: newMutationId(),
@@ -1199,9 +1205,8 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
     settings = decoded.ok ? decoded.value : DEFAULT_SETTINGS;
     // The persisted pin is adopted provisionally and revalidated against
     // live registrations inside refreshDocuments (plan/05 §1).
-    pinnedTabId = settings.pinnedTabId ?? null;
-    pinnedFrameId = settings.pinnedFrameId ?? 0;
     try {
+      activeTab = await deps.activeTabId();
       await refreshDocuments();
     } catch (err) {
       ring.add({ context: 'workspace', phase: 'init', resultCode: 'error', detail: (err as Error).message.slice(0, 160) });
@@ -1217,7 +1222,7 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
       phase,
       blocked,
       documents,
-      pinnedDocument: pinnedDocumentOf(),
+      targetDocument: targetDocumentOf(),
       live,
       run,
       pendingQuestion,
@@ -1236,13 +1241,17 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
     },
     init,
     refreshDocuments,
-    setPinnedTab(tabId, frameId = 0) {
-      pinnedTabId = tabId;
-      pinnedFrameId = frameId;
-      // plan/05 §1: the selection persists but is revalidated on next load.
-      void persistSettings({ ...settings, pinnedTabId: tabId, pinnedFrameId: frameId }).catch(() => undefined);
-      publish();
-      void refreshRecord();
+    async refreshTarget() {
+      // A run in flight keeps its document — one run, one target.
+      const inFlight = ['starting', 'observing', 'planning', 'awaiting-question', 'awaiting-approval', 'applying', 'saving'].includes(phase);
+      const next = await deps.activeTabId();
+      const changed = next !== activeTab;
+      if (!inFlight) activeTab = next;
+      if (changed && !inFlight) {
+        await refreshDocuments();
+      } else {
+        publish();
+      }
     },
     start,
     stop,
@@ -1267,44 +1276,112 @@ export function createWorkspaceCore(deps: WorkspaceDeps): WorkspaceCore {
 }
 
 // ── DOM mount (native controls only; all text through text nodes) ─────────
+// ── DOM mount (native controls only; all text through text nodes) ─────────
 
 const WORKSPACE_CSS = `
-  :host, html, body { margin: 0; padding: 0; }
-  body { font: 13px/1.5 system-ui, -apple-system, sans-serif; color: #1b1d22; background: #f7f7f8; }
-  main { max-width: 640px; margin: 0 auto; padding: 12px 14px 40px; display: grid; gap: 14px; }
-  h1 { font-size: 16px; margin: 0; }
-  h2 { font-size: 13px; margin: 0 0 6px; text-transform: uppercase; letter-spacing: .04em; color: #555a66; }
-  section, details { background: #fff; border: 1px solid #d9dbe2; border-radius: 8px; padding: 10px 12px; }
-  .status { padding: 8px 10px; border-radius: 6px; border: 1px solid #c9ccd6; background: #f1f2f6; white-space: pre-wrap; }
-  .status.ok { border-color: #2e7d32; background: #e8f4e9; }
-  .status.error { border-color: #b3261e; background: #fdeeec; }
-  .status.warn { border-color: #8a6d00; background: #fdf6e0; }
-  button { font: inherit; padding: 5px 12px; border-radius: 6px; border: 1px solid #848aa0; background: #fff; cursor: pointer; }
+  :host, html, body { margin: 0; padding: 0; height: 100%; }
+  body { font: 13px/1.5 system-ui, -apple-system, sans-serif; color: #1b1d22; background: #f4f5f7; }
+  * { box-sizing: border-box; }
+  .sr-only { position: absolute; width: 1px; height: 1px; margin: -1px; padding: 0; overflow: hidden; clip: rect(0 0 0 0); white-space: nowrap; border: 0; }
+  main.rv-app { display: flex; flex-direction: column; height: 100vh; max-width: none; margin: 0; padding: 0; gap: 0; }
+
+  .rv-header { display: flex; align-items: center; gap: 8px; padding: 10px 12px; background: #fff; border-bottom: 1px solid #e2e4ea; }
+  .rv-brand { font-weight: 700; font-size: 14px; }
+  #rv-chip { flex: 1; min-width: 0; font-size: 12px; color: #555a66; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  #rv-chip b { color: #1b1d22; font-weight: 600; }
+  .rv-header button { flex-shrink: 0; }
+
+  .rv-view { flex: 1; min-height: 0; overflow-y: auto; padding: 12px; }
+  .rv-view[hidden] { display: none; }
+
+  #rv-chat { display: flex; flex-direction: column; gap: 8px; }
+  .msg { max-width: 88%; padding: 8px 11px; border-radius: 12px; white-space: pre-wrap; overflow-wrap: anywhere; }
+  .msg.user { align-self: flex-end; background: #dbeafe; }
+  .msg.rev { align-self: flex-start; background: #fff; border: 1px solid #e2e4ea; }
+  .msg.ok { align-self: flex-start; background: #e8f4e9; border: 1px solid #cde8cf; }
+  .msg.error { align-self: flex-start; background: #fdeeec; border: 1px solid #f2c4c0; }
+  .msg.warn { align-self: flex-start; background: #fdf6e0; border: 1px solid #eadfb8; }
+  .card { align-self: stretch; background: #fff; border: 1px solid #d9dbe2; border-radius: 10px; padding: 10px 12px; }
+  .card h3 { margin: 0 0 6px; font-size: 13px; }
+  .card ul.plain { list-style: none; margin: 6px 0; padding: 0; }
+  .card ul.plain li { padding: 3px 0 3px 18px; position: relative; }
+  .card ul.plain li::before { content: '•'; position: absolute; left: 8px; color: #555a66; }
+
+  .rv-input-row { display: flex; gap: 8px; padding: 10px 12px; background: #fff; border-top: 1px solid #e2e4ea; }
+  .rv-input-row textarea { flex: 1; font: inherit; padding: 8px 10px; border: 1px solid #b9bdcb; border-radius: 10px; resize: none; min-height: 40px; max-height: 120px; }
+  .rv-input-row textarea:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 1px; }
+
+  button { font: inherit; padding: 6px 12px; border-radius: 8px; border: 1px solid #848aa0; background: #fff; cursor: pointer; }
   button:hover { background: #f0f2ff; }
-  button[disabled] { opacity: .5; cursor: default; }
-  button.primary { background: #3450d4; border-color: #3450d4; color: #fff; }
-  button.primary:hover { background: #2b41b8; }
-  button.danger { border-color: #b3261e; color: #b3261e; }
-  textarea, input, select { font: inherit; width: 100%; box-sizing: border-box; padding: 5px 7px; border: 1px solid #848aa0; border-radius: 6px; background: #fff; }
-  textarea { min-height: 56px; resize: vertical; }
-  label { display: block; margin: 8px 0 3px; font-weight: 600; }
-  fieldset { border: 1px solid #d9dbe2; border-radius: 8px; margin: 0; padding: 6px 10px 8px; }
-  legend { font-weight: 700; padding: 0 4px; }
-  .radios { display: grid; gap: 3px; max-height: 190px; overflow: auto; }
-  .radios label { display: flex; gap: 6px; align-items: center; font-weight: 400; margin: 0; }
+  button:focus-visible { outline: 2px solid #1d4ed8; outline-offset: 1px; }
+  button.primary { background: #1d4ed8; border-color: #1d4ed8; color: #fff; }
+  button.primary:hover { background: #1e40af; }
+  button.danger { color: #b3261e; border-color: #b3261e; }
+  button:disabled { opacity: .55; cursor: not-allowed; }
+
   .muted { color: #555a66; font-size: 12px; }
-  .row { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
-  ul.plain { list-style: none; margin: 6px 0 0; padding: 0; display: grid; gap: 8px; }
-  ul.plain li { border: 1px solid #e2e3ea; border-radius: 6px; padding: 8px 10px; }
-  .cust-head { display: flex; justify-content: space-between; gap: 8px; align-items: baseline; flex-wrap: wrap; }
-  .cust-head strong { font-size: 13px; }
-  pre.diag { background: #f1f2f6; border: 1px solid #d9dbe2; border-radius: 6px; padding: 8px; overflow: auto; max-height: 220px; font-size: 11px; white-space: pre-wrap; }
-  .kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; font-size: 12px; }
-  .kv dt { font-weight: 600; color: #555a66; }
-  .kv dd { margin: 0; word-break: break-word; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 8px; }
+  ul.plain { list-style: none; margin: 6px 0; padding: 0; }
+  ul.plain li { background: #fff; border: 1px solid #e2e4ea; border-radius: 10px; padding: 10px 12px; margin-bottom: 8px; }
+  ul.plain .cust-head { display: flex; gap: 8px; justify-content: space-between; flex-wrap: wrap; }
+  fieldset { border: 1px solid #d9dbe2; border-radius: 10px; margin: 0 0 12px; padding: 10px 12px; }
+  fieldset legend { font-weight: 600; padding: 0 4px; }
+  label { display: block; margin: 8px 0 2px; }
+  input[type=text], input[type=url], input[type=password], select, textarea {
+    width: 100%; font: inherit; padding: 6px 8px; border: 1px solid #b9bdcb; border-radius: 8px; background: #fff;
+  }
+  details { margin: 12px 0; }
+  details summary { cursor: pointer; font-weight: 600; }
+  dl.kv { display: grid; grid-template-columns: auto 1fr; gap: 2px 10px; margin: 6px 0; }
+  dl.kv dt { font-weight: 600; }
+  pre.diag { font-size: 11px; background: #f1f2f6; border-radius: 8px; padding: 8px; overflow-x: auto; }
+  .hidden { display: none; }
 `;
 
-/** Mount the workspace UI. Returns an unmount handle (sidepanel teardown). */
+interface ChatMessage {
+  role: 'user' | 'rev';
+  text: string;
+  tone?: 'ok' | 'warn' | 'error';
+}
+
+/** Beginner-friendly wording for each run phase — the chat voice. */
+function chatPhaseText(
+  phase: WorkspacePhase,
+  ctx: { profileLabel?: string; detail?: string; elapsedMs?: number } = {},
+): string | null {
+  const detail = ctx.detail ?? '';
+  switch (phase) {
+    case 'idle':
+      return null;
+    case 'starting':
+      return 'Getting started…';
+    case 'observing':
+      return 'Reading your page…';
+    case 'planning':
+      return `Thinking (with ${ctx.profileLabel ?? 'your AI'})… this can take a moment — press Stop anytime.`;
+    case 'awaiting-question':
+      return 'Quick question before I continue:';
+    case 'awaiting-approval':
+      return "Here's my plan. Look it over, then press Apply — nothing changes on your page until you do.";
+    case 'applying':
+      return 'Applying and double-checking…';
+    case 'saving':
+      return 'Saving so it comes back next time you visit…';
+    case 'complete':
+      return `Done — applied and saved.${detail}`;
+    case 'applied-unsaved':
+      return `Applied on this page, but saving didn't work.${detail} Your change stays in this tab for now.`;
+    case 'conflicted':
+      return `Applied, with one thing to note.${detail}`;
+    case 'stopped':
+      return 'Stopped. Changes that were already approved stay.';
+    case 'failed':
+      return detail || "That didn't work — check the message above, then try again.";
+    case 'busy':
+      return 'Something is already running on this page. Press Stop first.';
+  }
+}
+
 export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmount(): void; core: WorkspaceCore } {
   const core = createWorkspaceCore(deps);
   const doc = root.ownerDocument ?? document;
@@ -1315,114 +1392,100 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
     return node;
   };
 
-  // Static skeleton (built once; dynamic regions re-render).
   const style = el('style');
   style.textContent = WORKSPACE_CSS;
 
+  // ── static skeleton: header + three views ────────────────────────────
   const main = el('main');
-  const h1 = el('h1', 'Revueon workspace');
-  const openTabBtn = el('button', 'Open this workspace in a tab');
-  openTabBtn.type = 'button';
-  openTabBtn.title = 'Side panel unavailable? The same workspace runs as an extension tab.';
-  openTabBtn.addEventListener('click', () => {
-    const url = typeof chrome !== 'undefined' && chrome.runtime?.getURL ? chrome.runtime.getURL('sidepanel.html') : '/sidepanel.html';
-    void globalThis.open?.(url, '_blank');
-  });
+  main.className = 'rv-app';
 
-  // Target section
-  const targetSection = el('section');
-  const targetHeading = el('h2', 'Target page');
-  const targetHint = el('p', 'Pages with a live Revueon runtime are listed. You choose the exact page — nothing is picked for you.');
-  targetHint.className = 'muted';
-  const refreshBtn = el('button', 'Refresh page list');
-  refreshBtn.type = 'button';
-  const radiosField = doc.createElement('fieldset');
-  const radiosLegend = el('legend', 'Pinned target');
-  const radiosBox = el('div');
-  radiosBox.className = 'radios';
-  radiosField.append(radiosLegend, radiosBox);
-  const noneLabel = el('label');
-  const noneRadio = doc.createElement('input');
-  noneRadio.type = 'radio';
-  noneRadio.name = 'rv-target';
-  noneRadio.value = '';
-  noneLabel.append(noneRadio, doc.createTextNode(' No target pinned'));
-  radiosBox.append(noneLabel);
-  targetSection.append(targetHeading, targetHint, refreshBtn, radiosField);
+  const header = el('header');
+  header.className = 'rv-header';
+  const brand = el('span', 'Revueon');
+  brand.className = 'rv-brand';
+  const chip = el('span', 'No page yet');
+  chip.id = 'rv-chip';
+  chip.setAttribute('role', 'status');
+  chip.setAttribute('aria-live', 'polite');
+  const changesBtn = el('button', 'My changes');
+  changesBtn.type = 'button';
+  changesBtn.title = 'See and manage the changes saved for this site';
+  const settingsBtn = el('button', 'Settings');
+  settingsBtn.type = 'button';
+  settingsBtn.setAttribute('aria-label', 'Settings — AI provider and options');
+  header.append(brand, chip, changesBtn, settingsBtn);
 
-  // Run section
-  const runSection = el('section');
-  const runHeading = el('h2', 'Request');
-  const goalLabel = el('label', 'What should change?');
-  goalLabel.htmlFor = 'rv-goal';
+  // Screen-reader live region carrying the same phase text (also the
+  // stable status oracle for tests).
+  const statusLive = el('div');
+  statusLive.id = 'rv-status';
+  statusLive.className = 'sr-only';
+  statusLive.setAttribute('role', 'status');
+  statusLive.setAttribute('aria-live', 'polite');
+
+  // Chat view
+  const chatView = el('section');
+  chatView.className = 'rv-view';
+  chatView.id = 'rv-chat-view';
+  const chatLog = el('div');
+  chatLog.id = 'rv-chat';
+  chatLog.setAttribute('role', 'log');
+  chatLog.setAttribute('aria-label', 'Conversation');
+  const cards = el('div');
+  cards.id = 'rv-cards';
+  const inputRow = el('div');
+  inputRow.className = 'rv-input-row';
   const goalInput = doc.createElement('textarea');
   goalInput.id = 'rv-goal';
-  const startBtn = el('button', 'Start');
-  startBtn.type = 'button';
-  startBtn.className = 'primary';
+  goalInput.setAttribute('aria-label', 'What should change on this page?');
+  goalInput.placeholder = 'What should change on this page?';
+  goalInput.rows = 2;
+  const sendBtn = el('button', 'Send');
+  sendBtn.type = 'button';
+  sendBtn.className = 'primary';
   const stopBtn = el('button', 'Stop');
   stopBtn.type = 'button';
   stopBtn.className = 'danger';
-  const statusBox = el('div');
-  statusBox.id = 'rv-status';
-  statusBox.className = 'status';
-  statusBox.setAttribute('role', 'status');
-  statusBox.setAttribute('aria-live', 'polite');
-  const questionBox = el('div');
-  questionBox.hidden = true;
-  const proposalBox = el('div');
-  proposalBox.hidden = true;
-  const retryBox = el('div');
-  retryBox.hidden = true;
-  const controlsRow = el('div');
-  controlsRow.className = 'row';
-  controlsRow.append(startBtn, stopBtn);
-  runSection.append(runHeading, goalLabel, goalInput, controlsRow, statusBox, questionBox, proposalBox, retryBox);
+  inputRow.append(goalInput, sendBtn, stopBtn);
+  chatView.append(chatLog, cards, inputRow);
 
-  // Customizations section
-  const custSection = el('section');
-  const custHeading = el('h2', 'Customizations on this site');
-  const custList = el('ul');
-  custList.className = 'plain';
-  const custNote = el('p');
-  custNote.className = 'muted';
-  custSection.append(custHeading, custNote, custList);
-
-  // Settings section
-  const settingsDetails = doc.createElement('details');
-  const settingsSummary = el('summary', 'Settings — provider, consent, AI on/off');
+  // Settings view (separate page — plan/16 §1)
+  const settingsView = el('section');
+  settingsView.className = 'rv-view';
+  settingsView.id = 'rv-settings-view';
+  settingsView.hidden = true;
+  const backFromSettings = el('button', '← Back');
+  backFromSettings.type = 'button';
+  backFromSettings.setAttribute('aria-label', 'Back to chat');
+  const settingsHeading = el('h2', 'Settings');
+  const profileField = el('fieldset');
+  const profileLegend = el('legend', 'AI provider');
   const profileSelect = doc.createElement('select');
+  profileSelect.id = 'rv-profile';
   profileSelect.setAttribute('aria-label', 'Active provider profile');
-  const newProfileBtn = el('button', 'New profile');
+  const newProfileBtn = el('button', 'New provider');
   newProfileBtn.type = 'button';
-  const fLabel = el('label', 'Profile name');
+  profileField.append(profileLegend, profileSelect, newProfileBtn);
+  const providerForm = el('fieldset');
+  const providerLegend = el('legend', 'Provider details');
+  const fLabel = el('label', 'Name (anything you like)');
   fLabel.htmlFor = 'rv-p-label';
   const fLabelInput = doc.createElement('input');
   fLabelInput.id = 'rv-p-label';
   fLabelInput.type = 'text';
-  fLabelInput.placeholder = 'My model provider';
-  const fProtocol = doc.createElement('select');
-  fProtocol.id = 'rv-p-protocol';
-  fProtocol.setAttribute('aria-label', 'Protocol');
-  for (const p of ['openai-chat', 'anthropic-messages'] as const) {
-    const o = doc.createElement('option');
-    o.value = p;
-    o.textContent = p;
-    fProtocol.append(o);
-  }
-  const protocolLabel = el('label', 'Protocol');
-  protocolLabel.htmlFor = 'rv-p-protocol';
+  fLabelInput.placeholder = 'My AI';
   const fEndpointLabel = el('label', 'Endpoint URL (https, or http on localhost)');
   fEndpointLabel.htmlFor = 'rv-p-endpoint';
   const fEndpoint = doc.createElement('input');
   fEndpoint.id = 'rv-p-endpoint';
   fEndpoint.type = 'url';
   fEndpoint.placeholder = 'https://api.example.com/v1/chat/completions';
-  const fModelLabel = el('label', 'Model id');
+  const fModelLabel = el('label', 'Model id (from your provider)');
   fModelLabel.htmlFor = 'rv-p-model';
   const fModel = doc.createElement('input');
   fModel.id = 'rv-p-model';
   fModel.type = 'text';
+  fModel.placeholder = 'gpt-4o-mini, claude-…, your-server-model…';
   const fAuthLabel = el('label', 'Authentication');
   fAuthLabel.htmlFor = 'rv-p-auth';
   const fAuth = doc.createElement('select');
@@ -1440,207 +1503,108 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
   fHeader.id = 'rv-p-header';
   fHeader.type = 'text';
   fHeader.placeholder = 'x-api-key';
-  const fCredentialLabel = el('label', 'Credential (API key) — stored locally, never shown again');
+  fHeader.parentElement?.classList.toggle('hidden', true);
+  const fCredentialLabel = el('label', 'API key — stored only on this computer, never shown again');
   fCredentialLabel.htmlFor = 'rv-p-credential';
   const fCredential = doc.createElement('input');
   fCredential.id = 'rv-p-credential';
   fCredential.type = 'password';
   fCredential.autocomplete = 'off';
-  const saveProfileBtn = el('button', 'Save profile');
+  const saveProfileBtn = el('button', 'Save provider');
   saveProfileBtn.type = 'button';
+  saveProfileBtn.className = 'primary';
   const profileStatus = el('p');
   profileStatus.className = 'muted';
-  profileStatus.setAttribute('role', 'status');
+  profileStatus.id = 'rv-profile-status';
+  const protocolNote = el('p', 'Works with any OpenAI-compatible or Anthropic-compatible endpoint (openai-chat or anthropic-messages).');
+  protocolNote.className = 'muted';
+  const fProtocol = doc.createElement('input');
+  fProtocol.type = 'hidden';
+  fProtocol.id = 'rv-p-protocol';
+  fProtocol.value = 'openai-chat';
+  providerForm.append(providerLegend, fLabel, fLabelInput, fEndpointLabel, fEndpoint, fModelLabel, fModel, fAuthLabel, fAuth, fHeaderLabel, fHeader, fCredentialLabel, fCredential, saveProfileBtn, protocolNote, fProtocol, profileStatus);
+  settingsView.append(backFromSettings, settingsHeading, profileField, providerForm);
 
-  const consentBox = el('div');
-  const aiLabel = el('label');
+  const aiField = el('fieldset');
+  const aiLegend = el('legend', 'AI on/off');
+  const aiToggleLabel = el('label');
   const aiToggle = doc.createElement('input');
   aiToggle.type = 'checkbox';
-  aiToggle.id = 'rv-ai';
-  aiLabel.append(aiToggle, doc.createTextNode(' AI planning enabled (turn off to stop all model calls; saved customizations keep working)'));
-  aiLabel.style.display = 'block';
-  aiLabel.htmlFor = 'rv-ai';
+  aiToggle.id = 'rv-ai-toggle';
+  aiToggleLabel.append(aiToggle, doc.createTextNode(' Let Revueon use the AI provider to plan changes'));
+  aiField.append(aiLegend, aiToggleLabel);
 
-  settingsDetails.append(
-    settingsSummary,
-    profileSelect,
-    newProfileBtn,
-    fLabel, fLabelInput,
-    protocolLabel, fProtocol,
-    fEndpointLabel, fEndpoint,
-    fModelLabel, fModel,
-    fAuthLabel, fAuth,
-    fHeaderLabel, fHeader,
-    fCredentialLabel, fCredential,
-    saveProfileBtn,
-    profileStatus,
-    consentBox,
-    aiLabel,
-  );
+  const consentBox = el('fieldset');
+  const consentLegend = el('legend', 'Privacy acknowledgement');
+  consentBox.append(consentLegend);
 
-  // Diagnostics section
-  const diagDetails = doc.createElement('details');
-  const diagSummary = el('summary', 'Diagnostics');
+  const openTabNote = el('p', 'Prefer a full window? ');
+  openTabNote.className = 'muted';
+  const openTabBtn = el('button', 'Open this workspace in a tab');
+  openTabBtn.type = 'button';
+  openTabBtn.title = 'Side panel unavailable? The same workspace runs as an extension tab.';
+  openTabNote.append(openTabBtn);
+
+  const diagnostics = doc.createElement('details');
+  const diagSummary = el('summary', 'Diagnostics (technical)');
   const diagBody = el('div');
+  diagnostics.append(diagSummary, diagBody);
 
+  settingsView.append(aiField, consentBox, openTabNote, diagnostics);
+
+  // Changes view (separate page)
+  const changesView = el('section');
+  changesView.className = 'rv-view';
+  changesView.id = 'rv-changes-view';
+  changesView.hidden = true;
+  const backFromChanges = el('button', '← Back');
+  backFromChanges.type = 'button';
+  backFromChanges.setAttribute('aria-label', 'Back to chat');
+  const changesHeading = el('h2', 'My changes on this site');
+  const custNote = el('p');
+  custNote.className = 'muted';
+  const custList = el('ul');
+  custList.className = 'plain';
+  changesView.append(backFromChanges, changesHeading, custNote, custList);
+
+  main.append(header, chatView, settingsView, changesView, statusLive);
+  root.textContent = '';
   root.append(style, main);
-  main.append(h1, openTabBtn, targetSection, runSection, custSection, settingsDetails, diagDetails);
-  diagDetails.append(diagSummary, diagBody);
 
-  // ── dynamic rendering ────────────────────────────────────────────────
-
-  let ignoreRadioEvents = false;
-
-  const renderTargets = (s: WorkspaceState): void => {
-    const selected = s.pinnedDocument !== null ? `${s.pinnedDocument.tabId}:${s.pinnedDocument.frameId}` : null;
-    ignoreRadioEvents = true;
-    for (const label of [...radiosBox.querySelectorAll('label')]) {
-      if (label !== noneLabel) label.remove();
-    }
-    if (s.documents.length === 0) {
-      const p = el('p', 'No pages with a live Revueon runtime. Open (or reload) an ordinary web page.');
-      p.className = 'muted';
-      radiosBox.append(p);
-    }
-    for (const d of s.documents) {
-      const label = el('label');
-      const radio = doc.createElement('input');
-      radio.type = 'radio';
-      radio.name = 'rv-target';
-      // One radio per exact document (plan/12 §3): "tabId:frameId".
-      radio.value = `${d.tabId}:${d.frameId}`;
-      if (`${d.tabId}:${d.frameId}` === selected) radio.checked = true;
-      const name = d.title ? d.title.slice(0, 60) : 'untitled page';
-      // S8.3 permission display: embedded frames are marked explicitly —
-      // the user is choosing to send content from inside another origin's
-      // page (explicit consent, never a first-frame fallback).
-      const embedded = d.frameId !== 0
-        ? ` (embedded frame of ${d.parentOrigin ?? 'unknown enclosing origin'})`
-        : '';
-      const owner = d.runOwner ? ', run active' : '';
-      const frameTag = d.frameId !== 0 ? ` [frame ${d.frameId}]` : '';
-      label.append(radio, doc.createTextNode(` ${name}${frameTag} — ${d.origin ?? 'unknown origin'}${embedded} (tab ${d.tabId}${owner})`));
-      radiosBox.append(label);
-    }
-    noneRadio.checked = selected === null;
-    ignoreRadioEvents = false;
+  // ── view switching ──────────────────────────────────────────────────
+  let view: 'chat' | 'settings' | 'changes' = 'chat';
+  const showView = (next: typeof view): void => {
+    view = next;
+    chatView.hidden = view !== 'chat';
+    settingsView.hidden = view !== 'settings';
+    changesView.hidden = view !== 'changes';
   };
+  changesBtn.addEventListener('click', () => { showView('changes'); render(core.state()); });
+  settingsBtn.addEventListener('click', () => { showView('settings'); render(core.state()); });
+  backFromSettings.addEventListener('click', () => { showView('chat'); render(core.state()); });
+  backFromChanges.addEventListener('click', () => { showView('chat'); render(core.state()); });
 
-  const renderRun = (s: WorkspaceState): void => {
-    const inFlight = ['starting', 'observing', 'planning', 'awaiting-question', 'awaiting-approval', 'applying', 'saving'].includes(s.phase);
-    startBtn.disabled = inFlight;
-    stopBtn.disabled = !inFlight; // Stop is always reachable while anything runs (I22)
-    const view = statusFor(s.phase, {
-      profileLabel: core.activeProfile()?.label,
-      elapsedMs: s.run?.startedAt != null ? deps.now() - s.run.startedAt : undefined,
-      detail: s.statusDetail ?? undefined,
-    });
-    // Blocked pre-run refusals render their explicit reason (zero calls made).
-    statusBox.className = `status ${view.tone}`;
-    statusBox.textContent = s.blocked !== null && s.phase === 'idle' ? s.blocked.text : view.text;
-    if (s.run?.counters != null) {
-      statusBox.textContent += `\nmodel responses: ${s.run.counters.modelResponses}, HTTP attempts: ${s.run.counters.httpAttempts}, wall ${(s.run.counters.wallMs / 1000).toFixed(1)}s`;
-    }
+  // ── chat log ─────────────────────────────────────────────────────────
+  const chat: ChatMessage[] = [];
+  const say = (m: ChatMessage): void => { chat.push(m); };
+  let lastSign: string | null = null;
 
-    // Question area
-    questionBox.textContent = '';
-    if (s.pendingQuestion !== null) {
-      questionBox.hidden = false;
-      const q = el('p', s.pendingQuestion.question.question);
-      q.style.fontWeight = '700';
-      questionBox.append(q);
-      for (const option of s.pendingQuestion.question.options) {
-        const b = el('button', option);
-        b.type = 'button';
-        b.addEventListener('click', () => void core.answerQuestion(option));
-        questionBox.append(b);
-        questionBox.append(doc.createTextNode(' '));
-      }
-      const answerLabel = el('label', 'Or type your own answer');
-      answerLabel.htmlFor = 'rv-answer';
-      const answerInput = doc.createElement('input');
-      answerInput.id = 'rv-answer';
-      answerInput.type = 'text';
-      const sendBtn = el('button', 'Send answer');
-      sendBtn.type = 'button';
-      sendBtn.className = 'primary';
-      const sendOwn = (): void => {
-        const value = answerInput.value.trim();
-        if (value !== '') void core.answerQuestion(value);
-      };
-      sendBtn.addEventListener('click', sendOwn);
-      answerInput.addEventListener('keydown', (ev) => {
-        if ((ev as KeyboardEvent).key === 'Enter') sendOwn();
-      });
-      questionBox.append(answerLabel, answerInput, sendBtn);
-    } else {
-      questionBox.hidden = true;
+  const send = (): void => {
+    const goal = goalInput.value.trim();
+    if (goal !== '') {
+      say({ role: 'user', text: goal });
+      goalInput.value = '';
     }
-
-    // Proposal/approval area
-    proposalBox.textContent = '';
-    if (s.pendingProposal !== null && s.phase === 'awaiting-approval') {
-      proposalBox.hidden = false;
-      const summary = el('p', `Proposed: ${s.pendingProposal.summary}`);
-      summary.style.fontWeight = '700';
-      proposalBox.append(summary);
-      const ops = el('ul');
-      ops.className = 'plain';
-      for (const op of s.pendingProposal.operations.slice(0, 16)) {
-        ops.append(el('li', `${op.kind} — ${describeOperation(op)}`));
-      }
-      proposalBox.append(ops);
-      const scopeLabel = el('label', 'Apply where? (saved scope)');
-      scopeLabel.htmlFor = 'rv-scope';
-      const scopeSelect = doc.createElement('select');
-      scopeSelect.id = 'rv-scope';
-      const path = pathOfPinned(s);
-      const modes: Array<{ mode: RouteScope['mode']; text: string }> = [
-        { mode: 'exactPath', text: `this exact path (${path})` },
-        { mode: 'pathPrefix', text: `pages under ${path}` },
-        { mode: 'origin', text: 'all pages on this site' },
-      ];
-      for (const m of modes) {
-        const o = doc.createElement('option');
-        o.value = m.mode;
-        o.textContent = m.text;
-        if (m.mode === 'exactPath') o.selected = true;
-        scopeSelect.append(o);
-      }
-      const applyBtn = el('button', 'Apply');
-      applyBtn.type = 'button';
-      applyBtn.className = 'primary';
-      applyBtn.addEventListener('click', () => {
-        const mode = scopeSelect.value as RouteScope['mode'];
-        void core.approve({ mode, ...(mode !== 'origin' ? { path } : {}) });
-      });
-      const discardBtn = el('button', 'Discard');
-      discardBtn.type = 'button';
-      discardBtn.addEventListener('click', () => core.discardProposal());
-      proposalBox.append(scopeLabel, scopeSelect);
-      const row = el('div');
-      row.className = 'row';
-      row.append(applyBtn, discardBtn);
-      proposalBox.append(row);
-    } else {
-      proposalBox.hidden = true;
-    }
-
-    // Retry-save area (applied-unsaved)
-    retryBox.textContent = '';
-    if (s.phase === 'applied-unsaved' && s.pendingSave !== null) {
-      retryBox.hidden = false;
-      const retryBtn = el('button', 'Retry save');
-      retryBtn.type = 'button';
-      retryBtn.className = 'primary';
-      retryBtn.addEventListener('click', () => void core.retrySave());
-      const hint = el('p', 'Your change is applied in this tab only. Retry save writes it permanently; reloading the tab clears unsaved work.');
-      hint.className = 'muted';
-      retryBox.append(hint, retryBtn);
-    } else {
-      retryBox.hidden = true;
-    }
+    void core.start(goal);
   };
+  sendBtn.addEventListener('click', send);
+  goalInput.addEventListener('keydown', (ev) => {
+    if ((ev as KeyboardEvent).key === 'Enter' && !(ev as KeyboardEvent).shiftKey) {
+      ev.preventDefault();
+      send();
+    }
+  });
+  stopBtn.addEventListener('click', () => void core.stop());
 
   const describeOperation = (op: import('../contracts.ts').Operation): string => {
     const firstRef = (t: { targetRef?: string; localRef?: string } | undefined): string =>
@@ -1663,9 +1627,6 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
       case 'float':
         return `float the existing surface at ${firstRef(op.target)} to the ${op.edge} corner (min: ${op.width ?? 'responsive 24rem'} × ${op.maxHeight ?? '50vh'}; minimize control included) — it is your page's own node, not a copy; undo returns it to normal flow`;
       case 'bindKey': {
-        // plan/09 §1: generic activation is potentially consequential — the
-        // review must show the exact target + actions and say plainly that
-        // undo removes the shortcut, NOT the site's own effect.
         const base = `bind “${op.chord}” → ${op.actionIds.join(', ')} on ${firstRef(op.target)}`;
         const consequential = op.actionIds.some((a) => (CONSEQUENTIAL_BIND_ACTIONS as ReadonlySet<string>).has(a));
         return consequential
@@ -1675,17 +1636,12 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
       case 'collapse':
         return `add a disclosure toggle “${op.label}” ${op.placement ?? 'before'} ${firstRef(op.target)} (starts ${op.initialState ?? 'collapsed'}; you can always expand)`;
       case 'projectCollection': {
-        // plan/09 §4: the review must say what the view shows, that moves are
-        // LOCAL only, and that hiding the original is explicit and reversible.
         const base = `project a linked ${op.view} of the items in ${op.sourceSetRef} (${op.fields.map((f) => f.sourceField).join(', ')}) next to ${firstRef(op.target)} — arranging it changes your local view only, never the site`;
         return op.showOriginal === false
           ? `${base}; the original list will be hidden on the open page (undo restores it)`
           : base;
       }
       case 'localRule': {
-        // plan/09 §3: the automatic trigger acts WITHOUT a gesture — the
-        // review must say what will be clicked and that undo removes the
-        // rule, not effects already caused.
         const base = `rule: when a new matching element appears ${firstRef(op.target)}`;
         if (op.actionId === 'activateDisclosure') {
           return `${base}, click its own disclosure control automatically — undo removes the rule, not collapses it already caused`;
@@ -1694,72 +1650,213 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
         return `${base}, ${op.actionId}`;
       }
       default:
-        // Every v1 kind is covered above; this names any future kind honestly.
         return `${(op as import('../contracts.ts').Operation).kind} (no preview yet)`;
     }
   };
 
-  const pathOfPinned = (s: WorkspaceState): string => {
-    const url = s.pinnedDocument?.url;
-    if (url === undefined) return '/';
-    try {
-      return new URL(url).pathname || '/';
-    } catch {
-      return '/';
+  const renderChat = (s: WorkspaceState): void => {
+    // A phase/blocked transition becomes one chat message — never a spam
+    // loop (the signature only changes when the meaning changes).
+    const blockedText = s.blocked !== null && s.phase === 'idle' ? s.blocked.text : null;
+    const phaseText = blockedText !== null ? blockedText : chatPhaseText(s.phase, {
+      profileLabel: core.activeProfile()?.label,
+      detail: s.statusDetail ?? undefined,
+    });
+    const sign = `${s.phase}|${blockedText ?? s.statusDetail ?? ''}`;
+    if (sign !== lastSign && phaseText !== null) {
+      const tone = s.phase === 'complete' ? 'ok' : s.phase === 'failed' || s.phase === 'applied-unsaved' ? 'error' : s.phase === 'conflicted' || s.phase === 'busy' ? 'warn' : undefined;
+      say({ role: 'rev', text: phaseText, ...(tone ? { tone } : {}) });
+    }
+    lastSign = sign;
+
+    chatLog.textContent = '';
+    for (const m of chat) {
+      const bubble = el('div', m.text);
+      bubble.className = `msg ${m.role === 'user' ? 'user' : m.tone !== undefined ? `rev ${m.tone}` : 'rev'}`;
+      chatLog.append(bubble);
+    }
+    chatLog.scrollTop = chatLog.scrollHeight;
+  };
+
+  let cardsSign: string | null = null;
+  const renderCards = (s: WorkspaceState): void => {
+    // Only rebuild when the card-relevant state changed: a state push (live
+    // counters, seq bumps) must not recreate the Apply button mid-click.
+    const sign = JSON.stringify([
+      s.pendingQuestion?.questionId ?? null,
+      s.pendingProposal !== null && s.phase === 'awaiting-approval' ? s.pendingProposal.summary : null,
+      s.phase === 'applied-unsaved' && s.pendingSave !== null ? s.pendingSave.customizationId : null,
+    ]);
+    if (sign === cardsSign) return;
+    cardsSign = sign;
+    cards.textContent = '';
+    if (s.pendingQuestion !== null) {
+      const card = el('div');
+      card.className = 'card';
+      const q = el('h3', s.pendingQuestion.question.question);
+      card.append(q);
+      for (const option of s.pendingQuestion.question.options) {
+        const b = el('button', option);
+        b.type = 'button';
+        b.addEventListener('click', () => { say({ role: 'user', text: option }); void core.answerQuestion(option); });
+        card.append(b, doc.createTextNode(' '));
+      }
+      const answerLabel = el('label', 'Or type your own answer');
+      answerLabel.htmlFor = 'rv-answer';
+      const answerInput = doc.createElement('input');
+      answerInput.id = 'rv-answer';
+      answerInput.type = 'text';
+      const sendBtn2 = el('button', 'Send answer');
+      sendBtn2.type = 'button';
+      sendBtn2.className = 'primary';
+      const sendOwn = (): void => {
+        const value = answerInput.value.trim();
+        if (value !== '') { say({ role: 'user', text: value }); void core.answerQuestion(value); }
+      };
+      sendBtn2.addEventListener('click', sendOwn);
+      answerInput.addEventListener('keydown', (ev) => { if ((ev as KeyboardEvent).key === 'Enter') sendOwn(); });
+      card.append(answerLabel, answerInput, sendBtn2);
+      cards.append(card);
+    }
+    if (s.pendingProposal !== null && s.phase === 'awaiting-approval') {
+      const card = el('div');
+      card.className = 'card';
+      const head = el('h3', `Proposed: ${s.pendingProposal.summary}`);
+      card.append(head);
+      const ops = el('ul');
+      ops.className = 'plain';
+      for (const op of s.pendingProposal.operations.slice(0, 16)) {
+        ops.append(el('li', `${op.kind} — ${describeOperation(op)}`));
+      }
+      card.append(ops);
+      const scopeLabel = el('label', 'Keep it for');
+      scopeLabel.htmlFor = 'rv-scope';
+      const scopeSelect = doc.createElement('select');
+      scopeSelect.id = 'rv-scope';
+      let path = '/';
+      try { path = s.targetDocument?.url ? new URL(s.targetDocument.url).pathname || '/' : '/'; } catch { path = '/'; }
+      const modes: Array<{ mode: RouteScope['mode']; text: string }> = [
+        { mode: 'exactPath', text: 'just this page' },
+        { mode: 'pathPrefix', text: `pages under ${path}` },
+        { mode: 'origin', text: 'the whole site' },
+      ];
+      for (const m of modes) {
+        const o = doc.createElement('option');
+        o.value = m.mode;
+        o.textContent = m.text;
+        if (m.mode === 'exactPath') o.selected = true;
+        scopeSelect.append(o);
+      }
+      const applyBtn = el('button', 'Apply');
+      applyBtn.type = 'button';
+      applyBtn.className = 'primary';
+      applyBtn.addEventListener('click', () => {
+        const mode = scopeSelect.value as RouteScope['mode'];
+        void core.approve({ mode, ...(mode !== 'origin' ? { path } : {}) });
+      });
+      const discardBtn = el('button', 'Discard');
+      discardBtn.type = 'button';
+      discardBtn.addEventListener('click', () => core.discardProposal());
+      const row = el('div');
+      row.className = 'row';
+      row.append(applyBtn, discardBtn);
+      card.append(scopeLabel, scopeSelect, row);
+      cards.append(card);
+    }
+    if (s.phase === 'applied-unsaved' && s.pendingSave !== null) {
+      const card = el('div');
+      card.className = 'card';
+      const hint = el('p', 'Your change is applied in this tab only. Retry save writes it permanently; reloading the tab clears unsaved work.');
+      hint.className = 'muted';
+      const retryBtn = el('button', 'Retry save');
+      retryBtn.type = 'button';
+      retryBtn.className = 'primary';
+      retryBtn.addEventListener('click', () => void core.retrySave());
+      card.append(hint, retryBtn);
+      cards.append(card);
     }
   };
 
-  const renderCustomizations = (s: WorkspaceState): void => {
-    custList.textContent = '';
+  const renderHeader = (s: WorkspaceState): void => {
+    if (s.targetDocument !== null) {
+      const name = s.targetDocument.title ? s.targetDocument.title.slice(0, 60) : 'this page';
+      chip.textContent = '';
+      chip.append(doc.createTextNode('Working on: '), el('b', name), doc.createTextNode(` — ${s.targetDocument.origin ?? 'unknown origin'}`));
+    } else {
+      chip.textContent = 'No page yet — open a website, then come back here';
+    }
+    const count = s.record?.customizations.length ?? 0;
+    changesBtn.textContent = `My changes${count > 0 ? ` (${count})` : ''}`;
+  };
+
+  // Keyed change entries: a state push updates text in place — the real
+  // checkbox is never recreated mid-click (Playwright/humans both stay
+  // stable while live state streams in).
+  const custEls = new Map<string, { li: HTMLLIElement; title: HTMLElement; scope: HTMLElement; toggle: HTMLInputElement; liveText: HTMLElement; undoWrap: HTMLElement }>();
+  const renderChanges = (s: WorkspaceState): void => {
     if (s.record === null || s.record.customizations.length === 0) {
-      custNote.textContent = s.recordError ?? 'No saved customizations for this site yet.';
+      custNote.textContent = s.recordError ?? 'No saved changes for this site yet. Ask for a change in the chat, then press Apply.';
+      custList.textContent = '';
+      custEls.clear();
       return;
     }
-    custNote.textContent = 'Saved customizations apply from local storage — they replay without any model call.';
-    const liveKey = s.pinnedDocument !== null ? `${s.pinnedDocument.documentKey.tabId}:${s.pinnedDocument.documentKey.frameId}:${s.pinnedDocument.documentKey.browserDocumentId}` : null;
+    custNote.textContent = 'These changes apply automatically every time you visit this site — no AI needed after saving.';
+    const liveKey = s.targetDocument !== null ? `${s.targetDocument.documentKey.tabId}:${s.targetDocument.documentKey.frameId}:${s.targetDocument.documentKey.browserDocumentId}` : null;
     const liveEntries = liveKey !== null ? (s.live[liveKey]?.customizations ?? []) : [];
+    for (const [id, entry] of [...custEls]) {
+      if (!s.record.customizations.some((c) => c.customizationId === id)) {
+        entry.li.remove();
+        custEls.delete(id);
+      }
+    }
     for (const cust of s.record.customizations) {
       const live = liveEntries.find((e) => e.customizationId === cust.customizationId);
-      const li = el('li');
-      const head = el('div');
-      head.className = 'cust-head';
-      const title = el('strong', cust.title);
-      head.append(title);
-      const scopeSpan = el('span', scopeText(cust.scope));
-      scopeSpan.className = 'muted';
-      head.append(scopeSpan);
-      const toggleLabel = el('label');
-      const toggle = doc.createElement('input');
-      toggle.type = 'checkbox';
-      toggle.checked = cust.enabled;
-      toggle.addEventListener('change', () => void core.setEnabled(cust.customizationId, toggle.checked));
-      toggleLabel.append(toggle, doc.createTextNode(` enabled`));
-      const liveText = el('p', liveStateText(live?.state, live?.detail, cust.enabled));
-      liveText.className = 'muted';
-      li.append(head, toggleLabel, liveText);
-      const activeIdx = cust.revisions.findIndex((r) => r.revisionId === cust.activeRevisionId);
-      if (activeIdx > 0) {
+      let entry = custEls.get(cust.customizationId);
+      if (entry === undefined) {
+        const li = el('li');
+        const head = el('div');
+        head.className = 'cust-head';
+        const title = el('strong');
+        head.append(title);
+        const scope = el('span');
+        scope.className = 'muted';
+        head.append(scope);
+        const toggleLabel = el('label');
+        const toggle = doc.createElement('input');
+        toggle.type = 'checkbox';
+        toggle.addEventListener('change', () => void core.setEnabled(cust.customizationId, toggle.checked));
+        toggleLabel.append(toggle, doc.createTextNode(' on'));
+        const liveText = el('p');
+        liveText.className = 'muted';
+        const undoWrap = el('span');
         const undoBtn = el('button', 'Undo latest revision');
         undoBtn.type = 'button';
         undoBtn.addEventListener('click', () => void core.undoLatestRevision(cust.customizationId));
-        li.append(undoBtn, doc.createTextNode(' '));
+        undoWrap.append(undoBtn, doc.createTextNode(' '));
+        const removeBtn = el('button', 'Remove');
+        removeBtn.type = 'button';
+        removeBtn.className = 'danger';
+        removeBtn.addEventListener('click', () => void core.removeCustomization(cust.customizationId));
+        li.append(head, toggleLabel, liveText, undoWrap, removeBtn);
+        entry = { li: li as HTMLLIElement, title, scope, toggle, liveText, undoWrap };
+        custEls.set(cust.customizationId, entry);
       }
-      const removeBtn = el('button', 'Remove');
-      removeBtn.type = 'button';
-      removeBtn.className = 'danger';
-      removeBtn.addEventListener('click', () => void core.removeCustomization(cust.customizationId));
-      li.append(removeBtn);
-      custList.append(li);
+      entry.title.textContent = cust.title;
+      entry.scope.textContent = scopeText(cust.scope);
+      entry.toggle.checked = cust.enabled;
+      entry.liveText.textContent = liveStateText(live?.state, live?.detail, cust.enabled);
+      const activeIdx = cust.revisions.findIndex((r) => r.revisionId === cust.activeRevisionId);
+      entry.undoWrap.hidden = activeIdx <= 0;
+      custList.append(entry.li);
     }
   };
 
-  const renderSettings = (s: WorkspaceState): void => {
-    // Profile select
+  const renderSettingsView = (s: WorkspaceState): void => {
     profileSelect.textContent = '';
     if (s.settings.profiles.length === 0) {
       const o = doc.createElement('option');
       o.value = '';
-      o.textContent = '(no profiles yet — create one below)';
+      o.textContent = '(no providers yet — add one below)';
       profileSelect.append(o);
     } else {
       for (const p of s.settings.profiles) {
@@ -1772,18 +1869,18 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
     }
     aiToggle.checked = s.settings.aiEnabled;
 
-    // Consent area — explicit, endpoint-specific (I19; opening settings grants nothing).
     consentBox.textContent = '';
+    consentBox.append(el('legend', 'Privacy acknowledgement'));
     const profile = core.activeProfile();
     if (profile === null) {
-      const p = el('p', 'Add and save a provider profile to configure model calls.');
+      const p = el('p', 'Add and save a provider first — nothing is sent anywhere yet.');
       p.className = 'muted';
       consentBox.append(p);
     } else {
       const ack = s.settings.consentAcks.find((a) => a.endpoint === profile.endpoint);
       const consented = evaluateProviderConsent(ack, profile.endpoint).ok;
       const disclosure = el('p',
-        `Before Revueon calls your model provider, you need to acknowledge: the selected page evidence and your goal are sent to ${profile.endpoint}. That provider's retention policy applies to what it receives. Your saved customizations stay local unless you export them. This acknowledgement applies to this endpoint only.`);
+        `One-time OK: page details and your request are sent to ${profile.endpoint} so the AI can plan the change. That provider's own rules apply to what it receives. Saved changes stay on this computer.`);
       disclosure.className = 'muted';
       consentBox.append(disclosure);
       if (consented) {
@@ -1804,19 +1901,16 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
     diagBody.textContent = '';
     const dl = el('dl');
     dl.className = 'kv';
-    const add = (k: string, v: string): void => {
-      dl.append(el('dt', k), el('dd', v));
-    };
+    const add = (k: string, v: string): void => { dl.append(el('dt', k), el('dd', v)); };
     add('phase', s.phase);
-    if (s.pinnedDocument !== null) {
-      const key = `${s.pinnedDocument.documentKey.tabId}:${s.pinnedDocument.documentKey.frameId}:${s.pinnedDocument.documentKey.browserDocumentId}`;
+    if (s.targetDocument !== null) {
+      const key = `${s.targetDocument.documentKey.tabId}:${s.targetDocument.documentKey.frameId}:${s.targetDocument.documentKey.browserDocumentId}`;
       const liveState = s.live[key];
-      add('pinned document', `tab ${s.pinnedDocument.tabId}, epoch ${liveState?.routeEpoch ?? s.pinnedDocument.routeEpoch}, runtime ${liveState?.lifecycle ?? 'unknown'}`);
+      add('target document', `tab ${s.targetDocument.tabId}, epoch ${liveState?.routeEpoch ?? s.targetDocument.routeEpoch}, runtime ${liveState?.lifecycle ?? 'unknown'}`);
       add('saved record revision', s.record !== null ? String(s.record.recordRevision) : (s.recordError ?? 'none'));
-      const liveCount = liveState?.customizations.length ?? 0;
-      add('live customizations on this page', String(liveCount));
+      add('live customizations on this page', String(liveState?.customizations.length ?? 0));
     } else {
-      add('pinned document', 'none');
+      add('target document', 'none');
     }
     if (s.run?.counters != null) {
       add('last run', `${s.run.counters.modelResponses} model responses, ${s.run.counters.httpAttempts} HTTP attempts, ${(s.run.counters.wallMs / 1000).toFixed(1)}s`);
@@ -1828,21 +1922,7 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
     diagBody.append(pre);
   };
 
-  // ── static listeners ─────────────────────────────────────────────────
-
-  radiosBox.addEventListener('change', () => {
-    if (ignoreRadioEvents) return;
-    const checked = radiosBox.querySelector<HTMLInputElement>('input[type=radio]:checked');
-    const parsed = checked !== null && checked.value !== '' ? checked.value.split(':') : null;
-    core.setPinnedTab(parsed ? Number(parsed[0]) : null, parsed ? Number(parsed[1] ?? 0) : 0);
-  });
-
-  refreshBtn.addEventListener('click', () => void core.refreshDocuments());
-
-  startBtn.addEventListener('click', () => void core.start(goalInput.value));
-
-  stopBtn.addEventListener('click', () => void core.stop());
-
+  // ── settings wiring (provider form) ─────────────────────────────────
   newProfileBtn.addEventListener('click', () => {
     profileSelect.value = '';
     fLabelInput.value = '';
@@ -1859,7 +1939,6 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
     if (profile === undefined) return;
     void core.saveSettings({ ...core.state().settings, activeProfileId: profile.profileId });
     fLabelInput.value = profile.label;
-    fProtocol.value = profile.protocol;
     fEndpoint.value = profile.endpoint;
     fModel.value = profile.modelId;
     fAuth.value = profile.auth.kind;
@@ -1878,7 +1957,7 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
       profileVersion: 1 as const,
       profileId: existingId ?? `profile-${deps.randomId()}`,
       label: fLabelInput.value.trim() || 'My provider',
-      protocol: fProtocol.value as 'openai-chat' | 'anthropic-messages',
+      protocol: fProtocol.value === 'anthropic-messages' ? 'anthropic-messages' as const : 'openai-chat' as const,
       endpoint: fEndpoint.value.trim(),
       modelId: fModel.value.trim(),
       auth:
@@ -1891,7 +1970,7 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
     const decoded = decodeProviderProfile(profileLike);
     if (!decoded.ok) {
       const issue = decoded.issues[0];
-      profileStatus.textContent = `The profile is not valid: ${issue.path}: ${issue.message}`;
+      profileStatus.textContent = `The provider is not valid: ${issue.path}: ${issue.message}`;
       return;
     }
     const next: WorkspaceSettings = {
@@ -1914,9 +1993,12 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
     void core.saveSettings({ ...core.state().settings, aiEnabled: aiToggle.checked });
   });
 
+  openTabBtn.addEventListener('click', () => {
+    const url = typeof chrome !== 'undefined' && chrome.runtime?.getURL ? chrome.runtime.getURL('sidepanel.html') : '/sidepanel.html';
+    void globalThis.open?.(url, '_blank');
+  });
+
   const onVisibilityStop = (): void => {
-    // Closing the workspace cancels unfinished planning; accepted work stays
-    // in the runtime and the saved record (plan/05 §2, plan/03 ui/workspace).
     if (core.state().phase !== 'idle' && core.state().phase !== 'complete' && core.state().phase !== 'stopped' && core.state().phase !== 'failed') {
       void core.stop();
     }
@@ -1924,26 +2006,41 @@ export function mountWorkspace(root: HTMLElement, deps: WorkspaceDeps): { unmoun
   globalThis.addEventListener?.('pagehide', onVisibilityStop);
 
   const render = (s: WorkspaceState): void => {
-    renderTargets(s);
-    renderRun(s);
-    renderCustomizations(s);
-    renderSettings(s);
-    renderDiagnostics(s);
+    renderHeader(s);
+    if (view === 'chat') {
+      renderChat(s);
+      renderCards(s);
+    }
+    if (view === 'settings') {
+      renderSettingsView(s);
+      renderDiagnostics(s);
+    }
+    if (view === 'changes') {
+      renderChanges(s);
+    }
+    // Input state + the stable status oracle.
+    const inFlight = ['starting', 'observing', 'planning', 'awaiting-question', 'awaiting-approval', 'applying', 'saving'].includes(s.phase);
+    sendBtn.disabled = inFlight;
+    stopBtn.disabled = !inFlight;
+    const statusView = statusFor(s.phase, {
+      profileLabel: core.activeProfile()?.label,
+      elapsedMs: s.run?.startedAt != null ? deps.now() - s.run.startedAt : undefined,
+      detail: s.statusDetail ?? undefined,
+    });
+    statusLive.textContent = s.blocked !== null && s.phase === 'idle' ? s.blocked.text : statusView.text;
   };
 
   const unsubscribe = core.subscribe(render);
   void core.init().then(() => render(core.state()));
-  // Periodic re-render only while a run is in flight (elapsed timers).
-  const ticker = setInterval(() => {
-    if (['observing', 'planning', 'applying', 'starting', 'saving'].includes(core.state().phase)) {
-      render(core.state());
-    }
-  }, 1000);
+
+  // The target follows the user: poll the browser's active tab. One run
+  // keeps its own target while in flight.
+  const poller = setInterval(() => { void core.refreshTarget(); }, 1500);
 
   return {
     core,
     unmount() {
-      clearInterval(ticker);
+      clearInterval(poller);
       globalThis.removeEventListener?.('pagehide', onVisibilityStop);
       unsubscribe();
       core.dispose();

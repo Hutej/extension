@@ -188,6 +188,8 @@ function harness(opts: {
   controller?: FakeController;
   broker?: ScriptedBroker;
   tabs?: Array<{ id: number; url?: string; title?: string }>;
+  /** The browser's active tab (default 2 = DOC_B, the run target). */
+  activeTabId?: number | null | (() => number | null | Promise<number | null>);
 }): Harness {
   const sent: Array<Record<string, unknown>> = [];
   const storage = { value: opts.settings ?? ackFor(PROFILE.endpoint) };
@@ -212,6 +214,10 @@ function harness(opts: {
         { id: 1, url: 'https://site-a.test/page', title: 'Site A' },
         { id: 2, url: 'https://site-b.test/page', title: 'Site B' },
       ],
+    activeTabId: async () =>
+      typeof opts.activeTabId === 'function'
+        ? await opts.activeTabId()
+        : (opts.activeTabId !== undefined ? opts.activeTabId : 2),
     loadSettings: async () => storage.value,
     saveSettings: async (s) => {
       storage.value = s;
@@ -422,21 +428,20 @@ test('refsOfProposal: style/hide/relocate/localRule refs are all collected', () 
 
 // ── T21: exact target selection — never a first-tab fallback ───────────────
 
-test('T21: start without a pinned target is an explicit refusal with zero calls', async () => {
-  const h = harness({});
+test('T21: start with no active web page is an explicit refusal with zero calls', async () => {
+  const h = harness({ activeTabId: null });
   await h.core.init();
   await h.core.start('make it red');
   assert.equal(h.core.state().blocked?.reason, 'no-target');
-  assert.match(h.core.state().blocked?.text ?? '', /Select the exact target page first\./);
+  assert.match(h.core.state().blocked?.text ?? '', /Open the web page you want to change/);
   assert.equal(h.controller.requests.length, 0, 'no controller run may start');
   assert.deepEqual(commandsOf(h.sent), ['ListDocuments', 'GetState', 'GetState'], 'only discovery, no run commands');
   h.dispose();
 });
 
-test('T21: the explicitly pinned tab is the run target — the other tab is never chosen', async () => {
+test('T21: the active tab is the run target — the other tab is never chosen', async () => {
   const h = harness({});
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   const startRun = h.sent.find((e) => (e.payload as Record<string, unknown>).command === 'StartRun');
   assert.ok(startRun, 'StartRun was sent');
@@ -462,9 +467,8 @@ test('T21: a pinned document that disappears is unpinned — never silently rebo
     }),
   });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.refreshDocuments();
-  assert.equal(h.core.state().pinnedDocument, null, 'the pin died with its document');
+  assert.equal(h.core.state().targetDocument, null, 'the pin died with its document');
   await h.core.start('make it red');
   assert.equal(h.core.state().blocked?.reason, 'no-target');
   h.dispose();
@@ -475,7 +479,6 @@ test('T21: a pinned document that disappears is unpinned — never silently rebo
 test('T25: no consent acknowledgement → zero controller runs, zero network-adjacent commands', async () => {
   const h = harness({ settings: { settingsVersion: 1, profiles: [PROFILE], credentials: {}, activeProfileId: PROFILE.profileId, consentAcks: [], aiEnabled: true } });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   assert.equal(h.core.state().blocked?.reason, 'no-consent');
   assert.match(h.core.state().blocked?.text ?? '', /No call was made/);
@@ -487,7 +490,6 @@ test('T25: no consent acknowledgement → zero controller runs, zero network-adj
 test('T25: a consent ack for a different endpoint does not carry over', async () => {
   const h = harness({ settings: ackFor('https://other-endpoint.test/v1') });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   assert.equal(h.core.state().blocked?.reason, 'no-consent');
   assert.equal(h.controller.requests.length, 0);
@@ -497,10 +499,9 @@ test('T25: a consent ack for a different endpoint does not carry over', async ()
 test('T25 (AC-07): aiEnabled=false blocks planning entirely; saved customizations stay manageable without any model call', async () => {
   const h = harness({ settings: { ...ackFor(PROFILE.endpoint), aiEnabled: false } });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   assert.equal(h.core.state().blocked?.reason, 'ai-off');
-  assert.match(h.core.state().blocked?.text ?? '', /saved customizations keep working/i);
+  assert.match(h.core.state().blocked?.text ?? '', /Saved changes keep working/i);
   assert.equal(h.controller.requests.length, 0);
   // The deterministic record path still works with AI off:
   await h.core.setEnabled('cust-1', false);
@@ -514,7 +515,6 @@ test('T25: malformed stored settings never load as authority — defaults apply'
   await h.core.init();
   assert.equal(h.core.state().settings.profiles.length, 0);
   assert.equal(h.core.state().settings.aiEnabled, true);
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   assert.equal(h.core.state().blocked?.reason, 'no-profile');
   h.dispose();
@@ -535,7 +535,6 @@ test('decodeWorkspaceSettings: round trip survives a valid settings object', () 
 test('T27: proposal → approval → accepted batch → saved: the status says exactly Applied and saved', async () => {
   const h = harness({ controller: fakeController([{ kind: 'proposal', proposal: PROPOSAL }]) });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   assert.equal(h.core.state().phase, 'awaiting-approval');
   assert.match(statusFor('awaiting-approval').text, /nothing is applied until you choose Apply/i);
@@ -564,7 +563,6 @@ test('T27: a rolled-back verification reports the revert honestly — never Done
     }),
   });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   await h.core.approve({ mode: 'exactPath', path: '/page' });
   assert.equal(h.core.state().phase, 'failed');
@@ -583,7 +581,6 @@ test('T27: a conflicted cleanup stays visible (I10) — not a false clean state'
     }),
   });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   await h.core.approve({ mode: 'exactPath', path: '/page' });
   assert.equal(h.core.state().phase, 'conflicted');
@@ -602,7 +599,6 @@ test('T27: accepted but unsavable (record conflict) → applied-unsaved with a w
     }),
   });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   await h.core.approve({ mode: 'exactPath', path: '/page' });
   assert.equal(h.core.state().phase, 'applied-unsaved');
@@ -616,14 +612,12 @@ test('T27: accepted but unsavable (record conflict) → applied-unsaved with a w
 test('T27: provider error and cannot-complete are surfaced with their real reasons', async () => {
   const h1 = harness({ controller: fakeController([{ kind: 'provider-error', message: '401 unauthorized' }]) });
   await h1.core.init();
-  h1.core.setPinnedTab(2);
   await h1.core.start('make it red');
   assert.equal(h1.core.state().phase, 'failed');
   h1.dispose();
 
   const h2 = harness({ controller: fakeController([{ kind: 'cannot-complete', reason: 'no safe target for that goal' }]) });
   await h2.core.init();
-  h2.core.setPinnedTab(2);
   await h2.core.start('make it red');
   assert.equal(h2.core.state().phase, 'failed');
   h2.dispose();
@@ -632,7 +626,6 @@ test('T27: provider error and cannot-complete are surfaced with their real reaso
 test('T27: Stop mid-run keeps accepted work — stopped wording, run cancelled at the broker', async () => {
   const h = harness({ controller: fakeController([{ kind: 'proposal', proposal: PROPOSAL }]) });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   assert.equal(h.core.state().phase, 'awaiting-approval');
   await h.core.stop();
@@ -650,7 +643,6 @@ test('T27: question pauses the run and the user answer resumes it — no guessin
     ]),
   });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   assert.equal(h.core.state().phase, 'awaiting-question');
   assert.equal(h.core.state().pendingQuestion?.question.question, 'Which heading?');
@@ -666,7 +658,6 @@ test('T27: StartRun conflict (one owner per document) surfaces as busy — the r
     }),
   });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.start('make it red');
   assert.equal(h.core.state().phase, 'busy');
   assert.match(statusFor('busy').text, /already active/);
@@ -700,19 +691,28 @@ test('reopen: GetState pulls live per-document truth; stale sequence pushes are 
 
 // ── record management (list semantics through the core) ───────────────────
 
-test('reopen: a persisted pin is revalidated — kept when live, dropped and cleared when gone', async () => {
-  // Kept: the pinned tab is registered.
-  const h1 = harness({ settings: { ...ackFor(PROFILE.endpoint), pinnedTabId: 2 } });
+test('the target follows the browser active tab — never a manual pick, never another tab', async () => {
+  // The active tab is the target.
+  const h1 = harness({});
   await h1.core.init();
-  assert.equal(h1.core.state().pinnedDocument?.tabId, 2);
+  assert.equal(h1.core.state().targetDocument?.tabId, 2);
   h1.dispose();
 
-  // Dropped and cleared: no such registered document.
-  const h2 = harness({ settings: { ...ackFor(PROFILE.endpoint), pinnedTabId: 99 } });
+  // The active tab changed (1): refreshTarget re-targets exactly that tab.
+  let active = 1;
+  const h2 = harness({ activeTabId: () => active });
   await h2.core.init();
-  assert.equal(h2.core.state().pinnedDocument, null);
-  assert.equal((h2.storage.value as WorkspaceSettings).pinnedTabId, null, 'the dead pin is cleared in storage');
+  assert.equal(h2.core.state().targetDocument?.tabId, 1, 'the initial target is the active tab');
+  active = 2;
+  await h2.core.refreshTarget();
+  assert.equal(h2.core.state().targetDocument?.tabId, 2, 'the target followed the active tab');
   h2.dispose();
+
+  // No active tab → no target, and the legacy persisted pin never guesses.
+  const h3 = harness({ activeTabId: null, settings: { ...ackFor(PROFILE.endpoint), pinnedTabId: 99 } as Record<string, unknown> });
+  await h3.core.init();
+  assert.equal(h3.core.state().targetDocument, null, 'a legacy persisted pin is ignored — no guess');
+  h3.dispose();
 });
 
 test('undo: a two-revision customization reverts to the previous revision via SaveRevision', async () => {
@@ -749,7 +749,6 @@ test('undo: a two-revision customization reverts to the previous revision via Sa
     }),
   });
   await h.core.init();
-  h.core.setPinnedTab(2);
   await h.core.refreshRecord();
   assert.equal(h.core.state().record?.customizations.length, 1);
   await h.core.undoLatestRevision('cust-1');
@@ -788,8 +787,7 @@ test('S8.3/T21: a frame-scoped accepted change refuses persistence with the sess
     broker: defaultBroker({ ListDocuments: frameList }),
   });
   await h.core.init();
-  h.core.setPinnedTab(2, 1);
-  const pinned = h.core.state().pinnedDocument;
+  const pinned = h.core.state().targetDocument;
   assert.ok(pinned && pinned.frameId === 1, 'the exact frame document pinned');
   await h.core.start('make the widget red');
   assert.equal(h.core.state().phase, 'awaiting-approval', JSON.stringify({ phase: h.core.state().phase, blocked: h.core.state().blocked }));

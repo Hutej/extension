@@ -6,6 +6,35 @@
 
 - Current phase: **S8 — workflow and layout breadth**.
 - Next task: **S8.4**.
+
+## User-directed UX rework (2026-09-13, between S8.3 and S8.4)
+
+The owner directed a beginner-first workspace rework (his words: "think user as
+the dumbest person"; screenshots supplied). Small, owner-approved deviations
+from earlier plan wording, all recorded here:
+
+- **Target = the page the user is on** (plan/16 §1 "the user pins a document
+  explicitly" is superseded): the workspace resolves the browser's ACTIVE tab
+  (side panel semantics; the extension-tab fallback remembers the last real
+  web tab via tabs.getCurrent — tabs.query reports the workspace's own tab
+  with an empty URL, an honest browser quirk the fix names). No manual page
+  picker exists anymore; a run in flight keeps its target (one run, one
+  target). Embedded frames are NOT auto-targeted beyond the S8.3
+  frame-only registration edge (a frame still requires explicit core API
+  selection — session-only, boundary explained on save).
+- **Chat panel**: the workspace is a conversation — the user types what should
+  change, phase transitions render as chat messages in beginner wording,
+  the proposal/question/retry cards live in the chat flow, Enter sends.
+- **Separate pages**: Settings (provider, consent, AI on/off, diagnostics) and
+  My changes (the saved-customization manager) are their own views — one
+  screen at a time for a beginner.
+- Manual pins are gone from the persisted settings (legacy pin fields decode
+  and are ignored — old settings never break).
+
+Real-browser evidence (headed Chromium, wikipedia.org): auto-target chip,
+provider setup in Settings, "make the heading crimson" → plan card → Apply →
+"Done — applied and saved", the real heading crimson, survived reload, My
+changes disable reverted it exactly. Gates ×2 green (354 unit + 36 browser).
 - Active task: none.
 - Completed: S0.1 through S8.1 — the S6 cutover is complete (plan/19 §4); S7.1 shipped approved keyboard bindings (see below); **S7.2 completes AC-11's behavior clauses**: the owned collapse disclosure (`collapse` — toggle + owned state attribute + scoped fragment rule, exact release/rollback), and the finite `localRule` engine (trigger target-appeared, actions activateDisclosure/focus, conjunction predicates member-of/expanded-equals/text-contains, once-per-instance sticky state + 500ms cooldown, seed actions post-acceptance so no external click survives a rollback, replay expands the saved future-set per member with relative affordance resolution, reconcile re-applies pick up new members while the sticky once-per-instance state keeps user overrides intact — T16 proven end-to-end). **S8.1 ships linked projections** (`projectCollection`): a list/grid/board view of the observed items in one source container, rendered through the finite field catalog (title/label/link/category) with stable canonical item keys, local-only board buckets (drag + native select, never touching the source DOM), "Show original" reveal, stale/duplicate-key marking with disabled key actions, ≤200 rendered items with coverage + pagination, session-scoped user arrangement that survives release/re-apply, and an explicit consequential review when `showOriginal:false` hides the original set — descriptor resolution now excludes the runtime's own view so projection UI is never site evidence (T17 proven end-to-end). **S8.3 completed the frame/root capability boundary** (one runtime per individually permissioned frame with explicit exact-frame pinning; the broker relay now targets the registered document's exact frame — T06 found the bare-broadcast relay racing frame fence rejections; root-local author stylesheets with a bounded measured inline override for open shadow roots; frame saves are session-only with the boundary explained). **S8.2 ships floating surfaces and gated relocation** (`float`: the existing surface fixed at one corner through the measured compiled style path with a runtime-owned minimize/restore control; `relocate`: explicit structuralGrant, protected native targets refused with the projection/CSS fallback named, the exact node moves with listeners and focus, the site's newer position wins with a visible conflict, and two site overrides suspend relocation for the document — T18 proven end-to-end; the replay now releases on disable/removal whenever the transaction holds a live revision). S7.1 details: the finite bind catalog (focus/scrollIntoView/activate/followLink/toggleDisclosure) on observed targets, one document keydown listener with exact per-binding registry ownership, prepare-time reserved/plain-typing/conflict/cap refusals, event-time IME/password/editable/modal/repeat/visibility eligibility that consumes no key until eligible, and an approval review that names the target and warns that the site's own effect is non-reversible (plan/09 §1/§2).
 - Known baseline blockers: none. Residual: an actual Chrome 120 install run is not available in this environment (current-stable Chromium proven; floor declared in the manifest); streaming + capability-probe connection tests deferred from S6.1 (recorded); reconciliation set-membership changes re-apply whole customizations (bounded by the conflict pause); the planner prompt still advertises collapse/float/relocate as vocabulary although their executors are refused as unsupported-capability at apply (pre-existing honesty gap — the refused batch surfaces in the workspace; S7.2/S8 own those executors); browser-level IME composition cannot be synthesized over CDP (Input.dispatchKeyEvent has no isComposing) — the composition decision is unit-proven on the pure evaluator and the listener is three lines.

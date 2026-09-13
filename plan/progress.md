@@ -597,3 +597,56 @@ Next task: **S8.3 — Complete root-local fallback and explicit frame targeting*
 - The inline override writes CSSOM with the rule's validated declarations; the ≤32 ceiling is the honest second tier (the root-local sheet is the primary mechanism and works in practice).
 
 Next task: **S8.4 — Add bounded owned Canvas 2D, not a graphics framework** (plan/25 §S8.4).
+
+## UX rework — chat panel, auto-target, separate settings (owner-directed) — `complete`
+
+- Date: 2026-09-13. Source: `main` `7319750` (S8.3 committed; clean tree).
+- **Why**: the owner loaded the extension and reported "things are not working"
+  + screenshots of the old form UI. Real-browser investigation (headed
+  Chromium + the built extension) confirmed the core worked but the UX was a
+  wall: a manual target radio list, technical wording, no chat, settings
+  buried in a disclosure, and a "No pages…" line that ACCUMULATED on every
+  refresh (a real rendering bug — only labels were cleared, never the empty
+  paragraphs).
+- **Chat panel** (`mountWorkspace` rewritten): one conversation — the user
+  types what should change; phase transitions become chat messages in
+  beginner wording ("Reading your page…", "Here's my plan. Look it over,
+  then press Apply — nothing changes on your page until you do."); the
+  proposal/question/retry cards render inside the chat flow; Enter sends;
+  Send/Stop gate the input. Card/changes renderers rebuild only on relevant
+  state change (a state push no longer recreates the Apply button or the
+  enable checkbox mid-click — Playwright proved both instabilities).
+- **Auto-target** (owner decision #3): `pinnedDocument` → `targetDocument` =
+  the browser's ACTIVE tab (top document preferred; a frame-only registration
+  falls back to that frame — honest edge). No manual picker. A run in flight
+  keeps its target. Legacy persisted pins decode and are ignored.
+- **The real bug the Wikipedia pass found**: `tabs.query({active:true,currentWindow:true})`
+  reports the workspace's OWN tab with an EMPTY `url` — the
+  `startsWith(extension-url)` self-check never matched, so the panel targeted
+  itself and the chip fell to "No page yet" as soon as the panel tab was
+  active. Fix: identify our own tab with `tabs.getCurrent()` (side panel →
+  null → query result IS the web page; workspace-as-tab → excluded) +
+  onActivated remembers the last real web tab.
+- **Separate pages**: Settings (provider form, privacy acknowledgement, AI
+  on/off, diagnostics) and My changes (keyed in-place update: text/checkbox
+  mutate, nodes persist) are their own views behind header buttons.
+
+### Evidence
+
+| Command | Result |
+|---|---|
+| `npm run typecheck` / `npm run lint` / `npm run build` | pass / 0 errors / pass |
+| `npm test` ×2 | unit 354/354, browser 36/36, 0 known-red, 0 unexpected |
+| Real browser (headed, wikipedia.org, canned local provider) | auto-target chip ("Working on: Web browser - Wikipedia"); Settings → provider + consent; chat "make the heading crimson" → proposal card → Apply → "Done — applied and saved. Scope: this exact path (/wiki/Web_browser)"; the real `#firstHeading` computed color `rgb(220, 20, 60)`; reload replayed the saved customization; My changes listed it "applied on the open page"; disable → "disabled on the open page" + the heading reverted to the site's own color |
+
+### Notes / residual risks
+
+- The extension-tab fallback targets the last activated real web tab; the
+  SIDE PANEL (the real UX) resolves the active web page directly — the
+  fallback path is what the tests drive.
+- The workspace browser tests now bring the target page to front AFTER the
+  panel opens (the panel learns the target from activation in fallback mode).
+- Phase wording is beginner-first but the status oracle (#rv-status, statusFor
+  texts) is unchanged — the honest-status tests still hold.
+
+Next task: **S8.4 — Add bounded owned Canvas 2D, not a graphics framework**.

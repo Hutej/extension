@@ -73,6 +73,17 @@ async function waitForStatus(page: Page, match: RegExp, ms = 15_000): Promise<st
   }
 }
 
+/** Poll the header target chip until it matches — the auto-target oracle. */
+async function waitForChip(page: Page, match: RegExp, ms = 15_000): Promise<string> {
+  const deadline = Date.now() + ms;
+  for (;;) {
+    const text = await page.locator('#rv-chip').textContent();
+    if (text !== null && match.test(text)) return text;
+    if (Date.now() > deadline) throw new Error(`chip never matched ${match}; last: ${text}`);
+    await sleep(150);
+  }
+}
+
 /** Poll one listed entry until its text matches — the live-state oracle. */
 async function waitForText(page: Page, listSel: string, entryHas: string, match: RegExp, what: string, ms = 15_000): Promise<void> {
   const deadline = Date.now() + ms;
@@ -112,53 +123,38 @@ async function injectSettings(page: Page): Promise<void> {
 
 // ── T21: exact target, explicit gates, no implicit consent ────────────────
 
-test('T21: the workspace lists registered pages, picks nothing automatically and refuses unconsented starts with zero calls', async () => {
+test('T21: the workspace auto-targets the page the user is on — no manual pick — and refuses ungated starts with zero calls', async () => {
   const pageA = await openFixture('observe.html');
-  const pageB = await openFixture('workspace-target.html');
+  const target = await openFixture('workspace-target.html');
   const ws = await openWorkspace();
+  await target.bringToFront();
 
-  // Both web pages registered; the extension/system pages never appear.
-  const deadline = Date.now() + 15_000;
-  let count = 0;
-  for (;;) {
-    count = await ws.locator('input[name=rv-target]').count();
-    if (count >= 3) break; // "none" + two registered web pages
-    if (Date.now() > deadline) throw new Error(`only ${count} target radios appeared`);
-    await sleep(200);
-  }
-  const labels = await ws.locator('fieldset .radios label').allTextContents();
-  assert.ok(labels.some((l) => l.includes('Workspace target')), 'workspace-target tab is listed');
-  assert.ok(labels.some((l) => l.includes('Observation fixture')), 'observe tab is listed');
-  // Nothing is auto-selected: the "no target" radio stays checked.
-  assert.ok(await ws.locator('input[name=rv-target][value=""]').isChecked(), 'no implicit pin');
+  // The header chip names the ACTIVE page only — never the other tab, never
+  // an extension page (the target follows the user; there is no picker).
+  const chip = await waitForChip(ws, /Working on: Workspace target/);
+  assert.ok(!chip.includes('Observation fixture'), 'the other open tab is never targeted');
+  void pageA;
 
-  // Keyboard path: Tab to Start, press Enter — the first gate is the exact
-  // target (nothing picked, nothing guessed).
-  let sawStart = false;
-  for (let i = 0; i < 16 && !sawStart; i++) {
+  // Keyboard path: Tab to Send, press Enter — an empty goal refuses.
+  let sawSend = false;
+  for (let i = 0; i < 16 && !sawSend; i++) {
     await ws.keyboard.press('Tab');
     const active = await ws.evaluate(() => (document.activeElement instanceof HTMLButtonElement ? document.activeElement.textContent : ''));
-    sawStart = active === 'Start';
+    sawSend = active === 'Send';
   }
-  assert.ok(sawStart, 'Start is reachable by keyboard Tab order');
+  assert.ok(sawSend, 'Send is reachable by keyboard Tab order');
   await ws.keyboard.press('Enter');
-  await waitForStatus(ws, /Select the exact target page first\./);
+  await waitForStatus(ws, /Type what you want changed on the page/);
 
-  // Goal gate: a pinned target with an empty goal refuses explicitly too.
-  await ws.locator('fieldset .radios label', { hasText: 'Workspace target' }).first().locator('input').check();
-  await ws.getByRole('button', { name: 'Start' }).click();
-  await waitForStatus(ws, /Type what should change first\./);
-
+  // A real goal with NO provider configured → explicit refusal, zero calls.
   await ws.locator('#rv-goal').pressSequentially('color the heading crimson');
-  await ws.getByRole('button', { name: 'Start' }).click();
-  // No profile in storage yet → explicit refusal, zero fetches, zero runs.
-  await waitForStatus(ws, /No provider profile is configured/);
-  void pageA; void pageB;
+  await ws.getByRole('button', { name: 'Send' }).click();
+  await waitForStatus(ws, /You need an AI provider first/);
 });
 
 // ── full user workflow against the canned local provider ────────────────
 
-test('E2E: pin the exact page, run the canned local provider, apply, save, verify and disable — the honest status every step', async () => {
+test('E2E: chat a request on the page you are on, run the canned local provider, apply, save, verify and disable — the honest status every step', async () => {
   const target = await openFixture('workspace-target.html');
   await target.bringToFront();
   const other = await openFixture('observe.html');
@@ -167,28 +163,25 @@ test('E2E: pin the exact page, run the canned local provider, apply, save, verif
   const ws = await openWorkspace();
   await injectSettings(ws);
   await ws.reload({ waitUntil: 'load' });
-  // Reopen correctness: settings + consent load from real storage.
-  const radios = ws.locator('input[name=rv-target]');
-  const deadline = Date.now() + 15_000;
-  for (;;) {
-    if ((await radios.count()) >= 3) break;
-    if (Date.now() > deadline) throw new Error('targets never appeared after reopen');
-    await sleep(200);
-  }
-  // Pin the Team updates page explicitly (exact target, T21).
-  await ws.locator('fieldset .radios label', { hasText: 'Workspace target' }).first().locator('input').check();
-  await ws.locator('#rv-goal').pressSequentially('make the heading crimson');
-  await ws.getByRole('button', { name: 'Start' }).click();
+  // Reopen correctness: settings + consent load from real storage; the
+  // target re-resolves from the browser's active tab (the reload leaves the
+  // page the user activated).
+  await target.bringToFront();
+  await waitForChip(ws, /Working on: Workspace target/);
 
-  // Planning runs against the local canned provider; the approval area shows
-  // the proposal summary and the scope picker.
+  // The chat flow: type what should change, press Send.
+  await ws.locator('#rv-goal').pressSequentially('make the heading crimson');
+  await ws.getByRole('button', { name: 'Send' }).click();
+
+  // Planning runs against the local canned provider; the proposal card shows
+  // the summary and the scope picker.
   await waitForStatus(ws, /Review the proposed changes below/);
   assert.ok(await ws.getByText('Proposed: Color the main heading crimson').isVisible(), 'proposal summary is shown');
 
   await ws.getByRole('button', { name: 'Apply' }).click();
   await waitForStatus(ws, /Applied and saved\./);
 
-  // The pinned page (and only it) changed: crimson now, other tab untouched.
+  // Only the active page changed: crimson now, the other tab untouched.
   await target.bringToFront();
   let color = '';
   const colorDeadline = Date.now() + 10_000;
@@ -199,16 +192,20 @@ test('E2E: pin the exact page, run the canned local provider, apply, save, verif
     await sleep(150);
   }
   const otherColor = await other.evaluate(() => getComputedStyle(document.querySelector('h1')!).color);
-  assert.notEqual(otherColor, 'rgb(220, 20, 60)', 'the unpinned tab was never touched');
+  assert.notEqual(otherColor, 'rgb(220, 20, 60)', 'the other tab was never touched');
 
-  // The customization list shows the saved record entry and the live state.
+  // "My changes" lists the saved record entry and the live state.
+  await ws.getByRole('button', { name: /My changes/ }).click();
   const entry = ws.locator('ul.plain li', { hasText: 'Color the main heading crimson' });
   assert.ok(await entry.isVisible(), 'the saved customization is listed');
   assert.match(await entry.textContent() ?? '', /this exact path/);
 
   // Reopen the workspace (close/reopen correctness): record + live state pull.
   const ws2 = await openWorkspace();
+  await injectSettings(ws2);
   await ws2.reload({ waitUntil: 'load' });
+  await target.bringToFront();
+  await ws2.getByRole('button', { name: /My changes/ }).click();
   const entry2 = ws2.locator('ul.plain li', { hasText: 'Color the main heading crimson' });
   const reopenDeadline = Date.now() + 15_000;
   for (;;) {
@@ -220,7 +217,7 @@ test('E2E: pin the exact page, run the canned local provider, apply, save, verif
 
   // Disable through the real checkbox → the runtime releases; the heading
   // reverts to the site baseline and the wording stays truthful.
-  await ws2.locator('ul.plain li', { hasText: 'Color the main heading crimson' }).locator('input[type=checkbox]').uncheck();
+  await entry2.locator('input[type=checkbox]').uncheck();
   await target.bringToFront();
   const offDeadline = Date.now() + 10_000;
   let offColor = '';
@@ -237,6 +234,8 @@ test('E2E: pin the exact page, run the canned local provider, apply, save, verif
 // ── opt-out is a dead-man switch: no fetch, honest wording ────────────────
 
 test('AC-07: the model opt-out blocks the run before any call — with honest wording', async () => {
+  const target = await openFixture('workspace-target.html');
+  await target.bringToFront();
   const ws = await openWorkspace();
   await injectSettings(ws);
   await ws.evaluate(async () => {
@@ -244,9 +243,10 @@ test('AC-07: the model opt-out blocks the run before any call — with honest wo
     await chrome.storage.local.set({ rv2_workspaceSettings: { ...s, aiEnabled: false } });
   });
   await ws.reload({ waitUntil: 'load' });
-  await ws.locator('fieldset .radios label', { hasText: 'Workspace target' }).first().locator('input').check();
+  await target.bringToFront();
+  await waitForChip(ws, /Working on: Workspace target/);
   await ws.locator('#rv-goal').pressSequentially('anything');
-  await ws.getByRole('button', { name: 'Start' }).click();
+  await ws.getByRole('button', { name: 'Send' }).click();
   await waitForStatus(ws, /AI planning is off/);
 });
 
@@ -277,8 +277,6 @@ test('axe: the workspace page has no critical or serious accessibility violation
 test('E2E/S7.1: the model proposes a shortcut, the review names the target and warns honestly, Apply installs, disable uninstalls', async () => {
   const target = await openFixture('workspace-target.html');
   await target.bringToFront();
-  // My exact tab — earlier tests leave same-URL tabs open with live runs.
-  const tabId = (await sw!.evaluate(async () => (await chrome.tabs.query({ active: true, currentWindow: true }))[0].id)) as number;
   // The site's own listener — the shortcut must fire THIS, not a copy.
   await target.evaluate(() => {
     (window as unknown as { __pokes: number }).__pokes = 0;
@@ -288,16 +286,10 @@ test('E2E/S7.1: the model proposes a shortcut, the review names the target and w
   const ws = await openWorkspace();
   await injectSettings(ws);
   await ws.reload({ waitUntil: 'load' });
-  const radios = ws.locator('input[name=rv-target]');
-  const deadline = Date.now() + 15_000;
-  for (;;) {
-    if ((await radios.count()) >= 3) break;
-    if (Date.now() > deadline) throw new Error('targets never appeared after reopen');
-    await sleep(200);
-  }
-  await ws.locator('fieldset .radios label', { hasText: `tab ${tabId}` }).locator('input').check();
+  await target.bringToFront();
+  await waitForChip(ws, /Working on: Workspace target/);
   await ws.locator('#rv-goal').pressSequentially('bind a shortcut chord:Alt+G that clicks the Poke button');
-  await ws.getByRole('button', { name: 'Start' }).click();
+  await ws.getByRole('button', { name: 'Send' }).click();
 
   // The review shows the chord, the exact action and the honest
   // non-reversibility warning (plan/09 §1 — the user must see what a press
@@ -309,13 +301,14 @@ test('E2E/S7.1: the model proposes a shortcut, the review names the target and w
   await ws.getByRole('button', { name: 'Apply' }).click();
   await waitForStatus(ws, /Applied and saved\./);
 
-  // A trusted press on the pinned page activates the site's own button once.
+  // A trusted press on the active page activates the site's own button once.
   await target.bringToFront();
   await target.keyboard.press('Alt+g');
   await sleep(300); // the trusted event is sync, but the assert is async
   assert.equal(await target.evaluate(() => (window as unknown as { __pokes: number }).__pokes), 1, 'the approved shortcut fired the site control exactly once');
 
   // Disable through the real checkbox → the exact listener is uninstalled.
+  await ws.getByRole('button', { name: /My changes/ }).click();
   const entry = ws.locator('ul.plain li', { hasText: 'Bind a shortcut to the Poke button' });
   await entry.locator('input[type=checkbox]').uncheck();
   await waitForText(ws, 'ul.plain li', 'Bind a shortcut to the Poke button', /disabled on the open page/, 'the disable relay released the runtime binding');
