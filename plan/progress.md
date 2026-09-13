@@ -976,3 +976,31 @@ Fix (src/ui/workspace.ts):
 - Regression tests: a provider-error releases the owner and the NEXT run
   starts clean (never 'busy'); approving a proposal also releases the owner
   and the next run starts clean. Gates ×2 green (372 unit + 39 browser).
+
+## 2026-09-13 (night) — toggle off/on investigation (owner report)
+
+Owner: "i transform site and its done, but when i on off the changes it
+doesnt work the changes gone forever."
+
+Investigation: traced the full enable/disable path (workspace checkbox →
+SetEnabled → store gate + persist → broadcastRecordMutation → runtime session
+→ replay.setEnabled → releaseIfLive/replayAll → replayEntry → buildBatch
+descriptor resolution → fresh transaction apply). Reproduced BOTH paths
+against the freshly built extension:
+1. save → replay-applied → disable → re-enable (extension harness) ✓ restores.
+2. the REAL pipeline (canned-model neubrutalism plan → Apply → Applied and
+   saved → My changes toggle off → toggle on) ✓ restores exactly
+   (rgb(254,243,199) returns).
+Conclusion: the toggle cycle works in the current build. The owner's report
+matches the previous build's stuck-'busy' session (fixed earlier today: the
+broker run-owner leaked after the 408, and Stop was disabled in 'busy') or an
+out-of-scope page (the My changes line honestly says "outside its saved
+scope").
+
+Hardening kept:
+- New permanent browser regression (workspace suite): real apply → toggle off
+  → toggle on must restore the changes exactly ("never gone forever"), with
+  UI cleanup. Gates ×2 green (372 unit + 40 browser).
+- The My changes list shows the honest per-customization live state
+  (applied/disabled/suspended/out-of-scope/paused + detail), so any
+  non-restore is explained in the UI, never silent.

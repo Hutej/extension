@@ -327,6 +327,41 @@ test('E2E/S7.1: the model proposes a shortcut, the review names the target and w
 
 // ── plan/08 §92 end-to-end: omitted priority rides important ──────────────
 
+test('S5.2/owner: after a real apply, the My-changes toggle off then on restores the changes exactly', async () => {
+  const target = await openFixture('v2-neubrutalism.html');
+  await target.bringToFront();
+  const ws = await openWorkspace();
+  await injectSettings(ws);
+  await ws.reload({ waitUntil: 'load' });
+  await target.bringToFront();
+  await waitForChip(ws, /Working on: v2 neubrutalism fixture/);
+
+  await ws.locator('#rv-goal').pressSequentially('transform to neubrutalism');
+  await ws.getByRole('button', { name: 'Send' }).click();
+  await waitForStatus(ws, /Review the proposed changes below/);
+  await ws.getByRole('button', { name: 'Apply' }).click();
+  await waitForStatus(ws, /Applied and saved\./);
+
+  const panelBg = () => target.evaluate(() => getComputedStyle(document.getElementById('panel')!).backgroundColor);
+  assert.equal(await panelBg(), 'rgb(254, 243, 199)', 'applied before the toggle');
+
+  // Toggle OFF via the My changes page.
+  await ws.getByRole('button', { name: /My changes/i }).click();
+  await ws.getByRole('checkbox').first().uncheck();
+  for (let i = 0; i < 20; i++) { if ((await panelBg()) !== 'rgb(254, 243, 199)') break; await ws.waitForTimeout(250); }
+  console.log('[REPRO] after OFF:', await panelBg());
+
+  // Toggle back ON — the user's broken step.
+  await ws.getByRole('checkbox').first().check();
+  for (let i = 0; i < 20; i++) { if ((await panelBg()) === 'rgb(254, 243, 199)') break; await ws.waitForTimeout(250); }
+  const after = await panelBg();
+  assert.equal(after, 'rgb(254, 243, 199)', 're-enable must restore the changes — a finished, saved customization is never gone forever');
+
+  // Cleanup: remove so later tests start from a clean record.
+  await ws.getByRole('button', { name: 'Remove' }).first().click();
+  await ws.waitForTimeout(600);
+});
+
 test('§92 E2E: a neubrutalism plan with omitted priority (the field-failing shape) applies on a page with the site\'s own base styles', async () => {
   const target = await openFixture('v2-neubrutalism.html');
   await target.bringToFront();
