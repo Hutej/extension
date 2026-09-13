@@ -936,3 +936,14 @@ collapsing." Audit of the remaining revert triggers after the integrity cut:
 - Tests: new verify unit test (transient fail rescued by exactly one
   recheck; persistent fail still reverts honestly). Gates ×2 green
   (369 unit + 39 browser).
+
+## 2026-09-13 (late) — HTTP 408 rides the transient retry (owner report)
+
+Owner screenshot: "The model provider failed (http-error): HTTP 408". The
+provider already retries transient statuses (429/502/503/504, backoff +
+Retry-After, receipted attempts) — 408 (the provider's own inference timed
+out server-side; Cloudflare load-driven, a retry usually lands) was missing
+from the set. Added 408 to TRANSIENT_STATUS; retries stay within the shared
+deadline and the attempt budget (6). Unit test: 408×2 → success on attempt 3;
+persistent 408 stays an honest provider error at the cap. Gates ×2 green
+(370 unit + 39 browser).

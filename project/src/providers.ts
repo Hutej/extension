@@ -342,7 +342,7 @@ const MAX_HTTP_ATTEMPTS = 6;
 const MAX_RETRIES = 2;
 const BACKOFF_BASE_MS = 500;
 const BACKOFF_CAP_MS = 8000;
-const TRANSIENT_STATUS = new Set([429, 502, 503, 504]);
+const TRANSIENT_STATUS = new Set([408, 429, 502, 503, 504]);
 
 export interface ProviderCallResult {
   ok: boolean;
@@ -476,7 +476,8 @@ export function createProviderClient(deps: ProviderClientDeps) {
 
       if (outcome.ok) {
         // Retry by STATUS before any response translation (plan/11 §5: the
-        // transient list is 429/502/503/504 — never auth/schema/cancel).
+        // transient list is 408/429/502/503/504 — never auth/schema/cancel;
+        // 408 = the provider's own inference timed out server-side, load-driven).
         if (TRANSIENT_STATUS.has(outcome.status) && retries < MAX_RETRIES) {
           retries += 1;
           const wait = Math.min(outcome.retryAfterMs ?? backoffDelay(retries), Math.max(0, remaining() - 1), BACKOFF_CAP_MS);

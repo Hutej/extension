@@ -238,6 +238,34 @@ test('T20: the attempt budget holds — repeated 503s stop at the retry cap with
   assert.equal(out.httpAttempts, 3);
 });
 
+test('T20/owner: HTTP 408 (provider inference timeout) is transient — retries and succeeds; persistent 408 stays honest', async () => {
+  let slow = 0;
+  const retryUrl = await listen((req, res) => {
+    slow += 1;
+    if (slow < 3) {
+      res.writeHead(408);
+      res.end('inference timeout');
+      return;
+    }
+    res.writeHead(200, { 'content-type': 'application/json' });
+    res.end(OPENAI_BODY);
+  });
+  const ok = await callEndpoint(`${retryUrl}/v1/chat/completions`);
+  assert.ok(ok.ok, JSON.stringify(ok).slice(0, 300));
+  assert.equal(ok.httpAttempts, 3, 'two 408 retries then success');
+
+  let always = 0;
+  const hardUrl = await listen((req, res) => {
+    always += 1;
+    res.writeHead(408);
+    res.end('inference timeout');
+  });
+  const bad = await callEndpoint(`${hardUrl}/v1/chat/completions`);
+  assert.equal(bad.ok, false);
+  assert.match(bad.message, /HTTP 408/);
+  assert.equal(always, 3, 'retries stop at the transient cap');
+});
+
 test('T20: a 429 with Retry-After waits (bounded) and succeeds on the next attempt', async () => {
   let attempts = 0;
   const url = await listen((req, res) => {
