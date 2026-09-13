@@ -195,6 +195,26 @@ function makeWorld() {
     doc: doc as unknown as Document,
     now: () => Date.now(),
     computedOf: styles.computedOf as unknown as VerifierDeps['computedOf'],
+    canonicalAllOf: (declared: string, shorthand: string, longhands: string[]) => {
+      // Test canonicalizer: mini border-shorthand resolution mirroring the
+      // browser (width/keyword/color tokens → their longhands).
+      const parts = declared.trim().split(/\s+/);
+      const NAMED: Record<string, string> = { red: 'rgb(255, 0, 0)', blue: 'rgb(0, 0, 255)', green: 'rgb(0, 128, 0)' };
+      const colorPart = parts.find((p) => parseColor(p) !== null || NAMED[p.toLowerCase()] !== undefined);
+      const widthPart = parts.find((p) => /^[0-9.]/.test(p));
+      const stylePart = parts.find((p) => ['solid', 'dashed', 'dotted', 'double', 'none', 'hidden'].includes(p));
+      return longhands.map((lh) => {
+        if (lh.endsWith('-width')) return widthPart ?? '';
+        if (lh.endsWith('-style')) return stylePart ?? '';
+        if (lh.endsWith('-color')) {
+          const named = colorPart !== undefined ? NAMED[colorPart.toLowerCase()] : undefined;
+          if (named !== undefined) return named;
+          const c = parseColor(colorPart ?? '');
+          return c ? `rgb(${c[0]}, ${c[1]}, ${c[2]})` : (colorPart ?? '');
+        }
+        return declared.trim();
+      });
+    },
     canonicalOf: (declared: string) => {
       const NAMED: Record<string, string> = {
         red: 'rgb(255, 0, 0)', blue: 'rgb(0, 0, 255)', black: 'rgb(0, 0, 0)',
@@ -533,4 +553,34 @@ test('S8.1: the projection view must sit connected at its anchor with the expect
   }), captured.baseline);
   assert.equal(detached.status, 'fail');
   assert.match(detached.issues[0].detail!, /not connected at its validated anchor/);
+});
+
+// ── owner-directed shorthand verification (2026-09-13) ───────────────────
+
+test('T13/owner: a shorthand declaration verifies through its longhands — computed shorthands have no single form', async () => {
+  const w = makeWorld();
+  const h = el('h1');
+  w.doc.appendChild(h);
+  // The batch declared `border: 2px solid red`; the browser resolved the
+  // per-side longhands. Computed border (the shorthand) has no single form.
+  for (const side of ['top', 'right', 'bottom', 'left']) {
+    w.styles.set(h, `border-${side}-width`, '2px');
+    w.styles.set(h, `border-${side}-style`, 'solid');
+    w.styles.set(h, `border-${side}-color`, 'rgb(255, 0, 0)');
+  }
+  const captured = w.verifier.captureBaseline(basePlan({ protectedEls: [{ key: 'h', el: h as unknown as Element }] }));
+  assert.ok(captured.ok);
+  const report = await w.verifier.verify(basePlan({
+    styles: [{ key: 'effect:style:op0:rule0:decl1:border', el: h as unknown as Element, property: 'border', value: '2px solid red' }],
+    protectedEls: [{ key: 'h', el: h as unknown as Element }],
+  }), captured.baseline);
+  assert.equal(report.status, 'pass', JSON.stringify(report.issues));
+
+  // One longhand failing to hold → the shorthand effect fails honestly.
+  w.styles.set(h, 'border-top-color', 'rgb(0, 0, 255)');
+  const report2 = await w.verifier.verify(basePlan({
+    styles: [{ key: 'effect:style:op0:rule0:decl1:border', el: h as unknown as Element, property: 'border', value: '2px solid red' }],
+  }), captured.baseline);
+  assert.equal(report2.status, 'fail', 'a single failed longhand is a failed shorthand effect');
+  assert.match(report2.issues[0].detail!, /longhands/);
 });

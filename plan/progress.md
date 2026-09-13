@@ -822,3 +822,32 @@ Next task: **S9.1 — Measure stress, compatibility, performance and product qua
 - Gates ×2 green (unit 370/370, browser 38/38). Build verified.
 - Residual: a model that truncates 4 times still fails honestly — that is the
   architecture's anti-hang ceiling, not a work limit.
+
+## Fix — "Could not verify the preview; it was reverted" (owner screenshot, Apply on Wikipedia) — verification equivalence gaps
+
+- Date: 2026-09-13. The batch applied but three style EFFECT checks failed and
+  the honest revert ran (by design): `background-color`, `line-height`,
+  `border`. Root causes read from the verification code, not the model output:
+- **Shorthand gap (border)**: computed shorthands have NO single value form in
+  Chrome (`getPropertyValue('border')` = '') — a `border` declaration could
+  never pass. Fix: `SHORTHAND_LONGHANDS` bounded table (border/margin/padding/
+  border-radius/inset/overflow/gap/flex/place-items/background/font) + the
+  effect check verifies EVERY longhand the shorthand sets through ONE owned
+  probe (`canonicalAllOf`, probe sets the shorthand, longhands read from its
+  computation). A single failed longhand is a failed shorthand — honest.
+- **Parent-context probe gap (line-height)**: the canonical probe computed in
+  the PARENT's inheritance context — relative declared values (unitless
+  line-height, em/%) resolved against the parent's font, not the target's, so
+  a correct line-height could not match its own canonical. Fix: the probe
+  computes in the TARGET's own context (absolute + hidden + removed in
+  finally; void targets fall back to the parent).
+- **Site-override gap (background-color, model quality)**: the planner prompt
+  now instructs: intent-bearing style declarations use priority "important" —
+  the site's own rules otherwise win and the batch rolls back at verification;
+  "normal" only for deliberate deference.
+- Tests: new verify unit test (shorthand longhands pass; a single failed
+  longhand fails honestly with the longhand receipt); canonicalAllOf stub
+  mini-resolves border shorthands. Gates ×2 green (371 unit + 38 browser).
+- Note: the revert was CORRECT behavior (verification failed → rollback, no
+  half-applied state). These fixes remove the false failures that made correct
+  batches roll back.

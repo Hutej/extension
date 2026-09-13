@@ -52,7 +52,7 @@ import { createContentCreator } from './content.ts';
 import { createTransaction, type BatchReceipt, type StyleClient, type StyleOutcome } from './transaction.ts';
 import { createReplay, type ReplayCore, type ReplayEntry } from './replay.ts';
 import type { Customization } from '../contracts.ts';
-import { createVerifier, probeCanonicalOf } from './verify.ts';
+import { createVerifier, probeCanonicalAllOf, probeCanonicalOf } from './verify.ts';
 import { createBehavior } from './behavior.ts';
 import { createProjection } from './projection.ts';
 
@@ -445,6 +445,7 @@ export async function bootRuntimeSession(): Promise<{ dispose(): void; core: Ses
     now: () => Date.now(),
     computedOf: (el, pseudo) => window.getComputedStyle(el, pseudo ?? undefined),
     canonicalOf: probeCanonicalOf(document),
+    canonicalAllOf: probeCanonicalAllOf(document),
     rectOf: (el) => el.getBoundingClientRect(),
     recheckWait: () => new Promise((resolve) => setTimeout(resolve, 60)),
     isBound: (normalized: string) => behavior.isBound(normalized),

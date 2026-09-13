@@ -68,6 +68,7 @@ export const PLANNER_SYSTEM_PREFIX = [
   '',
   'Rules:',
   '- targetRef values MUST come from the supplied evidence. Never invent selectors, ids or targetRefs.',
+  '- Style declarations that carry the requested look use priority "important" — the site own rules otherwise win and the batch rolls back at verification. Use "normal" only for deliberate deference to the site.',
   '- bindKey chords: browser-reserved combos (Ctrl/Cmd+T/W/N/Q/Tab, Alt+F4…) and plain typing keys (no modifier) are refused — propose modifier chords or F-keys. actionIds come ONLY from the listed catalog; each must fit the target (followLink needs a link, toggleDisclosure needs <details>/<summary>).',
   '- activate/followLink/toggleDisclosure fire the page’s own control natively; propose them only for the exact control the user asked to bind, and expect the user to review that the undo removes the shortcut, not the site action’s effect.',
   '- collapse inserts an owned disclosure toggle (user override is always available; never propose userOverride:false). localRule: one rule per revision; trigger target-appeared only; activateDisclosure needs the disclosure affordance ref INSIDE the target with an observable expanded state (aria-expanded or details/summary); automatic disclosure clicks are reviewed as consequential.',

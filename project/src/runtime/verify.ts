@@ -176,6 +176,11 @@ export interface VerifierDeps {
   /** Canonical computed form of a DECLARED value in the target's inheritance
    *  context (owned probe element, removed in finally). */
   canonicalOf(declared: string, property: string, context: Element): string;
+  /** Canonical computed forms of a SHORTHAND's longhands (the same owned
+   *  probe sets the shorthand; each longhand is read from its computation).
+   *  Computed shorthands have no single value form in Chrome — verification
+   *  rides the longhands (owner-directed shorthand fix, 2026-09-13). */
+  canonicalAllOf(declared: string, shorthandProperty: string, longhands: string[], context: Element): string[];
   rectOf(el: Element): RectLike | null;
   /** Bounded wait before the single recheck of unknown outcomes. */
   recheckWait?(): Promise<void>;
@@ -253,6 +258,26 @@ function controlDisabledOf(el: Element): boolean | undefined {
   return (el as HTMLButtonElement).disabled === true;
 }
 
+/** Bounded shorthand → longhand table for the effect check: computed
+ *  shorthands have no single value form, so their declared effect verifies
+ *  through every longhand the shorthand sets (browser-resolved). */
+const SHORTHAND_LONGHANDS: Record<string, string[]> = {
+  border: ['border-top-width', 'border-top-style', 'border-top-color', 'border-right-width', 'border-right-style', 'border-right-color', 'border-bottom-width', 'border-bottom-style', 'border-bottom-color', 'border-left-width', 'border-left-style', 'border-left-color'],
+  'border-width': ['border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width'],
+  'border-style': ['border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style'],
+  'border-color': ['border-top-color', 'border-right-color', 'border-bottom-color', 'border-left-color'],
+  'border-radius': ['border-top-left-radius', 'border-top-right-radius', 'border-bottom-right-radius', 'border-bottom-left-radius'],
+  margin: ['margin-top', 'margin-right', 'margin-bottom', 'margin-left'],
+  padding: ['padding-top', 'padding-right', 'padding-bottom', 'padding-left'],
+  inset: ['top', 'right', 'bottom', 'left'],
+  overflow: ['overflow-x', 'overflow-y'],
+  gap: ['row-gap', 'column-gap'],
+  flex: ['flex-grow', 'flex-shrink', 'flex-basis'],
+  'place-items': ['align-items', 'justify-items'],
+  background: ['background-color', 'background-image', 'background-position-x', 'background-position-y', 'background-size', 'background-repeat', 'background-attachment'],
+  font: ['font-style', 'font-variant', 'font-weight', 'font-size', 'line-height', 'font-family'],
+};
+
 /** Compare a computed value against the canonical form of the declared value:
  *  exact after trim/lowercase, or numerically equal after a px strip ('0' ≡
  *  '0px'). Colors compare through the canonical form, so this never invents
@@ -280,12 +305,42 @@ export function probeCanonicalOf(doc: Document): VerifierDeps['canonicalOf'] {
       probe = doc.createElement('span');
       probe.setAttribute('data-rv2-verify-probe', '1');
       probe.style.cssText = `position:absolute;left:-9999px;top:0;visibility:hidden;${property}:${declared}!important`;
-      const host = (context.parentElement ?? context) as HTMLElement;
-      host.appendChild(probe);
+      // Relative declared values (em/unitless line-height/…) resolve against
+      // the inheritance context they are measured in — the probe computes in
+      // the TARGET's own context (absolute + hidden + removed in finally, so
+      // native layout never changes; void targets fall back to the parent).
+      let host: HTMLElement = context as HTMLElement;
+      try {
+        host.appendChild(probe);
+      } catch {
+        host = (context.parentElement ?? context) as HTMLElement;
+        host.appendChild(probe);
+      }
       const v = doc.defaultView?.getComputedStyle(probe).getPropertyValue(property);
       return (v ?? '').trim() || declared.trim();
     } catch {
       return declared.trim();
+    } finally {
+      try { probe?.remove(); } catch { /* detached */ }
+    }
+  };
+}
+
+/** Production shorthand canonicalizer: ONE owned probe with the shorthand;
+ *  each longhand read from the probe's computed form (removed in finally). */
+export function probeCanonicalAllOf(doc: Document): VerifierDeps['canonicalAllOf'] {
+  return (declared, shorthandProperty, longhands, context) => {
+    let probe: HTMLElement | null = null;
+    try {
+      probe = doc.createElement('span');
+      probe.setAttribute('data-rv2-verify-probe', '1');
+      probe.style.cssText = `position:absolute;left:-9999px;top:0;visibility:hidden;${shorthandProperty}:${declared}!important`;
+      const host = (context.parentElement ?? context) as HTMLElement;
+      host.appendChild(probe);
+      const computed = doc.defaultView?.getComputedStyle(probe);
+      return longhands.map((lh) => (computed?.getPropertyValue(lh) ?? '').trim() || declared.trim());
+    } catch {
+      return longhands.map(() => declared.trim());
     } finally {
       try { probe?.remove(); } catch { /* detached */ }
     }
@@ -463,11 +518,25 @@ export function createVerifier(deps: VerifierDeps): Verifier {
     for (const c of plan.styles) {
       if (!want(c.key)) continue;
       const computed = deps.computedOf(c.el, c.pseudo);
-      const actual = computed?.getPropertyValue(c.property);
-      if (actual === undefined) {
+      if (computed === null) {
         outcomes.push({ key: c.key, section: 'effect', status: 'unknown', detail: 'computed style unavailable' });
         continue;
       }
+      const longhands = SHORTHAND_LONGHANDS[c.property];
+      if (longhands !== undefined) {
+        // Shorthand: no single computed form — every longhand the shorthand
+        // sets must hold the browser-resolved declared effect.
+        const canonicals = deps.canonicalAllOf(c.value, c.property, longhands, c.el);
+        const hold = longhands.every((lh, i) => valueMatches(computed.getPropertyValue(lh), canonicals[i] ?? ''));
+        outcomes.push({
+          key: c.key,
+          section: 'effect',
+          status: hold ? 'pass' : 'fail',
+          ...(hold ? {} : { detail: `computed longhands [${longhands.map((lh) => `${lh}=${(computed.getPropertyValue(lh) ?? '').trim()}`).join(', ')}] do not hold the declared "${c.value.trim()}"` }),
+        });
+        continue;
+      }
+      const actual = computed.getPropertyValue(c.property);
       const canonical = deps.canonicalOf(c.value, c.property, c.el);
       if (valueMatches(actual, canonical)) {
         outcomes.push({ key: c.key, section: 'effect', status: 'pass' });
