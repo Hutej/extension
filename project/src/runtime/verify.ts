@@ -7,24 +7,26 @@
  *     carry the composition token (an inert sheet is not an effect).
  *   - EFFECT: each declared postcondition holds — including already-satisfied
  *     values (no-change alone is never failure, change alone never success).
- *   - INTEGRITY: no introduced loss vs the captured baseline — visibility,
- *     focus reachability, form/media function, text presence, horizontal
- *     overflow (≤2 CSS px noise tolerance) — compared by STABLE structured
- *     keys, so issue identity never depends on message wording.
+ *   - INTEGRITY: already-accepted state still holds after the new batch —
+ *     each accepted revision's measured declarations, texts and owned nodes
+ *     re-verified (T30), pre-existing breakage exempt and disclosed. The
+ *     former speculative side-effect police (visibility/focusability/
+ *     overflow/contrast heuristics over protected elements and parent/
+ *     sibling sentinels) is CUT (owner direction, 2026-09-13): the operation
+ *     set cannot remove elements, disable controls or pause media, and the
+ *     heuristics false-failed user-approved restyles (thick borders grew
+ *     scrollWidth; visibility heuristics misread restyled ancestors). The
+ *     effect checks remain the honesty contract: what was declared must hold.
  *
  * Truthfulness rules (I11/T13): a missing, throwing or malformed verifier is
  * UNKNOWN, never pass; an empty check set is unknown, never an empty-array
- * pass; alpha/gradient/unknown compositing is unknown, never an invented
- * contrast ratio; pre-existing issues are exempt only when not worsened
- * (baseline-relative); intentional hides are exempt from visibility failure
- * but their newly hidden ancestors/siblings are not (sentinels still fail).
- * One bounded recheck after settle; a still-unknown result rolls the
- * provisional candidate back. No probe modifies native content: the owned
- * probe element is removed in `finally`. The user's window is never resized
- * or moved (I22) — measurements are read-only.
+ * pass; pre-existing breakage is exempt and disclosed, never silently
+ * dropped. One bounded recheck after settle; a still-unknown result rolls
+ * the provisional candidate back. No probe modifies native content: the
+ * owned probe element is removed in `finally`. The user's window is never
+ * resized or moved (I22) — measurements are read-only.
  */
 
-import { contrastFloor, contrastRatio, extractGradientStops, isTransparent, parseColor } from '../shared/color.ts';
 import { TOKEN_ATTRIBUTE } from './styles.ts';
 
 // ── shapes ───────────────────────────────────────────────────────────────
@@ -54,8 +56,6 @@ export interface VerificationReport {
   issues: CheckOutcome[];
   counts: { pass: number; satisfied: number; fail: number; unknown: number };
   coverage: {
-    protectedTargets: number;
-    sentinels: number;
     combinedRevisions: number;
     checks: number;
     /** Declarations excluded from effect measurement by design. */
@@ -87,11 +87,6 @@ export interface InsertEffectCheck {
   expectedParent: Element | null;
 }
 
-export interface ProtectedEl {
-  key: string;
-  el: Element;
-}
-
 export interface CombinedCheck {
   key: string;
   el: Element;
@@ -114,13 +109,8 @@ export interface VerifyPlan {
   /** The candidate CSS bundle is confirmed inserted (broker receipt). */
   staged: boolean;
   styles: StyleEffectCheck[];
-  /** Intentional hide scope: these elements and their descendants are exempt
-   *  from visibility/focus integrity failures (ancestors/siblings are NOT). */
-  hides: Element[];
   texts: TextEffectCheck[];
   inserts: InsertEffectCheck[];
-  protectedEls: ProtectedEl[];
-  sentinels: ProtectedEl[];
   combined: CombinedSample[];
   /** S7.1: installed keyboard bindings — the chord must be live. */
   bindings: Array<{ key: string; normalized: string }>;
@@ -132,8 +122,6 @@ export interface VerifyPlan {
   /** S8.1: linked projection views — connected at the validated anchor with
    *  the expected rendered count and a coverage line. */
   projections: Array<{ key: string; root: Element; expectedParent: Element | null; expectedItems: number; container: Element }>;
-  /** New extension-authored text (insertUI) for the WCAG AA contrast check. */
-  ownedText: Array<{ el: Element; sample: string }>;
   tokenChecks: Array<{ key: string; el: Element; ns: string }>;
   /** S8.3: root-local author stylesheets — installed inside each open shadow
    *  root whose targets the document fragment cannot reach (plan/12 §3). */
@@ -144,18 +132,10 @@ export interface VerifyPlan {
 
 export interface ElBaseline {
   key: string;
-  connected: boolean;
-  hidden: boolean;
-  focusable: boolean;
-  controlDisabled: boolean | undefined;
-  mediaPaused: boolean | undefined;
-  ownTextLength: number;
-  overflowX: number;
   computed: Record<string, string>;
 }
 
 export interface VerifyBaseline {
-  viewportOverflowX: number;
   els: Map<string, ElBaseline>;
 }
 
@@ -195,68 +175,10 @@ export interface VerifierDeps {
 // ── bounds ───────────────────────────────────────────────────────────────
 
 export const MAX_BASELINE_ELS = 48;
-export const MAX_SENTINELS = 24;
 export const MAX_COMBINED_CHECKS_PER_REVISION = 4;
-export const MAX_OWNED_TEXT_CHECKS = 8;
 export const MAX_ISSUES = 32;
-export const OVERFLOW_TOLERANCE_PX = 2;
 
 // ── helpers ──────────────────────────────────────────────────────────────
-
-const num = (v: unknown): number => (typeof v === 'number' && Number.isFinite(v) ? v : 0);
-
-const FOCUSABLE_SELECTOR = 'a[href],button,input,select,textarea,[tabindex]';
-
-function isHiddenEl(el: Element, computed: ComputedLike | null, rect: RectLike | null): boolean {
-  if (computed) {
-    if (computed.getPropertyValue('display') === 'none') return true;
-    if (computed.getPropertyValue('visibility') === 'hidden') return true;
-  }
-  if (rect) return rect.width <= 0 || rect.height <= 0;
-  return false;
-}
-
-function isFocusableEl(el: Element, computed: ComputedLike | null): boolean {
-  try {
-    if (!el.matches(FOCUSABLE_SELECTOR)) return false;
-    if (el.getAttribute('tabindex') === '-1') return false;
-    const tag = el.tagName.toLowerCase();
-    if ((tag === 'button' || tag === 'input' || tag === 'select' || tag === 'textarea') && (el as HTMLButtonElement).disabled) return false;
-    if (computed && computed.getPropertyValue('visibility') === 'hidden') return false;
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-function ownTextLength(el: Element): number {
-  let n = 0;
-  for (const child of el.childNodes) {
-    if (child.nodeType === 3) n += (child.textContent ?? '').length;
-  }
-  return n;
-}
-
-function scrollOverflow(el: Element): number {
-  const w = num((el as unknown as { scrollWidth?: number }).scrollWidth) - num((el as unknown as { clientWidth?: number }).clientWidth);
-  return Number.isFinite(w) && w > 0 ? w : 0;
-}
-
-function mediaPausedOf(el: Element): boolean | undefined {
-  const tag = el.tagName.toLowerCase();
-  if (tag !== 'video' && tag !== 'audio') return undefined;
-  try {
-    return (el as HTMLMediaElement).paused;
-  } catch {
-    return undefined;
-  }
-}
-
-function controlDisabledOf(el: Element): boolean | undefined {
-  const tag = el.tagName.toLowerCase();
-  if (tag !== 'button' && tag !== 'input' && tag !== 'select' && tag !== 'textarea') return undefined;
-  return (el as HTMLButtonElement).disabled === true;
-}
 
 /** Bounded shorthand → longhand table for the effect check: computed
  *  shorthands have no single value form, so their declared effect verifies
@@ -352,18 +274,7 @@ export function probeCanonicalAllOf(doc: Document): VerifierDeps['canonicalAllOf
 export function createVerifier(deps: VerifierDeps): Verifier {
   const sampleEl = (key: string, el: Element, computedProps: string[]): ElBaseline => {
     const computed = deps.computedOf(el);
-    const rect = deps.rectOf(el);
-    const entry: ElBaseline = {
-      key,
-      connected: el.isConnected,
-      hidden: isHiddenEl(el, computed, rect),
-      focusable: isFocusableEl(el, computed),
-      controlDisabled: controlDisabledOf(el),
-      mediaPaused: mediaPausedOf(el),
-      ownTextLength: ownTextLength(el),
-      overflowX: scrollOverflow(el),
-      computed: {},
-    };
+    const entry: ElBaseline = { key, computed: {} };
     for (const p of computedProps) {
       entry.computed[p] = computed?.getPropertyValue(p) ?? '';
     }
@@ -389,93 +300,16 @@ export function createVerifier(deps: VerifierDeps): Verifier {
         els.set(key, sampleEl(key, el, props));
         return true;
       };
-      const docEl = deps.doc.documentElement;
-      const viewportOverflowX = docEl ? scrollOverflow(docEl) : 0;
-      for (const p of plan.protectedEls) if (!cap(p.key, p.el, [])) break;
-      for (const s of plan.sentinels) if (!cap(s.key, s.el, [])) break;
       for (const c of plan.combined) {
         for (const chk of c.checks) {
           if (!cap(chk.key, chk.el, propsOf.get(chk.el) ?? [])) break;
         }
-        for (const t of c.texts) {
-          const parent = (t.node.parentElement ?? t.node.parentNode) as Element | null;
-          if (!cap(`${t.key}:el`, parent ?? (deps.doc.documentElement as unknown as Element), [])) break;
-        }
         for (const n of c.nodes) if (!cap(n.key, n.el, [])) break;
       }
-      return { ok: true, baseline: { viewportOverflowX, els } };
+      return { ok: true, baseline: { els } };
     } catch (e) {
       return { ok: false, detail: (e as Error).message };
     }
-  };
-
-  const inHideScope = (plan: VerifyPlan, el: Element): boolean =>
-    plan.hides.some((h) => h === el || (typeof h.contains === 'function' && h.contains(el)));
-
-  const contrastCheck = (plan: VerifyPlan): CheckOutcome[] => {
-    const outcomes: CheckOutcome[] = [];
-    for (const [i, owned] of plan.ownedText.slice(0, MAX_OWNED_TEXT_CHECKS).entries()) {
-      const key = `contrast:owned:${i}`;
-      if (!owned.sample.trim()) continue;
-      const computed = deps.computedOf(owned.el);
-      if (!computed) {
-        outcomes.push({ key, section: 'integrity', status: 'unknown', detail: 'computed style unavailable for owned text' });
-        continue;
-      }
-      const fgRaw = computed.getPropertyValue('color');
-      const fg = parseColor(fgRaw);
-      if (!fg || fg[3] < 1) {
-        outcomes.push({ key, section: 'integrity', status: 'unknown', detail: `owned text color "${fgRaw}" is not a measurable solid color (alpha/unknown compositing)` });
-        continue;
-      }
-      // Effective background: own or nearest ancestor non-transparent solid
-      // color; a gradient must clear the floor against EVERY stop.
-      let bgRaw: string | null = null;
-      let stops: ReturnType<typeof extractGradientStops> = [];
-      let node: Element | null = owned.el;
-      while (node) {
-        const c = deps.computedOf(node);
-        const bg = c?.getPropertyValue('background-color') ?? 'transparent';
-        if (!isTransparent(bg)) {
-          bgRaw = bg;
-          break;
-        }
-        const bgImage = c?.getPropertyValue('background-image') ?? 'none';
-        const gs = extractGradientStops(bgImage);
-        if (gs.length > 0) {
-          stops = gs;
-          break;
-        }
-        node = (node.parentElement ?? node.parentNode) as Element | null;
-      }
-      if (stops.length > 0) {
-        const floor = contrastFloor(num(parseFloat(computed.getPropertyValue('font-size'))), computed.getPropertyValue('font-weight'));
-        const worst = Math.min(...stops.map((s) => contrastRatio(fg, s)));
-        if (worst + 1e-9 < floor) {
-          outcomes.push({ key, section: 'integrity', status: 'fail', detail: `owned text contrast ${worst.toFixed(2)} is below the WCAG floor ${floor} against a gradient stop` });
-        } else {
-          outcomes.push({ key, section: 'integrity', status: 'pass' });
-        }
-        continue;
-      }
-      if (!bgRaw) {
-        outcomes.push({ key, section: 'integrity', status: 'unknown', detail: 'owned text sits on an unmeasurable composite (no solid background found)' });
-        continue;
-      }
-      const bg = parseColor(bgRaw);
-      if (!bg || bg[3] < 1) {
-        outcomes.push({ key, section: 'integrity', status: 'unknown', detail: `background "${bgRaw}" is not a measurable solid color` });
-        continue;
-      }
-      const floor = contrastFloor(num(parseFloat(computed.getPropertyValue('font-size'))), computed.getPropertyValue('font-weight'));
-      const ratio = contrastRatio(fg, bg);
-      if (ratio + 1e-9 < floor) {
-        outcomes.push({ key, section: 'integrity', status: 'fail', detail: `owned text contrast ${ratio.toFixed(2)} is below the WCAG floor ${floor}` });
-      } else {
-        outcomes.push({ key, section: 'integrity', status: 'pass' });
-      }
-    }
-    return outcomes;
   };
 
   type CheckRun = { outcomes: CheckOutcome[]; preExistingBroken: number };
@@ -603,67 +437,7 @@ export function createVerifier(deps: VerifierDeps): Verifier {
         ? { key: `${p.key}:coverage`, section: 'effect', status: 'pass' }
         : { key: `${p.key}:coverage`, section: 'effect', status: 'fail', detail: 'the projection coverage line is missing' });
       if (!p.container.isConnected) {
-        outcomes.push({ key: `${p.key}:source`, section: 'integrity', status: 'fail', detail: 'the projection source set left the document' });
-      }
-    }
-
-    // INTEGRITY (baseline-relative; stable keys)
-    const integrityEls: Array<{ entry: ProtectedEl; base: ElBaseline | undefined }> = [
-      ...plan.protectedEls.map((p) => ({ entry: p, base: baseline.els.get(p.key) })),
-      ...plan.sentinels.map((p) => ({ entry: p, base: baseline.els.get(p.key) })),
-    ];
-    for (const { entry, base } of integrityEls) {
-      const el = entry.el;
-      if (!base) {
-        if (want(`integrity:${entry.key}:present`)) {
-          outcomes.push({ key: `integrity:${entry.key}:present`, section: 'integrity', status: 'unknown', detail: 'no baseline was captured for this element (capped or unmeasurable)' });
-        }
-        continue;
-      }
-      const now = sampleEl(entry.key, el, []);
-      if (want(`integrity:${entry.key}:present`)) {
-        if (base.connected && !now.connected) {
-          outcomes.push({ key: `integrity:${entry.key}:present`, section: 'integrity', status: 'fail', detail: 'a protected element was removed during the candidate' });
-        } else {
-          outcomes.push({ key: `integrity:${entry.key}:present`, section: 'integrity', status: 'pass' });
-        }
-      }
-      if (want(`integrity:${entry.key}:visible`)) {
-        if (!base.hidden && now.hidden && !inHideScope(plan, el)) {
-          outcomes.push({ key: `integrity:${entry.key}:visible`, section: 'integrity', status: 'fail', detail: 'a protected element became hidden during the candidate (not an authorized hide)' });
-        } else if (!base.hidden && now.hidden && inHideScope(plan, el)) {
-          outcomes.push({ key: `integrity:${entry.key}:visible`, section: 'integrity', status: 'satisfied', detail: 'hidden by an authorized hide target' });
-        } else {
-          outcomes.push({ key: `integrity:${entry.key}:visible`, section: 'integrity', status: 'pass' });
-        }
-      }
-      if (want(`integrity:${entry.key}:focusable`)) {
-        if (base.focusable && (!now.focusable || now.hidden) && !inHideScope(plan, el)) {
-          outcomes.push({ key: `integrity:${entry.key}:focusable`, section: 'integrity', status: 'fail', detail: 'a reachable control lost keyboard reachability during the candidate' });
-        } else {
-          outcomes.push({ key: `integrity:${entry.key}:focusable`, section: 'integrity', status: 'pass' });
-        }
-      }
-      if (want(`integrity:${entry.key}:control`) && base.controlDisabled === false && now.controlDisabled === true) {
-        outcomes.push({ key: `integrity:${entry.key}:control`, section: 'integrity', status: 'fail', detail: 'a form control became disabled during the candidate' });
-      }
-      if (want(`integrity:${entry.key}:media`) && base.mediaPaused === false && now.mediaPaused === true) {
-        outcomes.push({ key: `integrity:${entry.key}:media`, section: 'integrity', status: 'fail', detail: 'media playback was interrupted during the candidate' });
-      }
-      if (want(`integrity:${entry.key}:text`) && base.ownTextLength > 0 && now.ownTextLength === 0) {
-        outcomes.push({ key: `integrity:${entry.key}:text`, section: 'integrity', status: 'fail', detail: 'protected text content vanished during the candidate' });
-      }
-      if (want(`integrity:${entry.key}:overflow`) && now.overflowX - base.overflowX > OVERFLOW_TOLERANCE_PX) {
-        outcomes.push({ key: `integrity:${entry.key}:overflow`, section: 'integrity', status: 'fail', detail: `new horizontal overflow exceeded the ${OVERFLOW_TOLERANCE_PX}px tolerance` });
-      }
-    }
-    if (want('integrity:overflow:viewport')) {
-      const docEl = deps.doc.documentElement;
-      const nowOverflow = docEl ? scrollOverflow(docEl) : 0;
-      if (nowOverflow - baseline.viewportOverflowX > OVERFLOW_TOLERANCE_PX) {
-        outcomes.push({ key: 'integrity:overflow:viewport', section: 'integrity', status: 'fail', detail: `new viewport horizontal overflow exceeded the ${OVERFLOW_TOLERANCE_PX}px tolerance` });
-      } else {
-        outcomes.push({ key: 'integrity:overflow:viewport', section: 'integrity', status: 'pass' });
+        outcomes.push({ key: `${p.key}:source`, section: 'effect', status: 'fail', detail: 'the projection source set left the document' });
       }
     }
 
@@ -709,9 +483,6 @@ export function createVerifier(deps: VerifierDeps): Verifier {
       }
     }
 
-    // Contrast for new owned text (WCAG AA where measurable; unknown never invented).
-    outcomes.push(...contrastCheck(plan));
-
     return { outcomes, preExistingBroken };
   };
 
@@ -756,8 +527,6 @@ export function createVerifier(deps: VerifierDeps): Verifier {
       issues,
       counts,
       coverage: {
-        protectedTargets: plan.protectedEls.length,
-        sentinels: plan.sentinels.length,
         combinedRevisions: plan.combined.length,
         checks: first.outcomes.length,
         unmeasuredDecls: plan.unmeasuredDecls,

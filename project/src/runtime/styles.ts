@@ -21,6 +21,11 @@
  */
 
 export const TOKEN_ATTRIBUTE = 'data-rv2-ns';
+/** plan/08 §44: "Rules target unique runtime token membership" — the member
+ *  attribute scopes each generated rule to ITS OWN resolved target, so two
+ *  rules targeting different elements never override each other through the
+ *  shared batch token. Revueon-owned prefix (never a site attribute). */
+export const MEMBER_ATTRIBUTE = 'data-rv2-m';
 const NAMESPACE_PATTERN = /^[A-Za-z0-9._-]{1,200}$/;
 
 export interface TokenScope {
@@ -83,4 +88,15 @@ export function createTokenScope(doc: Document): TokenScope {
     active: () => [...active],
     isActive: (namespace) => active.has(namespace),
   };
+}
+
+/** The bounded membership identity for a declared target: the targetRef or
+ *  localRef sanitized to attribute-safe characters ([A-Za-z0-9_-], ≤ 100).
+ *  An target without either ref has no membership scoping (it matches by the
+ *  batch token alone). Deterministic from the persisted operation record, so
+ *  recompiles derive the identical membership. */
+export function memberIdOf(spec: { targetRef?: string; localRef?: string }): string {
+  const raw = spec?.targetRef ?? spec?.localRef ?? '';
+  const sanitized = raw.replace(/[^A-Za-z0-9_-]/g, '-').slice(0, 100);
+  return /^[A-Za-z0-9_-]+$/.test(sanitized) ? sanitized : '';
 }

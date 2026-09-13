@@ -324,3 +324,35 @@ test('E2E/S7.1: the model proposes a shortcut, the review names the target and w
   assert.equal(await target.evaluate(() => (window as unknown as { __pokes: number }).__pokes), 1, 'the disabled shortcut fired nothing');
   void ws;
 });
+
+// ── plan/08 §92 end-to-end: omitted priority rides important ──────────────
+
+test('§92 E2E: a neubrutalism plan with omitted priority (the field-failing shape) applies on a page with the site\'s own base styles', async () => {
+  const target = await openFixture('v2-neubrutalism.html');
+  await target.bringToFront();
+  const ws = await openWorkspace();
+  await injectSettings(ws);
+  await ws.reload({ waitUntil: 'load' });
+  await target.bringToFront();
+  await waitForChip(ws, /Working on: v2 neubrutalism fixture/);
+
+  // The field-failing shape: declarations OMIT priority. The canned provider
+  // answers exactly as the live model did (background-color + margin on body,
+  // background-color on the main panel).
+  await ws.locator('#rv-goal').pressSequentially('transform to neubrutalism');
+  await ws.getByRole('button', { name: 'Send' }).click();
+  await waitForStatus(ws, /Review the proposed changes below/);
+  assert.ok(await ws.getByText('Proposed: Transform to neubrutalism').isVisible(), 'the neubrutalism proposal is shown');
+
+  await ws.getByRole('button', { name: 'Apply' }).click();
+  await waitForStatus(ws, /Applied and saved\./);
+
+  // The page really carries the neubrutalism look: the important rules won
+  // the site cascade — body background/margin and the panel background hold.
+  const bodyBg = await target.evaluate(() => getComputedStyle(document.body).backgroundColor);
+  const bodyMargin = await target.evaluate(() => getComputedStyle(document.body).marginTop);
+  const panelBg = await target.evaluate(() => getComputedStyle(document.getElementById('panel')!).backgroundColor);
+  assert.equal(bodyBg, 'rgb(255, 255, 255)', `body background should hold the override; got ${bodyBg}`);
+  assert.equal(bodyMargin, '0px', `body margin should hold the override; got ${bodyMargin}`);
+  assert.equal(panelBg, 'rgb(254, 243, 199)', `panel background should hold the override; got ${panelBg}`);
+});

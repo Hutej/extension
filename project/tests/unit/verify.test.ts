@@ -145,6 +145,7 @@ class FakeStyles {
   /** When set, the next getComputedStyle for this element returns null once. */
   private failOnce = new Set<StubNode>();
   private failArmed = new Set<StubNode>();
+  throwArmed = new Set<StubNode>();
 
   set(target: StubNode, prop: string, value: string): void {
     const m = this.map.get(target) ?? new Map<string, string>();
@@ -154,7 +155,14 @@ class FakeStyles {
   failNextComputedOnce(target: StubNode): void {
     this.failArmed.add(target);
   }
+  throwNextComputedOnce(target: StubNode): void {
+    this.throwArmed.add(target);
+  }
   computedOf = (target: StubNode): { getPropertyValue(p: string): string } | null => {
+    if (this.throwArmed.has(target)) {
+      this.throwArmed.delete(target);
+      throw new Error('the site breaks computed-style reads');
+    }
     if (this.failArmed.has(target)) {
       this.failArmed.delete(target);
       this.failOnce.add(target);
@@ -241,7 +249,6 @@ const basePlan = (overrides: Partial<VerifyPlan> = {}): VerifyPlan => ({
   entryEpoch: 0,
   staged: false,
   styles: [],
-  hides: [],
   localSheets: [],
   projections: [],
   bindings: [],
@@ -249,10 +256,7 @@ const basePlan = (overrides: Partial<VerifyPlan> = {}): VerifyPlan => ({
   rules: [],
   texts: [],
   inserts: [],
-  protectedEls: [],
-  sentinels: [],
   combined: [],
-  ownedText: [],
   tokenChecks: [],
   unmeasuredDecls: 0,
   ...overrides,
@@ -265,11 +269,10 @@ test('T13: an already-satisfied style effect passes — no change alone is never
   const h = el('h1');
   w.doc.appendChild(h);
   w.styles.set(h, 'color', 'rgb(255, 0, 0)'); // already red
-  const captured = w.verifier.captureBaseline(basePlan({ protectedEls: [{ key: 'h', el: h as unknown as Element }] }));
+  const captured = w.verifier.captureBaseline(basePlan({ }));
   assert.ok(captured.ok);
   const report = await w.verifier.verify(basePlan({
     styles: [{ key: 'effect:style:op0:decl:color', el: h as unknown as Element, property: 'color', value: 'red' }],
-    protectedEls: [{ key: 'h', el: h as unknown as Element }],
   }), captured.baseline);
   assert.equal(report.status, 'pass', JSON.stringify(report.issues));
   assert.equal(report.counts.pass >= 1, true);
@@ -304,143 +307,6 @@ test('T13: an unknown measurement gets ONE bounded recheck, then passes or rolls
   assert.equal(report.status, 'pass', JSON.stringify(report.issues));
   assert.equal(report.coverage.rechecked, true, 'the one recheck ran');
   assert.equal(w.recheckCount(), 1, 'exactly one recheck — never an endless loop');
-});
-
-test('T13: an authorized hide satisfies its visibility check and leaves sentinels alone', async () => {
-  const w = makeWorld();
-  const parent = el('div');
-  const target = el('p');
-  const sibling = el('span');
-  parent.appendChild(target);
-  parent.appendChild(sibling);
-  w.doc.appendChild(parent);
-  const captured = w.verifier.captureBaseline(basePlan({
-    protectedEls: [{ key: 't', el: target as unknown as Element }],
-    sentinels: [{ key: 'sentinel:t:sibling-prev', el: sibling as unknown as Element }],
-  }));
-  assert.ok(captured.ok);
-  w.styles.set(target, 'display', 'none'); // our hide took effect
-  const report = await w.verifier.verify(basePlan({
-    styles: [{ key: 'effect:style:op0:decl:display', el: target as unknown as Element, property: 'display', value: 'none' }],
-    hides: [target as unknown as Element],
-    protectedEls: [{ key: 't', el: target as unknown as Element }],
-    sentinels: [{ key: 'sentinel:t:sibling-prev', el: sibling as unknown as Element }],
-  }), captured.baseline);
-  assert.equal(report.status, 'pass', JSON.stringify(report.issues));
-  assert.equal(report.counts.satisfied >= 1, true, 'the hide target is exempt from visibility failure (satisfied, disclosed in counts)');
-});
-
-test('T13: an unauthorized hidden sibling/ancestor fails — hides must not leak', async () => {
-  const w = makeWorld();
-  const parent = el('div');
-  const target = el('p');
-  const sibling = el('span');
-  parent.appendChild(target);
-  parent.appendChild(sibling);
-  w.doc.appendChild(parent);
-  const captured = w.verifier.captureBaseline(basePlan({
-    protectedEls: [{ key: 't', el: target as unknown as Element }],
-    sentinels: [{ key: 'sentinel:t:sibling-prev', el: sibling as unknown as Element }],
-  }));
-  assert.ok(captured.ok);
-  w.styles.set(sibling, 'display', 'none'); // collateral damage
-  const report = await w.verifier.verify(basePlan({
-    styles: [{ key: 'effect:style:op0:decl:display', el: target as unknown as Element, property: 'display', value: 'none' }],
-    hides: [target as unknown as Element],
-    protectedEls: [{ key: 't', el: target as unknown as Element }],
-    sentinels: [{ key: 'sentinel:t:sibling-prev', el: sibling as unknown as Element }],
-  }), captured.baseline);
-  assert.equal(report.status, 'fail');
-  assert.ok(report.issues.some((i) => i.key === 'integrity:sentinel:t:sibling-prev:visible' && i.status === 'fail'));
-});
-
-test('T22: keyboard reachability loss fails; loss inside an authorized hide is exempt', async () => {
-  const make = () => {
-    const w = makeWorld();
-    const btn = el('button');
-    w.doc.appendChild(btn);
-    return { w, btn };
-  };
-  // Baseline focusable, now hidden (not authorized) → fail.
-  {
-    const { w, btn } = make();
-    const captured = w.verifier.captureBaseline(basePlan({ sentinels: [{ key: 's', el: btn as unknown as Element }] }));
-    assert.ok(captured.ok);
-    w.styles.set(btn, 'display', 'none');
-    const report = await w.verifier.verify(basePlan({
-      sentinels: [{ key: 's', el: btn as unknown as Element }],
-    }), captured.baseline);
-    assert.equal(report.status, 'fail');
-    assert.ok(report.issues.some((i) => i.key === 'integrity:s:focusable' && i.status === 'fail'));
-  }
-  // Same loss but inside an authorized hide scope → exempt.
-  {
-    const { w, btn } = make();
-    const captured = w.verifier.captureBaseline(basePlan({ sentinels: [{ key: 's', el: btn as unknown as Element }] }));
-    assert.ok(captured.ok);
-    w.styles.set(btn, 'display', 'none');
-    const report = await w.verifier.verify(basePlan({
-      hides: [btn as unknown as Element],
-      sentinels: [{ key: 's', el: btn as unknown as Element }],
-    }), captured.baseline);
-    assert.equal(report.status, 'pass', JSON.stringify(report.issues));
-  }
-});
-
-// ── T22: contrast and overflow ───────────────────────────────────────────
-
-test('T22: owned text contrast — measurable pass, measurable fail, alpha unknown (never an invented ratio)', async () => {
-  const make = (color: string) => {
-    const w = makeWorld();
-    const host = el('div');
-    const p = el('p');
-    p.appendChild(text('Owned words'));
-    host.appendChild(p);
-    w.doc.appendChild(host);
-    w.styles.set(host, 'background-color', 'rgb(255, 255, 255)');
-    w.styles.set(p, 'color', color);
-    return { w, p };
-  };
-  {
-    const { w, p } = make('rgb(0, 0, 0)');
-    const report = await w.verifier.verify(basePlan({ ownedText: [{ el: p as unknown as Element, sample: 'Owned words' }] }), { viewportOverflowX: 0, els: new Map() });
-    assert.equal(report.status, 'pass', JSON.stringify(report.issues));
-  }
-  {
-    const { w, p } = make('rgb(238, 238, 238)'); // ~1.07:1 on white
-    const report = await w.verifier.verify(basePlan({ ownedText: [{ el: p as unknown as Element, sample: 'Owned words' }] }), { viewportOverflowX: 0, els: new Map() });
-    assert.equal(report.status, 'fail');
-    assert.ok(report.issues.some((i) => i.key.startsWith('contrast:owned') && i.status === 'fail'));
-  }
-  {
-    const { w, p } = make('rgba(0, 0, 0, 0.5)'); // alpha compositing → unknown
-    const report = await w.verifier.verify(basePlan({ ownedText: [{ el: p as unknown as Element, sample: 'Owned words' }] }), { viewportOverflowX: 0, els: new Map() });
-    assert.equal(report.status, 'unknown');
-    assert.ok(report.issues.some((i) => i.key.startsWith('contrast:owned') && i.status === 'unknown'));
-  }
-});
-
-test('T22: new viewport horizontal overflow beyond the 2px tolerance fails; within tolerance passes', async () => {
-  const w = makeWorld();
-  const h = el('h1');
-  w.doc.appendChild(h);
-  const captured = w.verifier.captureBaseline(basePlan({ protectedEls: [{ key: 'h', el: h as unknown as Element }] }));
-  assert.ok(captured.ok);
-  (w.docEl as unknown as { scrollWidth: number; clientWidth: number }).scrollWidth = 1004;
-  (w.docEl as unknown as { scrollWidth: number; clientWidth: number }).clientWidth = 1000; // +4px
-  const report = await w.verifier.verify(basePlan({ protectedEls: [{ key: 'h', el: h as unknown as Element }] }), captured.baseline);
-  assert.equal(report.status, 'fail');
-  assert.ok(report.issues.some((i) => i.key === 'integrity:overflow:viewport' && i.status === 'fail'));
-
-  const w2 = makeWorld();
-  const h2 = el('h1');
-  w2.doc.appendChild(h2);
-  const captured2 = w2.verifier.captureBaseline(basePlan({ protectedEls: [{ key: 'h', el: h2 as unknown as Element }] }));
-  assert.ok(captured2.ok);
-  (w2.docEl as unknown as { scrollWidth: number; clientWidth: number }).scrollWidth = 1001;
-  (w2.docEl as unknown as { scrollWidth: number; clientWidth: number }).clientWidth = 1000; // +1px — noise
-  const report2 = await w2.verifier.verify(basePlan({ protectedEls: [{ key: 'h', el: h2 as unknown as Element }] }), captured2.baseline);
-  assert.equal(report2.status, 'pass', JSON.stringify(report2.issues));
 });
 
 // ── T30: combined revision verification ──────────────────────────────────
@@ -499,18 +365,22 @@ test('T30: combined samples verify the whole composition — held effects must k
 test('S4.3: baseline capture failure refuses before activation; skipped declarations are disclosed', async () => {
   const w = makeWorld();
   const broken = el('p');
-  Object.defineProperty(broken, 'isConnected', {
-    get() {
-      throw new Error('the site broke measurement');
-    },
-  });
   w.doc.appendChild(broken);
-  const captured = w.verifier.captureBaseline(basePlan({ protectedEls: [{ key: 'broken', el: broken as unknown as Element }] }));
+  w.styles.throwNextComputedOnce(broken); // the site breaks computed-style reads
+  // With the speculative integrity police cut, the baseline measures only
+  // the combined samples — the failure must ride one of those to refuse.
+  const captured = w.verifier.captureBaseline(basePlan({
+    combined: [{
+      customizationId: 'other', revisionId: 'r0',
+      checks: [{ key: 'combined:other:0:color', el: broken as unknown as Element, property: 'color', value: 'red' }],
+      texts: [], nodes: [],
+    }],
+  }));
   assert.equal(captured.ok, false, 'a mandatory baseline that cannot be measured stops the batch');
 
   const healthy = el('p');
   w.doc.appendChild(healthy);
-  const report = await w.verifier.verify(basePlan({ unmeasuredDecls: 3, tokenChecks: [{ key: 'delivery:token:0', el: healthy as unknown as Element, ns: 'ns' }] }), { viewportOverflowX: 0, els: new Map() });
+  const report = await w.verifier.verify(basePlan({ unmeasuredDecls: 3, tokenChecks: [{ key: 'delivery:token:0', el: healthy as unknown as Element, ns: 'ns' }] }), { els: new Map() });
   assert.equal(report.coverage.unmeasuredDecls, 3, 'skipped declarations are disclosed in coverage');
 });
 
@@ -568,11 +438,10 @@ test('T13/owner: a shorthand declaration verifies through its longhands — comp
     w.styles.set(h, `border-${side}-style`, 'solid');
     w.styles.set(h, `border-${side}-color`, 'rgb(255, 0, 0)');
   }
-  const captured = w.verifier.captureBaseline(basePlan({ protectedEls: [{ key: 'h', el: h as unknown as Element }] }));
+  const captured = w.verifier.captureBaseline(basePlan({ }));
   assert.ok(captured.ok);
   const report = await w.verifier.verify(basePlan({
     styles: [{ key: 'effect:style:op0:rule0:decl1:border', el: h as unknown as Element, property: 'border', value: '2px solid red' }],
-    protectedEls: [{ key: 'h', el: h as unknown as Element }],
   }), captured.baseline);
   assert.equal(report.status, 'pass', JSON.stringify(report.issues));
 

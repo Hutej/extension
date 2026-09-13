@@ -317,7 +317,7 @@ function makeStubVerifier(w: World): Verifier {
         status: fail ? 'fail' : unknown ? 'unknown' : outcomes.length === 0 ? 'unknown' : 'pass',
         issues: outcomes.filter((o) => o.status !== 'pass') as VerificationReport['issues'],
         counts,
-        coverage: { protectedTargets: plan.protectedEls.length, sentinels: plan.sentinels.length, combinedRevisions: plan.combined.length, checks: outcomes.length, unmeasuredDecls: plan.unmeasuredDecls, preExistingBroken: 0, rechecked: false },
+        coverage: { combinedRevisions: plan.combined.length, checks: outcomes.length, unmeasuredDecls: plan.unmeasuredDecls, preExistingBroken: 0, rechecked: false },
       };
     },
   };

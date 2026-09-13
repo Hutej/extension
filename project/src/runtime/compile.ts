@@ -43,6 +43,7 @@ import {
   type StyleDeclaration,
   type StyleOperation,
 } from '../contracts.ts';
+import { MEMBER_ATTRIBUTE } from './styles.ts';
 
 // ── value-function policy ────────────────────────────────────────────────
 
@@ -117,7 +118,7 @@ export interface CompileStyleInput {
   namespace: string;
   /** Resolve a rule target to its runtime token (from the S3.1 registry or a
    *  same-batch local ref). The compiler never resolves nodes itself. */
-  resolveToken(target: { targetRef?: string; localRef?: string }): { ok: true; token: string } | { ok: false; detail: string };
+  resolveToken(target: { targetRef?: string; localRef?: string }): { ok: true; token: string; member?: string } | { ok: false; detail: string };
   /** Observed site custom properties the operation may read via var(). */
   observedSafeVars?: ReadonlySet<string>;
 }
@@ -209,11 +210,15 @@ function rewriteKeyframeIdentsInText(value: string, declaredKeyframes: ReadonlyS
 
 // ── selector generation ──────────────────────────────────────────────────
 
-export function selectorForRule(token: string, state: string, surface: 'element' | 'before' | 'after'): string {
-  // Uniform zero specificity: target and state inside :where() so canonical
-  // customization order decides (plan/08 §3). Pseudo-elements append outside
-  // the wrapper (they cannot live inside :where()).
-  const base = `[data-rv2-ns="${token}"]`;
+export function selectorForRule(token: string, member: string, state: string, surface: 'element' | 'before' | 'after'): string {
+  // Uniform zero specificity: target, membership and state inside :where() so
+  // canonical customization order decides (plan/08 §3). The membership
+  // attribute scopes the rule to ITS OWN resolved target (plan/08 §44:
+  // "rules target unique runtime token membership") — two rules targeting
+  // different elements never override each other through the shared batch
+  // token. Pseudo-elements append outside the wrapper (they cannot live
+  // inside :where()).
+  const base = `[data-rv2-ns="${token}"]${member ? `[${MEMBER_ATTRIBUTE}="${member}"]` : ''}`;
   const statePart = state !== 'none' ? `:${state}` : '';
   const pseudoPart = surface !== 'element' ? `::${surface}` : '';
   return `:where(${base}${statePart})${pseudoPart}`;
@@ -370,7 +375,7 @@ export function compileStyleOperation(input: CompileStyleInput): CompileStyleRes
       continue;
     }
     usedTokens.add(resolved.token);
-    const selector = selectorForRule(resolved.token, rule.state, rule.surface);
+    const selector = selectorForRule(resolved.token, resolved.member ?? '', rule.state, rule.surface);
     const decls: string[] = [];
     for (const [di, declaration] of rule.declarations.entries()) {
       const path = `rules[${ri}].declarations[${di}]`;
@@ -392,7 +397,12 @@ export function compileStyleOperation(input: CompileStyleInput): CompileStyleRes
         : declaration.value;
       const { highImpact: risk } = checkDeclaration({ ...declaration, value }, path, ctx);
       if (risk) highImpact.push({ property: prop, value, targetRef: rule.target.targetRef ?? rule.target.localRef ?? '', risk });
-      const important = declaration.priority === 'important' ? ' !important' : '';
+      // plan/08 §92: "priority normal or important, default important for
+      // intentional override" — a style operation IS an intentional override,
+      // so an omitted priority renders !important; an explicit "normal" is the
+      // deliberate deference to the site's own rule. Keyframes keep their own
+      // never-important policy above.
+      const important = declaration.priority === 'normal' ? '' : ' !important';
       declarationCount += 1;
       decls.push(`${declaration.property}: ${value}${important};`);
     }

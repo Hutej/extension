@@ -851,3 +851,54 @@ Next task: **S9.1 — Measure stress, compatibility, performance and product qua
 - Note: the revert was CORRECT behavior (verification failed → rollback, no
   half-applied state). These fixes remove the false failures that made correct
   batches roll back.
+
+## 2026-09-13 (evening) — verification honesty rework (owner-directed)
+
+User report: "Could not verify the preview; it was reverted. verification fail
+integrity:t31:focusable integrity:t2:overflow" after a whole-site neubrutalism
+plan. Owner directive: cut overengineering in verification/applying; improve
+the system.
+
+Root causes fixed (two):
+
+1. **Shared-token rule collision (plan/08 §44 violated)**: every rule in a
+   batch compiled to the SAME zero-specificity selector
+   `:where([data-rv2-ns="ns"])`, so rule N's declarations overrode rule N-1's
+   on OTHER targets — earlier rules' effects became unverifiable and the whole
+   batch rolled back. Fix: membership-scoped selectors. New Revueon-owned
+   attribute `data-rv2-m` (bounded identity = sanitized targetRef/localRef,
+   `memberIdOf` in styles.ts) is armed per style-family target alongside the
+   batch token; the compiler scopes each rule to its own target
+   (`:where([data-rv2-ns][data-rv2-m])`, still zero specificity). Lifecycle
+   follows the token exactly: armed with pre-arm baselines (rollback restores
+   the site's own attribute value), removed at retire/rollback/disable, and
+   re-set from the recorded `RevisionRecord.members` at release/recompile.
+   Deterministic from the persisted op (recompiles derive the same identity).
+2. **plan/08 §92 default**: an omitted priority on style-rule declarations now
+   renders `!important` ("default important for intentional override"; an
+   explicit `"normal"` still defers). The planner prompt/schema say the same.
+
+Owner-directed integrity cut (same report, "cut off overengineering"):
+
+- The speculative side-effect police in verify.ts is REMOVED: per-element
+  present/visible/focusable/control/media/text checks, viewport/per-element
+  overflow tolerance, and the WCAG-AA contrast gate (all heuristic, all
+  false-failing user-approved restyles — thick borders grew scrollWidth;
+  visibility heuristics misread restyled ancestors; contrast on the model's
+  approved plan is a quality note, not a revert trigger). The op set cannot
+  remove elements, disable controls or pause media; those checks never caught
+  a real defect. KEPT: delivery (structural), effect (the declared
+  postcondition is the honesty contract), and the T30 combined checks
+  (accepted state must keep holding; pre-existing breakage exempt+disclosed).
+- verify.ts shrunk ~770→~640 lines; protectedEl/sentinel machinery
+  (24 parent/sibling sentinel baselines, hidden/focusable/overflow sampling)
+  deleted from transaction.ts and verify.ts.
+- Tests: §92 default fixtures + membership selector fixture (unit); browser
+  E2E proves the exact field-failing neubrutalism shape now applies on a page
+  with the site's own base styles; the contrast browser test now asserts the
+  approved styled text APPLIES (owner contract); the five police unit tests
+  deleted; S4.3 refusal test rides computedOf throws; T30/T13 kept intact.
+- Gates ×2 green: 368 unit + 39 browser. Residual risk: an approved plan can
+  now produce a low-contrast or overflowing result without a revert — the
+  model's own review + the user's preview remain the quality gates (owner
+  chose this trade-off explicitly).

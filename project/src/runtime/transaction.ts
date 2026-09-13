@@ -46,7 +46,7 @@ import type { Verifier, VerificationReport, VerifyPlan } from './verify.ts';
 import type { ProjectionHandle, ProjectionSpec } from './projection.ts';
 import type { ContentCreator } from './content.ts';
 import type { ResolvedTargetRegistry } from './targets.ts';
-import { TOKEN_ATTRIBUTE, type TokenScope } from './styles.ts';
+import { TOKEN_ATTRIBUTE, type TokenScope , MEMBER_ATTRIBUTE, memberIdOf } from './styles.ts';
 import {
   COLLAPSED_ATTRIBUTE, MAX_BINDINGS_PER_DOCUMENT, type BehaviorCore, type BindingSpec,
   type CollapseWiring, type RulePredicate, type RuleSpec, disclosureState, evaluateRule, isBindActionId,
@@ -165,6 +165,9 @@ interface RevisionRecord {
   relocations: Array<{ node: Element; destination: Element; position: 'first-child' | 'last-child' | 'before' | 'after'; originalParent: Element | null; originalSibling: Node | null; moved: boolean }>;
   /** Elements this revision's fragment targets (token membership). */
   elements: Element[];
+  /** plan/08 §44: the accepted membership identities (el + bounded identity)
+   *  — release/undo re-set them exactly; the identity is generation-stable. */
+  members: Array<{ el: Element; identity: string }>;
   highImpact: Array<{ property: string; value: string; risk: HighImpactRisk }>;
   /** Bounded effect samples for the COMBINED revision verification (T30):
    *  what this revision's fragment declares, on which exact element. */
@@ -262,27 +265,8 @@ const syntheticReport = (req: BatchRequest, detail: string): VerificationReport 
   status: 'unknown',
   issues: [{ key: 'verify:internal', section: 'integrity', status: 'unknown', detail }],
   counts: { pass: 0, satisfied: 0, fail: 0, unknown: 1 },
-  coverage: { protectedTargets: 0, sentinels: 0, combinedRevisions: 0, checks: 1, unmeasuredDecls: 0, preExistingBroken: 0, rechecked: false },
+  coverage: { combinedRevisions: 0, checks: 1, unmeasuredDecls: 0, preExistingBroken: 0, rechecked: false },
 });
-
-/** Bounded owned-text sample collection for the WCAG AA contrast check. */
-const collectOwnedText = (roots: Element[]): Array<{ el: Element; sample: string }> => {
-  const out: Array<{ el: Element; sample: string }> = [];
-  const walk = (el: Element, depth: number): void => {
-    if (out.length >= 8 || depth > 12) return;
-    let t = '';
-    for (const c of el.childNodes) if (c.nodeType === 3) t += c.textContent ?? '';
-    if (t.trim()) out.push({ el, sample: t.slice(0, 200) });
-    for (const c of Array.from(el.children ?? [])) {
-      // S8.4: an owned canvas's accessible fallback is scene content, not
-      // extension-authored text — it never enters the AA contrast check.
-      if (typeof c.hasAttribute === 'function' && c.hasAttribute('data-rv2-canvas-fallback')) continue;
-      walk(c, depth + 1);
-    }
-  };
-  for (const r of roots) walk(r, 0);
-  return out;
-};
 
 export function createTransaction(deps: TransactionDeps): Transaction {
   const revisions = new Map<string, RevisionRecord>();
@@ -335,7 +319,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       const compiled = compileStyleOperation({
         operation: op,
         namespace: ns,
-        resolveToken: () => ({ ok: true, token: ns }),
+        resolveToken: (spec) => ({ ok: true, token: ns, member: memberIdOf(spec) }),
       });
       // Accepted fragments compiled before under a valid policy; a recompile
       // of the same source cannot newly fail. Fail closed regardless.
@@ -354,7 +338,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
   const compileCandidate = (
     styleOps: StyleOperation[],
     ns: string,
-    resolveToken: (t: { targetRef?: string; localRef?: string }) => { ok: true; token: string } | { ok: false; detail: string },
+    resolveToken: (t: { targetRef?: string; localRef?: string }) => { ok: true; token: string; member?: string } | { ok: false; detail: string },
   ): { ok: true; css: string; highImpact: Array<{ property: string; value: string; risk: HighImpactRisk }> } | { ok: false; diagnostics: Array<{ path: string; message: string }> } => {
     const parts: string[] = [];
     const highImpact: Array<{ property: string; value: string; risk: HighImpactRisk }> = [];
@@ -377,6 +361,11 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     /** The candidate's resolved style targets (ref → element) — the S8.3
      *  inline override fallback maps rules back to exact elements. */
     styleTargets: Map<string, Element>;
+    /** plan/08 §44: per-target membership arm list (el + its bounded
+     *  identity) — the write section sets MEMBER_ATTRIBUTE and records the
+     *  pre-arm baseline so the rollback reverses exactly. */
+    memberArm: Array<{ el: Element; identity: string }>;
+    memberBaselines: Map<Element, string | null>;
     candidateElements: Element[];
     fragmentCss: string;
     highImpact: Array<{ property: string; value: string; risk: HighImpactRisk }>;
@@ -447,6 +436,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     const styleOps: StyleOperation[] = [];
     const styleTargets = new Map<string, Element>();
     const candidateElements: Element[] = [];
+    const memberArm: Array<{ el: Element; identity: string }> = [];
+    const memberBaselines = new Map<Element, string | null>();
     const textPreps: PreparedBatch['textPreps'] = [];
     const inserts: PreparedBatch['inserts'] = [];
     const bindPreps: PreparedBatch['bindPreps'] = [];
@@ -461,9 +452,6 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     const involvedRoots = new Set<ShadowRoot>();
     const newClaims = new Set<Text>();
     const styleRuleEls: Element[][] = [];
-    const hideScope: Element[] = [];
-    const protectedMap = new Map<string, Element>();
-    const ownedTextSamples: Array<{ el: Element; sample: string }> = [];
 
     // S8.3: style/hide targets may live in open shadow roots — their rules
     // deliver as a root-local author stylesheet (plan/12 §3). Every other
@@ -523,7 +511,6 @@ export function createTransaction(deps: TransactionDeps): Transaction {
               if ((dp === 'display' && dv === 'none') || (dp === 'visibility' && dv === 'hidden')) {
                 // The CSS equivalent of hide joins the authorized hide scope
                 // (same target/risk policy as the named operation, I17).
-                hideScope.push(r.el);
               }
             }
           }
@@ -539,7 +526,6 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           styleTargets.set(op.target.targetRef ?? op.target.localRef ?? `${i}`, hideTarget.el);
           const hideRoot = hideTarget.el.getRootNode();
           if (hideRoot !== deps.doc) involvedRoots.add(hideRoot as ShadowRoot);
-          hideScope.push(hideTarget.el);
           styleRuleEls.push([hideTarget.el]);
           styleOps.push({
             kind: 'style',
@@ -580,7 +566,6 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           const siteBaseline = predText ? predText.siteBaseline : node.nodeValue ?? '';
           const predecessorValue = predText ? predText.installed : null;
           textPreps.push({ node, installed: op.text, predecessorValue, siteBaseline, claimedNew: !predText });
-          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `${i}`, target.el);
           break;
         }
         case 'insertUI': {
@@ -604,8 +589,6 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           }
           for (const [localId, el] of built.byLocalId) batchLocal.set(localId, el);
           inserts.push({ anchor: anchorR.el, position: op.position, roots: built.roots });
-          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `${i}`, anchorR.el);
-          ownedTextSamples.push(...collectOwnedText(built.roots));
           break;
         }
         case 'bindKey': {
@@ -665,7 +648,6 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           });
           // Integrity: a hidden/gone bind target would leave a dead shortcut —
           // protect it like any other batch target.
-          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `bind:${i}`, bindTarget.el);
           break;
         }
         case 'collapse': {
@@ -713,7 +695,6 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           // The collapsed element is an INTENTIONAL hide scope member when it
           // starts collapsed (same exemption policy as the hide operation).
           const collapsed = op.initialState !== 'expanded';
-          if (collapsed) hideScope.push(collapseTarget.el);
           // The target joins the composition token scope: the collapse rule
           // (token + owned state attribute) reaches it; release removes the
           // token with the rest of the fragment.
@@ -727,7 +708,6 @@ export function createTransaction(deps: TransactionDeps): Transaction {
               ? collapseTarget.el.parentNode
               : collapseTarget.el) as Element | null,
           });
-          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `collapse:${i}`, collapseTarget.el);
           break;
         }
         case 'float': {
@@ -790,7 +770,6 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           inserts.push({ anchor: floatTarget.el, position: 'first-child', roots: builtBtn.roots });
           candidateElements.push(floatTarget.el);
           floatPreps.push({ target: floatTarget.el, button: btn as Element, attrBaseline: floatTarget.el.getAttribute(FLOAT_MIN_ATTRIBUTE), expectedButtonParent: floatTarget.el });
-          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `float:${i}`, floatTarget.el);
           break;
         }
         case 'relocate': {
@@ -848,11 +827,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           // consequence of the relocation — it joins the intentional
           // restructure exemption (its ANCESTORS/SIBLINGS are still
           // sentinel-measured, exactly like the hide scope).
-          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `relocate:${i}`, nodeR.el);
-          protectedMap.set(`relocate-dest:${i}`, destR.el);
           if (nodeR.el.parentElement !== null) {
-            protectedMap.set(`relocate-origin:${i}`, nodeR.el.parentElement);
-            hideScope.push(nodeR.el.parentElement);
           }
           break;
         }
@@ -964,14 +939,11 @@ export function createTransaction(deps: TransactionDeps): Transaction {
           projectionPreps.push({ anchor: anchorR.el, container: setR.node, handle });
           // No composition token: the view's stylesheet is self-contained;
           // its delivery is measured by the connected-at-anchor effect check.
-          protectedMap.set(op.target.targetRef ?? op.target.localRef ?? `proj:${i}`, anchorR.el);
-          protectedMap.set(`sourceSet:${i}`, setR.node);
           if (op.showOriginal === false) {
             // Hiding the original set is an explicit, consequential choice —
             // the same compiled display:none path as the hide operation, so
             // the fragment/verification/restore machinery is identical (I17).
             styleTargets.set(op.sourceSetRef, setR.node);
-            hideScope.push(setR.node);
             styleRuleEls.push([setR.node]);
             styleOps.push({
               kind: 'style',
@@ -992,12 +964,20 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     // Compile the candidate fragment under a fresh generation token.
     generation += 1; // reserve the generation number deterministically
     const nsNew = `rv2.i${deps.installationId()}.g${generation}`;
-    const collectTarget = (_spec: { targetRef?: string; localRef?: string }): { ok: true; token: string } | { ok: false; detail: string } => {
+    const collectTarget = (spec: { targetRef?: string; localRef?: string }): { ok: true; token: string; member?: string } | { ok: false; detail: string } => {
       // Targets were pre-resolved above with exact error codes; the compiler
-      // only needs the composition token.
-      return { ok: true, token: nsNew };
+      // needs the composition token plus the membership identity that scopes
+      // the rule to its own resolved target (plan/08 §44).
+      return { ok: true, token: nsNew, member: memberIdOf(spec) };
     };
-    for (const t of styleTargets.values()) candidateElements.push(t);
+    for (const [targetKey, targetEl] of styleTargets) {
+      candidateElements.push(targetEl);
+      // plan/08 §44: the membership identity scopes each generated rule to
+      // ITS OWN resolved target — the same bounded identity the compiler
+      // derives from the declared target, so every compiled member is armed.
+      const identity = memberIdOf({ targetRef: targetKey });
+      if (identity !== '') memberArm.push({ el: targetEl, identity });
+    }
     let fragmentCss = '';
     if (styleOps.length > 0) {
       const compiled = compileCandidate(styleOps, nsNew, collectTarget);
@@ -1062,41 +1042,6 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       }
       for (const kf of op.keyframes ?? []) for (const f of kf.frames) unmeasured += f.declarations.length;
     }
-    const protectedEls: VerifyPlan['protectedEls'] = [];
-    {
-      const seenKeys = new Set<string>();
-      for (const [key, el] of [...protectedMap, ...styleTargets]) {
-        if (seenKeys.has(key)) continue;
-        seenKeys.add(key);
-        protectedEls.push({ key, el });
-      }
-    }
-    const sentinels: VerifyPlan['sentinels'] = [];
-    {
-      const sentinelSeen = new Set<Element>(protectedEls.map((p) => p.el));
-      for (const p of protectedEls) {
-        if (sentinels.length >= 24) break;
-        const parentRaw = (p.el.parentElement ?? p.el.parentNode) as Element | null;
-        const parent = parentRaw && parentRaw.nodeType === 1 ? parentRaw : null;
-        if (parent && !sentinelSeen.has(parent)) {
-          sentinelSeen.add(parent);
-          sentinels.push({ key: `sentinel:${p.key}:parent`, el: parent });
-        }
-        if (!parent) continue;
-        const siblings = Array.from(parent.children ?? []);
-        const idx = siblings.indexOf(p.el);
-        // Each sibling gets its OWN stable key: two siblings under one key
-        // would collide in the baseline map (a focusable sibling's baseline
-        // was then measured against the other sibling — a false integrity
-        // fail; caught by the S7.1 keys fixture).
-        for (const [which, sib] of [['prev', siblings[idx - 1]], ['next', siblings[idx + 1]]] as const) {
-          if (sib && !sentinelSeen.has(sib) && sentinels.length < 24) {
-            sentinelSeen.add(sib);
-            sentinels.push({ key: `sentinel:${p.key}:sibling-${which}`, el: sib });
-          }
-        }
-      }
-    }
     const excluded = new Map<Element, Set<string>>();
     for (const d of candidateDecls) {
       const set = excluded.get(d.el) ?? new Set<string>();
@@ -1123,7 +1068,6 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       entryEpoch,
       staged: false,
       styles: styleChecks,
-      hides: hideScope,
       texts: textPreps.map((t, j) => ({ key: `effect:text:${j}`, node: t.node, installed: t.installed })),
       // before/after place beside the anchor (parent = its parent);
       // first-child/last-child place INSIDE the anchor (parent = the anchor).
@@ -1145,10 +1089,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
             : p.destination) as Element | null,
         })),
       ],
-      protectedEls,
-      sentinels,
       combined,
-      ownedText: ownedTextSamples,
       bindings: bindPreps.map((b, j) => ({ key: `effect:bind:${j}`, normalized: b.spec.normalized })),
       collapses: collapsePreps.map((c, j) => ({
         key: `effect:collapse:${j}`,
@@ -1178,6 +1119,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         documentKey: dk,
         styleOps,
         styleTargets,
+        memberArm,
+        memberBaselines,
         candidateElements,
         fragmentCss,
         highImpact,
@@ -1349,7 +1292,10 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     try {
       if (stagedOpId) {
         for (const el of oldSet) {
-          if (!newSet.has(el) && el.getAttribute?.(TOKEN_ATTRIBUTE) === oldNs) el.removeAttribute(TOKEN_ATTRIBUTE);
+          if (!newSet.has(el) && el.getAttribute?.(TOKEN_ATTRIBUTE) === oldNs) {
+            el.removeAttribute(TOKEN_ATTRIBUTE);
+            el.removeAttribute(MEMBER_ATTRIBUTE);
+          }
         }
       }
       // Dropped claims release to the site baseline at the swap (plan/08 §5);
@@ -1446,6 +1392,15 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       // exact registry entries under the transaction's ownership.
       for (const bind of prepared.bindPreps) prepared.bindHandles.push(deps.behavior.install(bind.spec));
       if (stagedOpId) deps.tokens.activate(nsNew, [...newSet].filter((el) => el.isConnected));
+      // plan/08 §44: the membership attribute scopes each generated rule to
+      // its own resolved target. The pre-arm baseline is recorded so the
+      // rollback reverses exactly (the same pattern as the collapse/float
+      // state attribute baselines).
+      for (const { el, identity } of prepared.memberArm) {
+        if (!el.isConnected) continue;
+        if (!prepared.memberBaselines.has(el)) prepared.memberBaselines.set(el, el.getAttribute(MEMBER_ATTRIBUTE));
+        el.setAttribute(MEMBER_ATTRIBUTE, identity);
+      }
     } catch (e) {
       const rolled = await rollbackCandidate(prepared, req, digest, oldNs, oldSet, newSet, stagedOpId, nsNew, conflicts, `write section failed: ${(e as Error).message}`);
       return rolled;
@@ -1585,6 +1540,7 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         moved: p.moved,
       })),
       elements: prepared.candidateElements,
+      members: prepared.memberArm.map((m) => ({ el: m.el, identity: m.identity })),
       highImpact: prepared.highImpact,
       decls: prepared.candidateDecls,
       localSheets: prepared.localSheets,
@@ -1685,6 +1641,14 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     // Disarm FIRST (I07): the candidate namespace can never reactivate.
     deps.tokens.revoke(nsNew);
     deps.tokens.disarm(nsNew, [...newSet]);
+    // plan/08 §44: the membership attribute reverses to the pre-arm baseline
+    // (usually absent) — the site's own attribute value is never destroyed.
+    for (const [el, baseline] of prepared.memberBaselines) {
+      try {
+        if (baseline === null) el.removeAttribute(MEMBER_ATTRIBUTE);
+        else el.setAttribute(MEMBER_ATTRIBUTE, baseline);
+      } catch { /* detached */ }
+    }
     if (stagedOpId) {
       // Restore the accepted aggregate's membership.
       for (const el of oldSet) if (el.isConnected) deps.tokens.activate(oldNs, [el]);
@@ -1836,7 +1800,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       const opId = `release:${customizationId}:${deps.randomId()}`;
       const reply = await deps.styleClient.stage({ operationId: opId, namespace: nsNew, css });
       if (reply.ok && reply.state === 'inserted') {
-        for (const el of rev.elements) if (el.isConnected && el.getAttribute(TOKEN_ATTRIBUTE) === oldNs) el.removeAttribute(TOKEN_ATTRIBUTE);
+        for (const el of rev.elements) if (el.isConnected && el.getAttribute(TOKEN_ATTRIBUTE) === oldNs) { el.removeAttribute(TOKEN_ATTRIBUTE); el.removeAttribute(MEMBER_ATTRIBUTE); }
+        for (const r of others) for (const m of r.members) if (m.el.isConnected) m.el.setAttribute(MEMBER_ATTRIBUTE, m.identity);
         const members: Element[] = [];
         for (const r of others) for (const el of r.elements) members.push(el);
         deps.tokens.activate(nsNew, members.filter((el) => el.isConnected));
@@ -1853,7 +1818,8 @@ export function createTransaction(deps: TransactionDeps): Transaction {
       }
     } else {
       // No fragments remain: the whole aggregate retires.
-      for (const el of oldSet) if (el.isConnected && el.getAttribute(TOKEN_ATTRIBUTE) === oldNs) el.removeAttribute(TOKEN_ATTRIBUTE);
+      for (const el of oldSet) if (el.isConnected && el.getAttribute(TOKEN_ATTRIBUTE) === oldNs) { el.removeAttribute(TOKEN_ATTRIBUTE); el.removeAttribute(MEMBER_ATTRIBUTE); }
+      for (const r of others) for (const m of r.members) if (m.el.isConnected) m.el.setAttribute(MEMBER_ATTRIBUTE, m.identity);
       deps.tokens.revoke(oldNs);
       if (oldOpId !== null) {
         const rm = await deps.styleClient.remove(oldOpId, acceptedCss);

@@ -150,9 +150,10 @@ test('I17: hiding/cutting declarations compile but are surfaced as high-impact c
 // ── generated selectors: tokens, :where, pseudo placement ────────────────
 
 test('T07: generated selectors are :where token wrappers; pseudo-elements go outside', () => {
-  assert.equal(selectorForRule('tok-1', 'none', 'element'), ':where([data-rv2-ns="tok-1"])');
-  assert.equal(selectorForRule('tok-1', 'hover', 'element'), ':where([data-rv2-ns="tok-1"]:hover)');
-  assert.equal(selectorForRule('tok-1', 'none', 'before'), ':where([data-rv2-ns="tok-1"])::before');
+  assert.equal(selectorForRule('tok-1', '', 'none', 'element'), ':where([data-rv2-ns="tok-1"])');
+  assert.equal(selectorForRule('tok-1', 't3', 'none', 'element'), ':where([data-rv2-ns="tok-1"][data-rv2-m="t3"])');
+  assert.equal(selectorForRule('tok-1', '', 'hover', 'element'), ':where([data-rv2-ns="tok-1"]:hover)');
+  assert.equal(selectorForRule('tok-1', '', 'none', 'before'), ':where([data-rv2-ns="tok-1"])::before');
   const result = compile(styleOp([
     rule([{ property: 'color', value: 'red' }], { state: 'hover', surface: 'element' }),
     rule([{ property: 'content', value: '"→"' }], { surface: 'after' }),
@@ -163,6 +164,33 @@ test('T07: generated selectors are :where token wrappers; pseudo-elements go out
     assert.match(result.sheet.css, /:where\(\[data-rv2-ns="tok-1"\]\)::after/);
     // Uniform zero specificity: no id/class selectors of our own.
     assert.equal(result.sheet.css.includes('#'), false, 'no id selectors are generated');
+  }
+});
+
+test('plan/08 §92: a style rule defaults to important — an intentional override wins the site cascade', () => {
+  const result = compile(styleOp([
+    rule([{ property: 'background-color', value: '#ffffff' }, { property: 'margin', value: '0' }]),
+    rule([{ property: 'background-color', value: 'rebeccapurple' }], { state: 'none', surface: 'element' }),
+  ]));
+  assert.ok(result.ok);
+  if (result.ok) {
+    // Omitted priority renders !important (default important for intentional
+    // override); the site's own body rules otherwise beat zero specificity.
+    const importantCount = (result.sheet.css.match(/!important/g) ?? []).length;
+    assert.equal(importantCount, 3, 'three omitted-priority declarations ride important');
+    assert.match(result.sheet.css, /background-color: #ffffff !important;/);
+    assert.match(result.sheet.css, /margin: 0 !important;/);
+  }
+});
+
+test('plan/08 §92: an explicit "normal" is the deliberate deference — no important', () => {
+  const result = compile(styleOp([
+    rule([{ property: 'color', value: 'red', priority: 'normal' }]),
+  ]));
+  assert.ok(result.ok);
+  if (result.ok) {
+    assert.equal(result.sheet.css.includes('!important'), false, 'explicit normal defers to the site');
+    assert.match(result.sheet.css, /color: red;/);
   }
 });
 

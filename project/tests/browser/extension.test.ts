@@ -718,7 +718,7 @@ test('S4.2/T09: replaceText keeps the native node and its listener; the whole ca
 });
 
 
-test('S4.3/T22: owned text below the WCAG AA floor fails verification and rolls the whole candidate back', async () => {
+test('S4.3/owner: approved styled owned text applies — contrast is no longer a revert trigger', async () => {
   assert.ok(workspace, 'workspace page from the registration test');
   const { page, tabId } = await openFixture('v2-apply.html');
   const state = await capturedState(workspace, tabId);
@@ -737,11 +737,18 @@ test('S4.3/T22: owned text below the WCAG AA floor fails verification and rolls 
       ] },
     ],
   });
-  assert.equal(receipt.status, 'rolled-back', `low-contrast owned text must fail: ${JSON.stringify(receipt).slice(0, 400)}`);
-  assert.equal(receipt.report!.status, 'fail');
-  assert.ok(receipt.report!.issues.some((i: { key: string }) => i.key.startsWith('contrast:owned')), 'the structured contrast key is in the report');
-  const gone = await page.evaluate(() => document.querySelectorAll('#host > div').length);
-  assert.equal(gone, 0, 'the failing candidate tree is removed');
+  // Owner direction (2026-09-13): the speculative contrast gate reverted
+  // user-approved work; the declared effect is the honesty contract.
+  assert.equal(receipt.status, 'accepted', JSON.stringify(receipt).slice(0, 400));
+  const held = await page.evaluate(() => {
+    const panel = document.querySelector('#host > div')!;
+    return {
+      bg: getComputedStyle(panel).backgroundColor,
+      fg: getComputedStyle(panel.querySelector('p')!).color,
+    };
+  });
+  assert.equal(held.bg, 'rgb(255, 255, 255)', 'the panel background landed');
+  assert.equal(held.fg, 'rgb(238, 238, 238)', 'the declared text color landed');
 });
 
 test('S4.3/T13: a normal-priority declaration that loses the real cascade fails verification (no silent lose)', async () => {

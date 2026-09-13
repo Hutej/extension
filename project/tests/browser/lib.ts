@@ -59,6 +59,52 @@ export function startFixtureServer(): Promise<{ server: Server; origin: string; 
       } catch {
         /* fall back to raw body matching */
       }
+      // Neubrutalism branch: declarations WITHOUT priority — the exact shape
+      // the live model produced in the field (the failing plan). The runtime
+      // defaults omitted priority to important (plan/08 §92), so the
+      // intentional override wins the site's own base styles at verification.
+      if (/neubrutalism/i.test(evidenceText)) {
+        const bodyMatch = evidenceText.match(/^ {2}(t\d+) \| body\b/m);
+        const panelMatch = evidenceText.match(/^ {2}(t\d+) \| main\b/m);
+        const content = JSON.stringify({
+          kind: 'proposal',
+          schemaVersion: 1,
+          summary: 'Transform to neubrutalism',
+          operations: [
+            {
+              kind: 'style',
+              rules: [
+                {
+                  target: { targetRef: bodyMatch ? bodyMatch[1] : '' },
+                  surface: 'element',
+                  state: 'none',
+                  declarations: [
+                    { property: 'background-color', value: '#ffffff' },
+                    { property: 'margin', value: '0' },
+                  ],
+                  conditions: [],
+                },
+                {
+                  target: { targetRef: panelMatch ? panelMatch[1] : '' },
+                  surface: 'element',
+                  state: 'none',
+                  declarations: [{ property: 'background-color', value: '#fef3c7' }],
+                  conditions: [],
+                },
+              ],
+            },
+          ],
+        });
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+          id: 'chatcmpl-fixture-neubrutalism',
+          object: 'chat.completion',
+          created: 0,
+          model: 'fixture-model',
+          choices: [{ index: 0, message: { role: 'assistant', content }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }));
+        return;
+      }
       // S7.1 branch: a goal asking for a shortcut gets a bindKey proposal on
       // the first observed button — the canned provider stays a stand-in for
       // the real model path; no test-only production hooks exist.
