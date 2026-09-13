@@ -127,6 +127,13 @@ test('T21: the workspace auto-targets the page the user is on — no manual pick
   const pageA = await openFixture('observe.html');
   const target = await openFixture('workspace-target.html');
   const ws = await openWorkspace();
+  // Providerless variant: a stored settings record with no profiles (a user
+  // who removed every provider) — the fresh-install built-in seed must not
+  // fire, so the no-provider refusal stays exercised in every build.
+  await ws.evaluate(async (s) => {
+    await chrome.storage.local.set({ rv2_workspaceSettings: s });
+  }, { settingsVersion: 1, profiles: [], credentials: {}, activeProfileId: null, consentAcks: [], aiEnabled: true });
+  await ws.reload({ waitUntil: 'load' });
   await target.bringToFront();
 
   // The header chip names the ACTIVE page only — never the other tab, never

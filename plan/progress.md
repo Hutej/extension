@@ -650,3 +650,37 @@ Next task: **S8.4 — Add bounded owned Canvas 2D, not a graphics framework** (p
   texts) is unchanged — the honest-status tests still hold.
 
 Next task: **S8.4 — Add bounded owned Canvas 2D, not a graphics framework**.
+
+## Built-in Cloudflare model (owner-directed building-phase config)
+
+- Date: 2026-09-13. The owner is testing in the browser and does not want
+  provider key entry yet; env already holds the Cloudflare account id/key.
+- **wxt.config.ts**: bakes `__RV2_CLOUDFLARE__` (account id, token, model)
+  at build time from the project `.env` (CLOUDFLARE_ACCOUNT_ID /
+  CLOUDFLARE_API_TOKEN — real shell env wins; loaded via Vite `loadEnv`,
+  because WXT does not inject `.env` into `process.env`). Default model
+  `@cf/deepseek-ai/deepseek-v4-flash-0731` (owner's edit), override
+  CLOUDFLARE_MODEL. ponytail note in-file: token is baked into this
+  machine's build artifact — move to a provider-entry/secret flow before
+  sharing builds.
+- **sidepanel/main.ts** `seedBuiltInCloudflare()`: fires ONLY when stored
+  workspace settings are entirely ABSENT (fresh install). Seeds the
+  `builtin-cloudflare` profile (openai-chat → the Cloudflare OpenAI-compatible
+  endpoint `…/ai/v1/chat/completions`, bearer credential, activeProfileId)
+  AND the provider consent ack — a building-phase shortcut backed by the
+  owner's explicit direction; the seeded ack is the field to remove when the
+  manual provider entry returns. Existing/user-removed settings are never
+  touched (the manual form remains).
+- **T21** pre-stores a providerless settings record (a user who removed every
+  provider) before its page loads, so the no-provider refusal stays exercised
+  even in a seeded build; the rest of the browser suite injects its own
+  settings and is unaffected.
+- Evidence: build bakes token ✓; fresh-install session seeds
+  "Cloudflare AI (built-in)" + active + ack + credential ✓; REAL call on
+  example.com through api.cloudflare.com — DeepSeek proposed "Style the main
+  heading so its text is crimson", Apply → "Done — applied and saved", the
+  real h1 computed crimson. Gates ×2 green (354 unit + 36 browser).
+- Residual: a user upgrading from an older build with existing settings does
+  not get the seed (remove the extension + load unpacked again, or clear
+  rv2_workspaceSettings, to re-seed). Provider QUALITY is a separate
+  measurement (DeepSeek output validated by the runtime as usual).

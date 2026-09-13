@@ -8,7 +8,56 @@
  * "Open this workspace in a tab" button covers that direction.
  */
 
-import { mountWorkspace, WORKSPACE_SETTINGS_KEY } from '../../ui/workspace.ts';
+import { PROVIDER_DISCLOSURE_VERSION, type DisclosureAck, type ProviderProfile } from '../../contracts.ts';
+import {
+  decodeWorkspaceSettings,
+  mountWorkspace,
+  WORKSPACE_SETTINGS_KEY,
+  type WorkspaceSettings,
+} from '../../ui/workspace.ts';
+
+/**
+ * Owner-directed building-phase convenience (2026-09-13): a fresh install —
+ * no stored settings at all — gets the Cloudflare Workers AI model
+ * preconfigured (profile + credential + provider consent ack) from the values
+ * baked in at build time (wxt.config.ts). Existing settings are NEVER touched;
+ * a user who removed every provider stays providerless (the manual entry form
+ * remains in Settings for that direction).
+ *
+ * ponytail: the seeded consentAcks is a building-phase shortcut backed by the
+ * owner's explicit direction — remove the seeded ack when the provider entry
+ * flow returns.
+ */
+async function seedBuiltInCloudflare(): Promise<unknown> {
+  const cf = __RV2_CLOUDFLARE__;
+  if (cf.accountId === '' || cf.token === '') return undefined;
+  const profile: ProviderProfile = {
+    profileVersion: 1,
+    profileId: 'builtin-cloudflare',
+    label: 'Cloudflare AI (built-in)',
+    protocol: 'openai-chat',
+    endpoint: `https://api.cloudflare.com/client/v4/accounts/${cf.accountId}/ai/v1/chat/completions`,
+    modelId: cf.model,
+    auth: { kind: 'bearer' },
+  };
+  const ack: DisclosureAck = {
+    disclosureVersion: PROVIDER_DISCLOSURE_VERSION,
+    endpoint: profile.endpoint,
+    acknowledgedAt: Date.now(),
+  };
+  const settings: WorkspaceSettings = {
+    settingsVersion: 1,
+    profiles: [profile],
+    credentials: { [profile.profileId]: cf.token },
+    activeProfileId: profile.profileId,
+    consentAcks: [ack],
+    aiEnabled: true,
+  };
+  const decoded = decodeWorkspaceSettings(settings);
+  if (!decoded.ok) return undefined;
+  await chrome.storage.local.set({ [WORKSPACE_SETTINGS_KEY]: decoded.value });
+  return decoded.value;
+}
 
 /** The last activated ordinary web tab — the workspace-as-tab fallback. */
 let lastWebTabId: number | null = null;
@@ -55,7 +104,11 @@ if (root !== null) {
     },
     loadSettings: async () => {
       const stored = await chrome.storage.local.get(WORKSPACE_SETTINGS_KEY);
-      return stored[WORKSPACE_SETTINGS_KEY];
+      const existing = stored[WORKSPACE_SETTINGS_KEY];
+      // Fresh install only: seed the built-in Cloudflare model (never touch
+      // settings the user already has).
+      if (existing === undefined) return seedBuiltInCloudflare();
+      return existing;
     },
     saveSettings: async (settings) => {
       await chrome.storage.local.set({ [WORKSPACE_SETTINGS_KEY]: settings });
