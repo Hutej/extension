@@ -317,7 +317,7 @@ Read: [workflow designs](09-behavior-and-workflows.md), [capability coverage](28
 Read: [tests](20-testing-strategy.md), [matrix](21-test-matrix.md), [acceptance](22-acceptance-criteria.md), [deletion](19-migration-and-deletion.md).
 
 - [ ] **S9 phase completed**
-  - [ ] **S9.1 — Measure stress, compatibility, performance and product quality**
+  - [x] **S9.1 — Measure stress, compatibility, performance and product quality**
     - Goal/inputs: complete core/P2 capabilities with all focused evidence.
     - Changes: finish min/current Chrome/Edge capability tests for S8.3 frame/root runtimes, zoom/BFCache/shadow fallback, storm/soak/perf; optimize only measured hot paths, record manual site coverage.
     - Outputs: truthful supported-browser/capability matrix and benchmark distributions; full model-free correctness matrix.
