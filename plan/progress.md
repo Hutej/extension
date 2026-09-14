@@ -1100,3 +1100,9 @@ The roadmap is fully complete: **S0–S9 all checked; checkpoint = released.**
   build+import-audit ✓ 374 unit + 41 browser (0 known-red) ✓ stress 6/6 ✓.
 - Rollback/storage compatibility: unchanged from the S6.3 record
   (plan/19 §5–§6 — quarantined legacy data, no downgrade writes).
+- **Honest flake record**: one full-gate run at commit time showed 1/41 browser
+  failures (test name lost to my output filtering); the identical source passed
+  the full gate minutes earlier, and the browser gate passed on both reruns
+  (the flaked run started seconds after the 94s stress suite finished —
+  treated as machine-contention flake, watched for recurrence; if it recurs,
+  the specific test must be stabilized before any further claim).
