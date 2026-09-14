@@ -43,10 +43,12 @@ export function newestMtime(dir: string, extraFiles: string[]): number {
  *  evidence block, finds the first h1 region and answers with a valid S1
  *  proposal targeting it — a deterministic stand-in so workspace tests run
  *  the full user workflow with zero live model and zero external network. */
-export function startFixtureServer(): Promise<{ server: Server; origin: string; close: () => Promise<void> }> {
+export function startFixtureServer(): Promise<{ server: Server; origin: string; close: () => Promise<void>; posts: { model: number } }> {
+  const posts = { model: 0 };
   const server = createServer(async (req, res) => {
     const url = new URL(req.url ?? '/', 'http://127.0.0.1');
     if (req.method === 'POST' && url.pathname === '/v1/chat/completions') {
+      posts.model += 1;
       const chunks: Buffer[] = [];
       for await (const chunk of req) chunks.push(chunk as Buffer);
       const body = Buffer.concat(chunks).toString('utf8');
@@ -268,6 +270,7 @@ export function startFixtureServer(): Promise<{ server: Server; origin: string; 
         server,
         origin: `http://127.0.0.1:${addr.port}`,
         close: () => new Promise<void>((done) => server.close(() => done())),
+        posts,
       });
     });
   });

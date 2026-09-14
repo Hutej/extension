@@ -4,8 +4,8 @@
 
 ## Current checkpoint
 
-- Current phase: **S8 — workflow and layout breadth**.
-- Next task: **S9.1**.
+- Current phase: **S9 — release qualification and final deletion**.
+- Next task: **S9.2** (S9.1 complete — evidence in [29-s9-1-evidence.md](29-s9-1-evidence.md)).
 
 ## User-directed UX rework (2026-09-13, between S8.3 and S8.4)
 
@@ -322,9 +322,9 @@ Read: [tests](20-testing-strategy.md), [matrix](21-test-matrix.md), [acceptance]
     - Changes: finish min/current Chrome/Edge capability tests for S8.3 frame/root runtimes, zoom/BFCache/shadow fallback, storm/soak/perf; optimize only measured hot paths, record manual site coverage.
     - Outputs: truthful supported-browser/capability matrix and benchmark distributions; full model-free correctness matrix.
     - Invariants: I14/I20/I21/I26/I28.
-    - [ ] Tests: all T01–T32 applicable; stress/perf isolated; opt-in live model quality separate.
-    - [ ] Validation: AC01–12 and release metrics, no zero/unknown-as-pass; security review complete.
-    - [ ] Completion: no open P0; residual limitations explicit, manual checks evidenced; S9.1 record.
+    - [x] Tests: all T01–T32 applicable; stress/perf isolated; opt-in live model quality separate. (isolated `npm run test:stress` suite: T23 storm/toggles, T03-P scaling, T22-P zoom, T24 bounded soak, E2E latency — all green; full mapping in [29-s9-1-evidence.md](29-s9-1-evidence.md))
+    - [x] Validation: AC01–12 and release metrics, no zero/unknown-as-pass; security review complete. (gates ×2 green every run: 374 unit + 41 browser, 0 known-red; live Chromium-120 floor smoke 5/5; security surfaces green in-gate)
+    - [x] Completion: no open P0; residual limitations explicit, manual checks evidenced; S9.1 record. ([29-s9-1-evidence.md](29-s9-1-evidence.md); residuals: Edge live run, BFCache-forced expiry, 30min soak opt-in — none P0)
     - Follow-up: final release cleanup.
   - [ ] **S9.2 — Finish deletion ledger, documentation and release checkpoint**
     - Goal/inputs: S9.1, all migration rows, source import graph.

@@ -12,7 +12,8 @@
     "audit:imports": "node --experimental-strip-types scripts/audit-imports.ts",
     "test": "node --experimental-strip-types scripts/test-gate.ts",
     "test:unit": "node --experimental-strip-types scripts/test-gate.ts --unit",
-    "test:browser": "node --experimental-strip-types scripts/test-gate.ts --browser"
+    "test:browser": "node --experimental-strip-types scripts/test-gate.ts --browser",
+    "test:stress": "node --test --test-concurrency=1 --experimental-strip-types tests/stress/stress.test.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.62.1",

@@ -1045,3 +1045,28 @@ shorthand + same-element longhand override + -webkit-backdrop-filter ×2) —
 applies, saves, blur actually renders (backdrop-filter: blur(12px)),
 net background-color holds, the shorthand's other longhands hold.
 Gates ×2 green: 374 unit + 41 browser.
+
+## 2026-09-14 — S9.1 complete: stress/compat/perf qualification
+
+S8 was already complete (S8.1–S8.4 checked); moved to S9.1 per the checkpoint.
+
+- **Isolated stress suite** (`project/tests/stress/stress.test.ts`,
+  `npm run test:stress`, OUTSIDE the default gate by design): T23 mutation
+  storm (100Hz × 8s → ZERO model posts, worst ping 5ms, heap 4→3MB, effect
+  held), T23 toggle storm (120 round-trips p50=26ms p95=300ms, last intent
+  wins), T03-P Observe scaling (2k=39ms / 10k=126ms / 50k=736ms, honest
+  partial+cursor), T22-P zoom (0–1ms round-trips), T24 60s soak (heap flat),
+  E2E latency (plan→proposal 243ms, apply→saved 2032ms). All 6 green.
+- **Min-version floor LIVE**: Chromium 120.0.6099.28 (playwright 1.40 scratch
+  install) — 5/5 smoke PASS (registration, SaveRevision, live replay,
+  disable, exact release). `tests/stress/min-chrome-smoke.mjs` committed with
+  reproduction steps (Chromium 120 needs --headless=new for MV3 SWs).
+- **Evidence record**: plan/29-s9-1-evidence.md — capability matrix,
+  benchmark distributions, T01–T32 model-free mapping, manual site coverage
+  (Wikipedia live sessions), explicit residuals (Edge live run pending,
+  BFCache-forced expiry manual, 30min soak opt-in; none P0).
+- lib.ts gained a model-POST counter (posts.model) — non-breaking, powers
+  the no-inference-under-mutation assertion.
+- Gates ×2 green: 374 unit + 41 browser. No hot path crossed a bound — no
+  optimization needed (the plan's rule). Roadmap S9.1 checked; checkpoint →
+  S9.2.
