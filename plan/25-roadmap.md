@@ -270,7 +270,7 @@ Read: [behavior](09-behavior-and-workflows.md), algorithm A10, [security](17-sec
 
 Read: [workflow designs](09-behavior-and-workflows.md), [capability coverage](28-capability-coverage.md), ADR10/13, [performance](15-performance.md).
 
-- [ ] **S8 phase completed**
+- [x] **S8 phase completed** (S8.1–S8.4 all checked; checkpoint advanced to S9.1 in the S9.1 session — the S8 parent box was left unticked when S8.4 wrapped, now reconciled)
   - [x] **S8.1 — Implement linked list/grid/board projection** (views: list/grid/board from observed facts; local-only buckets; see notes in the task)
     - Goal/inputs: S7 actions + observed source set/field mapping + owned UI primitives.
     - Changes: stable source keys, truthful field mapping, local buckets/order, pagination, source reveal, stale item disable, accessible board interactions, explicit original-visibility approval.
