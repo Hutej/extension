@@ -105,6 +105,82 @@ export function startFixtureServer(): Promise<{ server: Server; origin: string; 
         }));
         return;
       }
+      // Glassmorphism branch: the EXACT field-failing shape (owner report,
+      // 2026-09-13) — a `background` SHORTHAND in rule 0 that a later rule on
+      // the SAME element overrides at background-color (the net-cascade
+      // class), plus -webkit-backdrop-filter declarations (Chromium returns
+      // EMPTY for the prefixed computed name and never applies it — the
+      // compiler normalizes the alias to the standard property).
+      if (/glassmorphism/i.test(evidenceText)) {
+        const panelMatch = evidenceText.match(/^ {2}(t\d+) \| main\b/m);
+        const navMatch = evidenceText.match(/^ {2}(t\d+) \| nav\b/m);
+        const glassContent = JSON.stringify({
+          kind: 'proposal',
+          schemaVersion: 1,
+          summary: 'Transform this into glassmorphism',
+          operations: [
+            {
+              kind: 'style',
+              rules: [
+                {
+                  target: { targetRef: panelMatch ? panelMatch[1] : '' },
+                  surface: 'element',
+                  state: 'none',
+                  declarations: [
+                    { property: 'background', value: 'rgba(255, 255, 255, 0.1)' },
+                    { property: 'border-radius', value: '16px' },
+                    { property: 'box-shadow', value: '0 8px 32px rgba(31, 38, 135, 0.2)' },
+                  ],
+                  conditions: [],
+                },
+                {
+                  target: { targetRef: panelMatch ? panelMatch[1] : '' },
+                  surface: 'element',
+                  state: 'none',
+                  declarations: [
+                    { property: 'color', value: '#f8fafc' },
+                    { property: 'border', value: '1px solid rgba(255, 255, 255, 0.18)' },
+                    { property: '-webkit-backdrop-filter', value: 'blur(12px)' },
+                  ],
+                  conditions: [],
+                },
+                {
+                  target: { targetRef: navMatch ? navMatch[1] : '' },
+                  surface: 'element',
+                  state: 'none',
+                  declarations: [
+                    { property: 'background-color', value: 'rgba(255, 255, 255, 0.2)' },
+                    { property: 'border', value: '1px solid rgba(255, 255, 255, 0.3)' },
+                    { property: '-webkit-backdrop-filter', value: 'blur(8px)' },
+                  ],
+                  conditions: [],
+                },
+                {
+                  // A LATER rule re-declaring rule 0's background longhand on
+                  // the SAME element — the net-cascade class that false-failed
+                  // the whole batch under per-declaration checks.
+                  target: { targetRef: panelMatch ? panelMatch[1] : '' },
+                  surface: 'element',
+                  state: 'none',
+                  declarations: [
+                    { property: 'background-color', value: 'rgba(255, 255, 255, 0.35)' },
+                  ],
+                  conditions: [],
+                },
+              ],
+            },
+          ],
+        });
+        res.writeHead(200, { 'content-type': 'application/json' }).end(JSON.stringify({
+          id: 'chatcmpl-fixture-glass',
+          object: 'chat.completion',
+          created: 0,
+          model: 'fixture-model',
+          choices: [{ index: 0, message: { role: 'assistant', content: glassContent }, finish_reason: 'stop' }],
+          usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+        }));
+        return;
+      }
       // S7.1 branch: a goal asking for a shortcut gets a bindKey proposal on
       // the first observed button — the canned provider stays a stand-in for
       // the real model path; no test-only production hooks exist.

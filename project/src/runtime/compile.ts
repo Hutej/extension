@@ -269,6 +269,30 @@ function conditionsToPrelude(conditions: CssCondition[], ctx: ValuePolicyContext
 
 // ── declaration checks ───────────────────────────────────────────────────
 
+/** Bounded prefixed-alias table. Modern Chromium dropped some -webkit-
+ *  aliases from BOTH application and computed style:
+ *  getComputedStyle(el).getPropertyValue('-webkit-backdrop-filter') is
+ *  EMPTY and the prefixed property does not apply at all — a declared alias
+ *  renders nothing and verifies as a false failure (owner report,
+ *  glassmorphism). The compiler normalizes these to their standard names so
+ *  the effect lands AND verification reads a real computed form. Bounded to
+ *  KNOWN aliases only — never a speculative generic prefix strip. */
+const PROPERTY_ALIASES: Record<string, string> = {
+  '-webkit-backdrop-filter': 'backdrop-filter',
+  '-moz-backdrop-filter': 'backdrop-filter',
+  '-webkit-user-select': 'user-select',
+  '-moz-user-select': 'user-select',
+  '-webkit-mask': 'mask',
+  '-webkit-mask-image': 'mask-image',
+  '-webkit-mask-position': 'mask-position',
+  '-webkit-mask-size': 'mask-size',
+  '-webkit-mask-repeat': 'mask-repeat',
+  '-webkit-mask-origin': 'mask-origin',
+  '-webkit-mask-clip': 'mask-clip',
+};
+export const canonicalPropertyName = (property: string): string =>
+  PROPERTY_ALIASES[property.trim().toLowerCase()] ?? property;
+
 function checkDeclaration(declaration: StyleDeclaration, path: string, ctx: ValuePolicyContext): { highImpact: HighImpactRisk | undefined } {
   const prop = csstree.property(declaration.property).name.toLowerCase();
   if (prop === 'all') {
@@ -358,9 +382,10 @@ export function compileStyleOperation(input: CompileStyleInput): CompileStyleRes
           keyframeNames: namespacedKeyframes,
           declaredKeyframes,
         };
-        checkDeclaration(declaration, ctx.path, ctx);
+        const kfDecl = { ...declaration, property: canonicalPropertyName(declaration.property) };
+        checkDeclaration(kfDecl, ctx.path, ctx);
         declarationCount += 1;
-        decls.push(`${declaration.property}: ${declaration.value};`);
+        decls.push(`${kfDecl.property}: ${kfDecl.value};`);
       }
       frames.push(`${frame.at} { ${decls.join(' ')} }`);
     }
@@ -386,8 +411,9 @@ export function compileStyleOperation(input: CompileStyleInput): CompileStyleRes
         keyframeNames: namespacedKeyframes,
         declaredKeyframes,
       };
+      const declaration2 = { ...declaration, property: canonicalPropertyName(declaration.property) };
       // content only on generated decorative surfaces (plan/08 §2).
-      const prop = csstree.property(declaration.property).name.toLowerCase();
+      const prop = csstree.property(declaration2.property).name.toLowerCase();
       if (prop === 'content' && rule.surface === 'element') {
         diagnostics.push({ path, code: 'policy', message: '"content" is only valid on generated ::before/::after surfaces' });
         continue;
@@ -395,7 +421,7 @@ export function compileStyleOperation(input: CompileStyleInput): CompileStyleRes
       const value = /^animation(-name)?$/.test(prop)
         ? rewriteKeyframeIdentsInText(declaration.value, declaredKeyframes, namespacedNameOf)
         : declaration.value;
-      const { highImpact: risk } = checkDeclaration({ ...declaration, value }, path, ctx);
+      const { highImpact: risk } = checkDeclaration({ ...declaration2, value }, path, ctx);
       if (risk) highImpact.push({ property: prop, value, targetRef: rule.target.targetRef ?? rule.target.localRef ?? '', risk });
       // plan/08 §92: "priority normal or important, default important for
       // intentional override" — a style operation IS an intentional override,
@@ -404,7 +430,7 @@ export function compileStyleOperation(input: CompileStyleInput): CompileStyleRes
       // never-important policy above.
       const important = declaration.priority === 'normal' ? '' : ' !important';
       declarationCount += 1;
-      decls.push(`${declaration.property}: ${value}${important};`);
+      decls.push(`${declaration2.property}: ${value}${important};`);
     }
     if (decls.length === 0) continue;
     const prelude = conditionsToPrelude(rule.conditions, { path: `rules[${ri}]`, diagnostics, observedSafeVars, keyframeNames: namespacedKeyframes, declaredKeyframes });

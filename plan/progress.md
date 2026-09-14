@@ -1004,3 +1004,44 @@ Hardening kept:
 - The My changes list shows the honest per-customization live state
   (applied/disabled/suspended/out-of-scope/paused + detail), so any
   non-restore is explained in the UI, never silent.
+
+## 2026-09-14 — glassmorphism verification: aliases + net-cascade (owner report)
+
+Owner: "Transform this into glasmorphism" on Wikipedia reverted with
+effect fails on `background` and `-webkit-backdrop-filter` ×2. Root causes
+(both verified against real Chromium):
+
+1. **Dead prefixed aliases**: Chromium no longer applies
+   `-webkit-backdrop-filter` NOR exposes it in computed style
+   (getPropertyValue returns EMPTY). The model's declaration rendered
+   nothing AND verified as a guaranteed false failure (canonical falls back
+   to the declared text; the target computes ''). Fix: bounded alias table
+   (compile.ts `canonicalPropertyName`: backdrop-filter, user-select, mask
+   family) normalizes rules + keyframes to the standard property — the
+   effect actually LANDS and verification reads a real computed form.
+2. **Intra-batch overrides**: a later rule re-declaring a longhand an
+   earlier rule's shorthand set (rule0 `background`, rule2
+   `background-color` on the same element) made the earlier declaration's
+   check unsatisfiable — the cascade result IS the later value. Fix: effect
+   checks are now the NET final effect per element+pseudo+longhand
+   (transaction builds net winners with shorthand provenance; verify.ts
+   canonicalizes through the shorthand probe at the longhand's index).
+   The combined-revision `excluded` map is longhand-aware in both
+   directions (a new batch's longhand/shorthand properly suppresses the
+   affected old-revision sample).
+3. **Probe-unmeasurable classes audited and disclosed** (never false-fail):
+   box-relative values (%/auto/fit-content on width/height/insets/margins/
+   paddings/flex-basis — the probe is a CHILD of the target, so its
+   containing block can never reproduce the target's resolution; absolute/
+   em/rem/vh/vw still fully verified) and animation/animation-name (the
+   compiler namespaces keyframe idents by design). Same disclosed-unmeasured
+   convention as custom properties.
+
+Tests: compile unit (alias emits the standard property, dead alias never
+reaches the page), verify units (per-longhand shorthand checks; normalized
+backdrop-filter passes), browser E2E on v2-glassmorphism.html with the
+canned provider answering the EXACT field-failing shape (background
+shorthand + same-element longhand override + -webkit-backdrop-filter ×2) —
+applies, saves, blur actually renders (backdrop-filter: blur(12px)),
+net background-color holds, the shorthand's other longhands hold.
+Gates ×2 green: 374 unit + 41 browser.

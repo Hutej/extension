@@ -340,6 +340,19 @@ test('T13/owner: a transient fail (mid-transition read) is rescued by the one re
   assert.equal(report2.issues[0].key, 'effect:style:op0:decl:color');
 });
 
+test('T13/owner: a normalized alias property (backdrop-filter) verifies through its real computed form', async () => {
+  const w = makeWorld();
+  const h = el('h1');
+  w.doc.appendChild(h);
+  w.styles.set(h, 'backdrop-filter', 'blur(10px)');
+  const captured = w.verifier.captureBaseline(basePlan());
+  assert.ok(captured.ok);
+  const report = await w.verifier.verify(basePlan({
+    styles: [{ key: 'effect:style:op0:rule0:decl0:backdrop-filter', el: h as unknown as Element, property: 'backdrop-filter', value: 'blur(10px)' }],
+  }), captured.baseline);
+  assert.equal(report.status, 'pass', JSON.stringify(report.issues));
+});
+
 // ── T30: combined revision verification ──────────────────────────────────
 
 test('T30: combined samples verify the whole composition — held effects must keep holding; pre-existing breakage is exempt and disclosed', async () => {
@@ -471,16 +484,25 @@ test('T13/owner: a shorthand declaration verifies through its longhands — comp
   }
   const captured = w.verifier.captureBaseline(basePlan({ }));
   assert.ok(captured.ok);
+  // The transaction emits ONE check per longhand of the declared shorthand,
+  // carrying the shorthand provenance (net-cascade verification).
+  const borderChecks = (property: string) => [
+    { key: `effect:style:op0:rule0:decl1:${property}`, el: h as unknown as Element, property, value: '2px solid red', shorthand: 'border' },
+  ];
   const report = await w.verifier.verify(basePlan({
-    styles: [{ key: 'effect:style:op0:rule0:decl1:border', el: h as unknown as Element, property: 'border', value: '2px solid red' }],
+    styles: [
+      ...borderChecks('border-top-width'), ...borderChecks('border-top-style'),
+      ...borderChecks('border-top-color'), ...borderChecks('border-right-width'),
+      ...borderChecks('border-bottom-color'), ...borderChecks('border-left-color'),
+    ],
   }), captured.baseline);
   assert.equal(report.status, 'pass', JSON.stringify(report.issues));
 
-  // One longhand failing to hold → the shorthand effect fails honestly.
+  // One longhand failing to hold → THAT longhand's check fails honestly.
   w.styles.set(h, 'border-top-color', 'rgb(0, 0, 255)');
   const report2 = await w.verifier.verify(basePlan({
-    styles: [{ key: 'effect:style:op0:rule0:decl1:border', el: h as unknown as Element, property: 'border', value: '2px solid red' }],
+    styles: borderChecks('border-top-color'),
   }), captured.baseline);
   assert.equal(report2.status, 'fail', 'a single failed longhand is a failed shorthand effect');
-  assert.match(report2.issues[0].detail!, /longhands/);
+  assert.match(report2.issues[0].detail!, /border → border-top-color|does not hold/);
 });

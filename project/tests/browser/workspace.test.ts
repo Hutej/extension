@@ -362,6 +362,45 @@ test('S5.2/owner: after a real apply, the My-changes toggle off then on restores
   await ws.waitForTimeout(600);
 });
 
+test('§92/owner E2E: a glassmorphism plan (background shorthand + intra-batch longhand override + -webkit-backdrop-filter) applies and verifies', async () => {
+  const target = await openFixture('v2-glassmorphism.html');
+  await target.bringToFront();
+  const ws = await openWorkspace();
+  await injectSettings(ws);
+  await ws.reload({ waitUntil: 'load' });
+  await target.bringToFront();
+  await waitForChip(ws, /Working on: v2 glassmorphism fixture/);
+
+  // The user's exact goal and the field-failing declaration shape.
+  await ws.locator('#rv-goal').pressSequentially('transform this into glassmorphism');
+  await ws.getByRole('button', { name: 'Send' }).click();
+  await waitForStatus(ws, /Review the proposed changes below/);
+  await ws.getByRole('button', { name: 'Apply' }).click();
+  await waitForStatus(ws, /Applied and saved\./);
+
+  const panel = await target.evaluate(() => {
+    const el = document.getElementById('panel')!;
+    const cs = getComputedStyle(el);
+    return {
+      backdrop: cs.getPropertyValue('backdrop-filter'),
+      bg: cs.getPropertyValue('background-color'),
+      radius: cs.getPropertyValue('border-radius'),
+      color: cs.getPropertyValue('color'),
+    };
+  });
+  const navBackdrop = await target.evaluate(() => getComputedStyle(document.getElementById('nav')!).getPropertyValue('backdrop-filter'));
+  // The -webkit- alias is normalized at compile: the blur ACTUALLY applies.
+  assert.equal(panel.backdrop, 'blur(12px)', 'the prefixed alias rendered through the standard property');
+  assert.equal(navBackdrop, 'blur(8px)');
+  // The NET cascade result: the later background-color rule won; the rest of
+  // rule 0's background shorthand still holds (image none from the shorthand).
+  assert.equal(panel.bg, 'rgba(255, 255, 255, 0.35)', 'the intra-batch override verifies as the net effect');
+  assert.equal(panel.radius, '16px');
+  assert.equal(panel.color, 'rgb(248, 250, 252)');
+  const bgImage = await target.evaluate(() => getComputedStyle(document.getElementById('panel')!).getPropertyValue('background-image'));
+  assert.equal(bgImage, 'none', "rule 0's background shorthand still resets the image longhand");
+});
+
 test('§92 E2E: a neubrutalism plan with omitted priority (the field-failing shape) applies on a page with the site\'s own base styles', async () => {
   const target = await openFixture('v2-neubrutalism.html');
   await target.bringToFront();

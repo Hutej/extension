@@ -43,6 +43,8 @@ import {
   type HighImpactRisk,
 } from './compile.ts';
 import type { Verifier, VerificationReport, VerifyPlan } from './verify.ts';
+import { SHORTHAND_LONGHANDS } from './verify.ts';
+import { canonicalPropertyName } from './compile.ts';
 import type { ProjectionHandle, ProjectionSpec } from './projection.ts';
 import type { ContentCreator } from './content.ts';
 import type { ResolvedTargetRegistry } from './targets.ts';
@@ -1022,30 +1024,72 @@ export function createTransaction(deps: TransactionDeps): Transaction {
     }
 
     // ── S4.3 verification plan: delivery/effect/integrity/combined scope ──
+    // NET effect checks (owner report, glassmorphism): a later rule on the
+    // same element+pseudo legitimately overrides an earlier rule's longhand
+    // (e.g. `background` in rule 0, `background-color` again in rule 2) — the
+    // cascade result is the later value, so per-declaration checks were
+    // unsatisfiable and false-reverted the batch. Verification therefore
+    // rides the NET final effect per element+longhand: the winning
+    // declaration's value, canonicalized through its shorthand when it was
+    // declared as one. Prefixed aliases are normalized to the standard
+    // property (Chromium returns EMPTY for computed -webkit-backdrop-filter
+    // and never applies it).
     const styleChecks: VerifyPlan['styles'] = [];
     let unmeasured = 0;
     const candidateDecls: RevisionRecord['decls'] = [];
+
+    /** Probe-unmeasurable declarations (owner: never false-fail approved
+     *  work; disclose honestly instead — the same convention as custom
+     *  properties):
+     *  - Box-relative values (%/auto/fit-content/…) on geometry properties
+     *    resolve against the CONTAINING BLOCK; the owned probe is a CHILD of
+     *    the target, so its containing block IS the target — the target's
+     *    own resolution can never be reproduced there. Absolute/em/rem/vh/vw
+     *    forms resolve identically and stay fully verified.
+     *  - animation/animation-name: the compiler namespaces keyframe idents
+     *    by design, so the computed name is structurally different from the
+     *    declared one; the keyframes block delivery is structural. */
+    const BOX_RELATIVE = new Set(['width', 'height', 'min-width', 'min-height', 'max-width', 'max-height', 'top', 'right', 'bottom', 'left', 'flex-basis', 'padding-top', 'padding-right', 'padding-bottom', 'padding-left', 'margin-top', 'margin-right', 'margin-bottom', 'margin-left']);
+    const PROBE_UNRESOLVABLE = /%|auto|fit-content|min-content|max-content|stretch/i;
+    const isProbeUnmeasurable = (property: string, value: string): boolean =>
+      property === 'animation' || property === 'animation-name'
+        ? true
+        : BOX_RELATIVE.has(property) && PROBE_UNRESOLVABLE.test(value);
+    const net = new Map<Element, Map<string, Map<string, { key: string; value: string; shorthand?: string }>>>();
     for (const [i, op] of styleOps.entries()) {
       for (const [ri, rule] of op.rules.entries()) {
         const ruleEl = styleRuleEls[i]?.[ri];
         if (!ruleEl) continue;
-        const pseudo = rule.surface === 'before' ? '::before' as const : rule.surface === 'after' ? '::after' as const : undefined;
+        const pseudo = rule.surface === 'before' ? '::before' as const : rule.surface === 'after' ? '::after' as const : '';
         for (const [k, d] of rule.declarations.entries()) {
           if (d.property.startsWith('--')) { unmeasured += 1; continue; }
-          if (styleChecks.length < 32) {
-            styleChecks.push({ key: `effect:style:op${i}:rule${ri}:decl${k}:${d.property}`, el: ruleEl, property: d.property, value: d.value, ...(pseudo ? { pseudo } : {}) });
-          } else {
-            unmeasured += 1;
+          const property = canonicalPropertyName(d.property);
+          if (isProbeUnmeasurable(property, d.value)) { unmeasured += 1; continue; }
+          const longhands = SHORTHAND_LONGHANDS[property];
+          const perEl = net.get(ruleEl) ?? new Map();
+          net.set(ruleEl, perEl);
+          const perPseudo = perEl.get(pseudo) ?? new Map();
+          perEl.set(pseudo, perPseudo);
+          for (const lh of longhands ?? [property]) {
+            perPseudo.set(lh, { key: `effect:style:op${i}:rule${ri}:decl${k}:${lh}`, value: d.value, ...(longhands !== undefined ? { shorthand: property } : {}) });
           }
-          if (candidateDecls.length < 16) candidateDecls.push({ el: ruleEl, property: d.property, value: d.value });
+          if (candidateDecls.length < 16) candidateDecls.push({ el: ruleEl, property, value: d.value });
         }
       }
       for (const kf of op.keyframes ?? []) for (const f of kf.frames) unmeasured += f.declarations.length;
     }
+    for (const [el, perEl] of net) {
+      for (const [pseudo, perPseudo] of perEl) {
+        for (const [lh, winner] of perPseudo) {
+          if (styleChecks.length >= 32) { unmeasured += 1; continue; }
+          styleChecks.push({ key: winner.key, el, property: lh, value: winner.value, ...(winner.shorthand !== undefined ? { shorthand: winner.shorthand } : {}), ...(pseudo !== '' ? { pseudo: pseudo as '::before' | '::after' } : {}) });
+        }
+      }
+    }
     const excluded = new Map<Element, Set<string>>();
     for (const d of candidateDecls) {
       const set = excluded.get(d.el) ?? new Set<string>();
-      set.add(d.property);
+      for (const lh of SHORTHAND_LONGHANDS[d.property] ?? [d.property]) set.add(lh);
       excluded.set(d.el, set);
     }
     const combined: VerifyPlan['combined'] = [];
@@ -1055,7 +1099,11 @@ export function createTransaction(deps: TransactionDeps): Transaction {
         customizationId: cid,
         revisionId: rev.revisionId,
         checks: rev.decls
-          .filter((d) => !excluded.get(d.el)?.has(d.property))
+          .filter((d) => {
+            const owned = excluded.get(d.el);
+            if (!owned) return true;
+            return !(SHORTHAND_LONGHANDS[d.property] ?? [d.property]).some((lh) => owned.has(lh));
+          })
           .slice(0, 4)
           .map((d, j) => ({ key: `combined:${cid}:${j}:${d.property}`, el: d.el, property: d.property, value: d.value })),
         texts: rev.texts.filter((t) => !newClaims.has(t.node)).slice(0, 4).map((t, j) => ({ key: `combined:${cid}:text:${j}`, node: t.node, installed: t.installed })),

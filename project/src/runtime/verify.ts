@@ -71,8 +71,15 @@ export interface VerificationReport {
 export interface StyleEffectCheck {
   key: string;
   el: Element;
+  /** Always a LONGHAND (or plain property) — the transaction builds the NET
+   *  final effect per element+longhand so intra-batch overrides (a later
+   *  rule re-declaring a longhand the earlier rule's shorthand set) verify
+   *  the cascade result, not an unsatisfiable earlier declaration. */
   property: string;
   value: string;
+  /** Present when `value` was declared as this shorthand and `property` is
+   *  one of its longhands — canonicalization rides the shorthand probe. */
+  shorthand?: string;
   pseudo?: '::before' | '::after';
 }
 
@@ -188,7 +195,7 @@ export const MAX_ISSUES = 32;
 /** Bounded shorthand → longhand table for the effect check: computed
  *  shorthands have no single value form, so their declared effect verifies
  *  through every longhand the shorthand sets (browser-resolved). */
-const SHORTHAND_LONGHANDS: Record<string, string[]> = {
+export const SHORTHAND_LONGHANDS: Record<string, string[]> = {
   border: ['border-top-width', 'border-top-style', 'border-top-color', 'border-right-width', 'border-right-style', 'border-right-color', 'border-bottom-width', 'border-bottom-style', 'border-bottom-color', 'border-left-width', 'border-left-style', 'border-left-color'],
   'border-width': ['border-top-width', 'border-right-width', 'border-bottom-width', 'border-left-width'],
   'border-style': ['border-top-style', 'border-right-style', 'border-bottom-style', 'border-left-style'],
@@ -361,17 +368,20 @@ export function createVerifier(deps: VerifierDeps): Verifier {
         outcomes.push({ key: c.key, section: 'effect', status: 'unknown', detail: 'computed style unavailable' });
         continue;
       }
-      const longhands = SHORTHAND_LONGHANDS[c.property];
-      if (longhands !== undefined) {
-        // Shorthand: no single computed form — every longhand the shorthand
-        // sets must hold the browser-resolved declared effect.
-        const canonicals = deps.canonicalAllOf(c.value, c.property, longhands, c.el);
-        const hold = longhands.every((lh, i) => valueMatches(computed.getPropertyValue(lh), canonicals[i] ?? ''));
+      if (c.shorthand !== undefined && SHORTHAND_LONGHANDS[c.shorthand] !== undefined) {
+        // A longhand of a declared shorthand: no single computed form for the
+        // shorthand — canonicalize through the shorthand probe and compare
+        // THIS longhand's computed value at its index.
+        const longhands = SHORTHAND_LONGHANDS[c.shorthand];
+        const canonicals = deps.canonicalAllOf(c.value, c.shorthand, longhands, c.el);
+        const idx = longhands.indexOf(c.property);
+        const actualLh = computed.getPropertyValue(c.property);
+        const hold = valueMatches(actualLh, canonicals[idx] ?? '');
         outcomes.push({
           key: c.key,
           section: 'effect',
           status: hold ? 'pass' : 'fail',
-          ...(hold ? {} : { detail: `computed longhands [${longhands.map((lh) => `${lh}=${(computed.getPropertyValue(lh) ?? '').trim()}`).join(', ')}] do not hold the declared "${c.value.trim()}"` }),
+          ...(hold ? {} : { detail: `computed "${(actualLh ?? '').trim()}" does not hold the declared "${c.value.trim()}" (${c.shorthand} → ${c.property})` }),
         });
         continue;
       }

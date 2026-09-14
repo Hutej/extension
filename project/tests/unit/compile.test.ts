@@ -9,7 +9,7 @@
 
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { compileStyleOperation, compileInsertUi, selectorForRule } from '../../src/runtime/compile.ts';
+import { compileStyleOperation, compileInsertUi, selectorForRule, canonicalPropertyName } from '../../src/runtime/compile.ts';
 import type { StyleOperation, InsertUiOperation } from '../../src/contracts.ts';
 
 const resolveToken = (t: { targetRef?: string; localRef?: string }): { ok: true; token: string } | { ok: false; detail: string } =>
@@ -360,4 +360,26 @@ test('T31: structural nesting is validated — the browser never repairs silentl
   const badRow = compileInsertUi(insertOp([{ tag: 'tr', children: [{ tag: 'div' }] }]));
   assert.ok(!badRow.ok);
   if (!badRow.ok) assert.match(badRow.diagnostics[0].message, /th\/td/);
+});
+
+// ── owner: prefixed-alias normalization (glassmorphism, 2026-09-13) ──────
+
+test('§92/owner: -webkit-backdrop-filter compiles to the standard property — Chromium ignores the prefixed form', () => {
+  assert.equal(canonicalPropertyName('-webkit-backdrop-filter'), 'backdrop-filter');
+  assert.equal(canonicalPropertyName('-Webkit-Backdrop-Filter'), 'backdrop-filter');
+  assert.equal(canonicalPropertyName('-webkit-user-select'), 'user-select');
+  assert.equal(canonicalPropertyName('background-color'), 'background-color');
+  const operation: StyleOperation = {
+    kind: 'style',
+    rules: [{
+      target: { targetRef: 't1' }, surface: 'element', state: 'none',
+      conditions: [],
+      declarations: [{ property: '-webkit-backdrop-filter', value: 'blur(10px)' }],
+    }],
+  };
+  const compiled = compileStyleOperation({ operation, namespace: 'rv2.inst.cust.rev.g.doc', resolveToken, observedSafeVars: new Set<string>() });
+  assert.ok(compiled.ok, JSON.stringify((compiled as { diagnostics?: unknown }).diagnostics ?? compiled));
+  assert.ok('sheet' in compiled);
+  assert.match(compiled.sheet.css, /backdrop-filter: blur\(10px\)/, 'the emitted sheet carries the STANDARD property');
+  assert.ok(!compiled.sheet.css.includes('-webkit-backdrop-filter'), 'the dead alias never reaches the page');
 });

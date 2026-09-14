@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>v2 glassmorphism fixture</title>
+  <style>
+    /* The site's OWN base styles — the runtime's intentional overrides must
+       win (§92 default important), and the glassmorphism properties must
+       survive verification through their standard computed forms. */
+    body { background: linear-gradient(135deg, #667eea, #764ba2); margin: 0; }
+    .panel { background: #334155; padding: 24px; border-radius: 4px; }
+    .card { background: #1e293b; padding: 16px; margin-top: 12px; }
+  </style>
+</head>
+<body>
+  <h1>Glassmorphism target</h1>
+  <main class="panel" id="panel">
+    <p>The panel carries the site's own solid background.</p>
+    <div class="card" id="card">
+      <p>A card inside the panel.</p>
+    </div>
+  </main>
+  <nav id="nav"><a href="#">Site nav</a></nav>
+</body>
+</html>
