@@ -16,7 +16,6 @@
     "test:stress": "node --test --test-concurrency=1 --experimental-strip-types tests/stress/stress.test.ts"
   },
   "devDependencies": {
-    "@playwright/test": "^1.62.1",
     "@types/chrome": "^0.2.2",
     "@types/css-tree": "3.2.0",
     "@typescript-eslint/eslint-plugin": "^8.65.0",

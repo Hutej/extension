@@ -34,7 +34,6 @@ export const MAX_VISITED_NODES = 2_000;
 export const MAX_REGIONS = 60;
 export const MAX_EVIDENCE_BYTES = 12 * 1024;
 export const OBSERVATION_TIME_BUDGET_MS = 100;
-export const SLICE_MS = 4;
 export const MAX_TEXT_SAMPLE_CHARS = 80;
 export const CURSOR_TTL_MS = 30_000; // plan/04 §2
 

@@ -614,7 +614,3 @@ export function createReplay(deps: ReplayDeps): ReplayCore {
     },
   };
 }
-
-/** Convenience: a registry for replay target registration (re-exports the
- *  real factory so unit tests can build the exact production shape). */
-export const createReplayTargetRegistry = createTargetRegistry;

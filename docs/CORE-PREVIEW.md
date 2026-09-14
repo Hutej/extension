@@ -1,78 +1,74 @@
 # Revueon — core preview release notes
 
-**Status after the S6.3 cutover (plan/19 §6).** One v2 runtime and the
-canonical provider/store/target paths exist; the legacy agent loop, tool
-registry, popup and their live paths are **deleted**. This is a preview of
-the core product, not the full vision: the unavailable capabilities below
-are honestly absent, not stubbed or advertised (plan/28 is the capability
-authority).
+**Status after S9.2 (the release checkpoint of plan/25).** One v2 runtime and
+the canonical provider/store/target paths exist; the legacy agent loop, tool
+registry, popup and their live paths are **deleted** (S6.3, plan/19 §6). This
+note lists the implemented capability set and the honestly absent remainder.
+`plan/28` is the capability authority; `plan/29-s9-1-evidence.md` is the
+qualification record (measured matrices, Chromium-120 floor, residuals).
 
-## What works in this preview
+## What works in this release
 
 - **Shared workspace** (side panel + extension tab — the same page): pin the
   exact target page, write a goal, Start/Stop at any time, answer planner
   questions, approve or discard proposals, pick the saved scope, watch
-  truthful status with no false success.
-- **Provider independence** (S6.1): OpenAI-chat and Anthropic-messages
-  adapters over a bounded client (deadline, ≤6 attempts, byte cap, redirect
-  and credential policy, exactly-one-object extraction). Any compatible
-  endpoint/model via workspace profiles — explicit, endpoint-scoped consent
-  and a real opt-out that keeps saved customizations working with zero calls.
+  truthful status with no false success. Stop is always available and never
+  a dead-end; provisional effects are disarmed on stop/failure while
+  accepted prior work survives.
+- **Providers** (S6.1 + built-in): OpenAI-chat and Anthropic-messages
+  adapters, plus the built-in Cloudflare model (consent-gated, ephemeral
+  token in the visible workspace). Bounded client: deadline, ≤6 attempts
+  with backoff + Retry-After on 429/408/5xx, byte cap, redirect and
+  credential-in-URL refusal, exactly-one-object extraction. Any compatible
+  endpoint/model via profiles — endpoint-scoped consent and a real opt-out
+  that keeps saved customizations working with zero calls.
 - **One reversible batch per proposal** (S4): validated style/hide/collapse/
   float/replaceText/insertUI/relocate operations through one transaction
   with mandatory structured verification — accepted, rolled back or
-  conflicted, never partially "done".
+  conflicted, never partially "done". Each rule is membership-scoped to its
+  own target (§44) with omitted priority defaulting to `!important` (§92).
+- **Verification honesty** (S9 readiness work): delivery + declared
+  postconditions + T30 combined checks on the settled measurement; transient
+  CSS transitions are re-measured once before any revert; probe-unmeasurable
+  classes are disclosed, never false-failed; net per-longhand cascade is the
+  verified effect (intra-batch overrides included).
 - **Persistence and continuity** (S5): versioned origin records with
   scope-aware replay, enable/disable/remove/undo-latest-revision, route-epoch
-  fencing, worker-restart reconciliation, quota/tombstone protection.
+  fencing, worker-restart reconciliation, quota/tombstone protection. A
+  disable releases live effects even when the saved descriptor went missing.
+- **Local behavior** (S7): approved keyboard bindings (`bindKey`) over a
+  finite action catalog with reserved-chord/IME/password/modal/repeat
+  policies and measured install; target-appeared collapse rules (`localRule`)
+  through the site's own disclosure with sticky user-override.
+- **Views and layout** (S8): linked list/grid/board projection
+  (`projectCollection`) from observed facts with local-only buckets;
+  floating existing surfaces (`float`) with a runtime-owned minimize
+  control; gated same-node relocation (`relocate`, explicit
+  `structuralGrant` mandatory, protected targets refused with named
+  fallbacks); owned Canvas 2D (`scene` insert — bounded records, capped
+  pixels, accessible fallback, native page canvas untouched).
+- **Frames and roots** (S8.3): per-frame runtimes for individually
+  permissioned frames (relay targets the exact frame), root-local owned
+  style node with a narrow inline-override fallback, session-only frame
+  runs, truthful per-frame outcomes.
 - **Local-only diagnostics** (S6.2): a bounded, content-free event ring and
   a workspace diagnostic panel; legacy `rv_*` data is quarantined untouched
   and exportable, never auto-migrated or executed.
 
-## Not available in this preview (P2 — later roadmap tasks)
+## Not available in this release (honest limits, plan/28)
 
-- **Approved keyboard bindings** (`bindKey` — S7.1): a finite action catalog
-  (focus, scrollIntoView, activate, followLink, toggleDisclosure) installable
-  on observed targets with reserved-chord/plain-typing/conflict/cap checks,
-  editable/IME/password/modal/repeat policies at event time, exact listener
-  ownership, and a measured is-installed postcondition in the acceptance
-  gate. Activating a site control is approved in review and is explicitly
-  non-reversible externally (undo removes the shortcut, not the site's own
-  effect).
-- **Auto-collapse rules** (`localRule` — S7.2): a finite target-appeared
-  rule collapses newly appearing expanded instances through the site's own
-  disclosure (once per instance, sticky user-override, 500ms cooldown,
-  review-approved as consequential); the owned collapse disclosure
-  (`collapse`) is available as the manual mechanism.
-- **Linked alternative views** (`projectCollection` — S8.1): a list, grid
-  or board view of the observed items in one source container, rendered
-  from observed facts only (title/label/link/category field catalog) with
-  safe source links, stable item keys (origin-relative canonical link,
-  sensitive query parameters stripped), local-only board buckets (drag or
-  native select — the site DOM is never touched, labeled "changes your
-  local view only"), "Show original" reveal, stale/duplicate-key marking
-  with disabled key actions, ≤200 rendered items with a coverage line and
-  pagination, and an explicit review when hiding the original list
-  (`showOriginal:false`). User bucket arrangement is session state that
-  survives disable/re-enable; cross-reload persistence of the arrangement
-  is not built yet.
-- **Floating existing surfaces** (`float` — S8.2): the EXISTING surface is
-  styled fixed at one corner through the measured compiled style path
-  (responsive width/max-height/inset defaults; stacking z-index; no copies,
-  no reparent) with a runtime-owned minimize/restore control; overflow and
-  media state are measured. **Gated relocation** (`relocate` — S8.2):
-  explicit `structuralGrant:true` mandatory; script/style/iframe/media/
-  canvas/form/editor/custom-element targets refused with the float/CSS or
-  projection fallback named; the exact node moves with its listeners and
-  focus; the site's newer position is never overwritten (visible conflict);
-  two site overrides suspend relocation for the document.
-- **Owned Canvas 2D** (S8.4): no drawing capability yet.
-- **Frame-scoped runs** (P2): top documents only; frames have no separate
-  runtime/permission path yet.
-- **Import of legacy journals into reviewed drafts**: quarantined legacy data
-  stays review/export-only until the import flow is implemented and consented.
+- **Shadow-DOM internals for text/insert/bind**: document-root-refused
+  (honest unsupported; a later slice owns them). Style ops cover open roots.
+- **Cross-reload persistence of board bucket arrangement**: session state
+  that survives disable/re-enable; reload persistence is not built yet.
+- **Import of legacy journals into reviewed drafts**: quarantined legacy
+  data stays review/export-only until the import flow is implemented and
+  consented.
 - **Streaming responses and provider connection tests**: non-streaming is
-  first-class; both are deferred until a task needs them (recorded S6.1).
+  first-class; deferred until a task needs them (recorded S6.1).
+- **Live browser matrix** (S9.1 record): Chromium 120 (the manifest floor)
+  and current Chromium are live-tested; an Edge live run is pending an
+  Edge-capable environment; BFCache-forced expiry remains a manual check.
 
 ## Update notes
 

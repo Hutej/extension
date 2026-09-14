@@ -360,12 +360,3 @@ export function createPlanningController(deps: PlanningControllerDeps) {
 }
 
 export type PlanningController = ReturnType<typeof createPlanningController>;
-
-// Re-export for workspace-facing budgets (S6.2 UI counters) — keeps the
-// plan/11 §5 ceilings in one place.
-export const PLANNING_LIMITS = {
-  maxModelResponses: MAX_MODEL_RESPONSES,
-  maxEvidenceRequests: MAX_EVIDENCE_REQUESTS,
-  maxCorrections: MAX_CORRECTIONS,
-  maxOperations: LIMITS.maxOperations,
-} as const;

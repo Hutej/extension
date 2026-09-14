@@ -13,7 +13,7 @@ Read `all-about_revueon.txt`, then `plan/README.md` and `plan/00-master-blueprin
 3. Select the next unchecked task whose prerequisites passed. Read its module/data/runtime/test/acceptance contracts and inspect all source it affects.
 4. Work only within that task. If the user requests documentation-only work, do not modify implementation/config/test files.
 
-Application commands run from `project/`, not repository root. Source is `project/src/`; WXT is the existing build system. At planning baseline, typecheck passed, lint had 8 errors, and tests were absent (`npm test` ran zero unit tests then failed). Do not claim green baseline from legacy docs or existing `.output`.
+Application commands run from `project/`, not repository root. Source is `project/src/`; WXT is the existing build system. Current release state (S9.2): typecheck, lint and build pass; the default gate is 374 unit + 41 browser tests, 0 known-red; `npm run test:stress` is the isolated S9.1 stress/perf suite. Do not claim green baseline from stale sessions — verify with the commands.
 
 ## Architecture rules
 
@@ -31,7 +31,7 @@ Application commands run from `project/`, not repository root. Source is `projec
 
 ## Tests and progress
 
-Follow `plan/20-testing-strategy.md` and `plan/21-test-matrix.md`. Use actual current source and a freshly built extension; default correctness tests require no live model or private account. Existing commands: `npm run typecheck`, `npm run lint`, `npm run build`, `npm test`; foundation task must restore missing tests and make zero discovery fail. New proposed scripts are not assumed to exist before their task.
+Follow `plan/20-testing-strategy.md` and `plan/21-test-matrix.md`. Use actual current source and a freshly built extension; default correctness tests require no live model or private account. Existing commands: `npm run typecheck`, `npm run lint`, `npm run build`, `npm test` (default gate: unit + browser), `npm run test:stress` (isolated stress/perf — outside the default gate by design). The zero-discovery refusal lives in `scripts/test-gate.ts`. New proposed scripts are not assumed to exist before their task.
 
 Add a runnable regression for nontrivial changes. Run focused tests, required browser/failure/undo cases, then task regression gates. Do not remove failing assertions or mock the subsystem under test to claim success. Provider quality and runtime correctness are separate measurements.
 

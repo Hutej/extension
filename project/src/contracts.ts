@@ -259,8 +259,6 @@ function decodeTargetSpec(): Decoder<{ targetRef?: string; localRef?: string }> 
 
 // ── 3. Common records: DocumentKey, Epoch, Envelope, receipts, errors ────
 
-export const DOCUMENT_KEY_SCHEMA_VERSION = 1;
-
 export interface DocumentKey {
   tabId: number;
   frameId: number;
@@ -461,7 +459,6 @@ export const OPERATION_KINDS = [
   'style', 'hide', 'collapse', 'float', 'replaceText',
   'insertUI', 'bindKey', 'localRule', 'projectCollection', 'relocate',
 ] as const;
-export type OperationKind = (typeof OPERATION_KINDS)[number];
 
 const REASON = optional(decodeString({ max: LIMITS.maxReasonChars }));
 
@@ -983,11 +980,6 @@ const decodeLocalPredicate: Decoder<LocalPredicate> = (v, path) => {
 
 // ── Ordered-batch validation: one linear pass, no graph engine ───────────
 
-export interface BatchValidation {
-  operations: Operation[];
-  localIds: Map<string, number>; // localId → declaring operation index
-}
-
 /** Decode and validate 1..64 ordered operations. Local refs may name only
  *  nodes declared by an EARLIER insertUI in the same batch; duplicate local
  *  IDs are rejected; nested groups/DAG fields are unknown fields and already
@@ -1476,7 +1468,6 @@ export const decodeRouteScope: Decoder<RouteScope> = (v, path = 'scope') => {
 };
 
 export type ContinuityPolicy = 'session-instance' | 'stable-single' | 'future-set';
-export type Stability = 'session-only' | 'stable-anchor' | 'set-template' | 'ambiguous';
 
 export interface TargetDescriptor {
   descriptorVersion: 1;

@@ -187,7 +187,6 @@ export interface VerifierDeps {
 // ── bounds ───────────────────────────────────────────────────────────────
 
 export const MAX_BASELINE_ELS = 48;
-export const MAX_COMBINED_CHECKS_PER_REVISION = 4;
 export const MAX_ISSUES = 32;
 
 // ── helpers ──────────────────────────────────────────────────────────────

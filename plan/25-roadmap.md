@@ -4,8 +4,8 @@
 
 ## Current checkpoint
 
-- Current phase: **S9 — release qualification and final deletion**.
-- Next task: **S9.2** (S9.1 complete — evidence in [29-s9-1-evidence.md](29-s9-1-evidence.md)).
+- **Released.** All phases S0–S9 complete (evidence per phase above; S9 record in [29-s9-1-evidence.md](29-s9-1-evidence.md)).
+- Future work enters via ADR + new task IDs (no silent drift): the honest-absent list in [docs/CORE-PREVIEW.md](../docs/CORE-PREVIEW.md) — shadow-DOM text/insert/bind internals, cross-reload board persistence, legacy-journal import flow, streaming/connection tests, Edge live run, BFCache manual check.
 
 ## User-directed UX rework (2026-09-13, between S8.3 and S8.4)
 
@@ -316,7 +316,7 @@ Read: [workflow designs](09-behavior-and-workflows.md), [capability coverage](28
 
 Read: [tests](20-testing-strategy.md), [matrix](21-test-matrix.md), [acceptance](22-acceptance-criteria.md), [deletion](19-migration-and-deletion.md).
 
-- [ ] **S9 phase completed**
+- [x] **S9 phase completed**
   - [x] **S9.1 — Measure stress, compatibility, performance and product quality**
     - Goal/inputs: complete core/P2 capabilities with all focused evidence.
     - Changes: finish min/current Chrome/Edge capability tests for S8.3 frame/root runtimes, zoom/BFCache/shadow fallback, storm/soak/perf; optimize only measured hot paths, record manual site coverage.
@@ -326,14 +326,14 @@ Read: [tests](20-testing-strategy.md), [matrix](21-test-matrix.md), [acceptance]
     - [x] Validation: AC01–12 and release metrics, no zero/unknown-as-pass; security review complete. (gates ×2 green every run: 374 unit + 41 browser, 0 known-red; live Chromium-120 floor smoke 5/5; security surfaces green in-gate)
     - [x] Completion: no open P0; residual limitations explicit, manual checks evidenced; S9.1 record. ([29-s9-1-evidence.md](29-s9-1-evidence.md); residuals: Edge live run, BFCache-forced expiry, 30min soak opt-in — none P0)
     - Follow-up: final release cleanup.
-  - [ ] **S9.2 — Finish deletion ledger, documentation and release checkpoint**
+  - [x] **S9.2 — Finish deletion ledger, documentation and release checkpoint**
     - Goal/inputs: S9.1, all migration rows, source import graph.
     - Changes: delete remaining dead classifiers/serializers/stubs/audit compatibility code, consolidate dependencies only with actual evidence; update current architecture facts and agent rules.
     - Outputs: no orphan legacy execution concepts; release-ready repository and complete progress ledger.
     - Invariants: I27/I28; don't delete useful tested primitives merely for file count.
-    - [ ] Tests: full deterministic suite/type/lint/build/import/link checks after deletions; smoke released package.
-    - [ ] Validation: every requirement traced to implemented/tested capability or explicit release limitation; exact rollback/storage compatibility documented.
-    - [ ] Completion: all parent phases checked with evidence; current checkpoint changed to released/future backlog, not empty “done.”
+    - [x] Tests: full deterministic suite/type/lint/build/import/link checks after deletions; smoke released package. (post-deletion: typecheck ✓ lint ✓ build+import-audit ✓ gates 374 unit + 41 browser, 0 known-red ✓ stress 6/6 ✓; the browser gate drives the freshly BUILT artifact — the package smoke)
+    - [x] Validation: every requirement traced to implemented/tested capability or explicit release limitation; exact rollback/storage compatibility documented. (T-matrix in [29-s9-1-evidence.md](29-s9-1-evidence.md); storage/rollback in [19-migration-and-deletion.md](19-migration-and-deletion.md) §5–§6; release note [docs/CORE-PREVIEW.md](../docs/CORE-PREVIEW.md) lists implemented vs honestly-absent)
+    - [x] Completion: all parent phases checked with evidence; current checkpoint changed to released/future backlog, not empty “done.” (S0–S9 all phase-completed; final sweep: 8 dead exports deleted — DOCUMENT_KEY_SCHEMA_VERSION, OperationKind, BatchValidation, Stability, PLANNING_LIMITS, MAX_COMBINED_CHECKS_PER_REVISION, createReplayTargetRegistry, SLICE_MS — each verified zero refs repo-wide; unused @playwright/test direct dep dropped with import evidence; docs/CORE-PREVIEW.md rewritten to release state; AGENTS.md baseline facts updated)
     - Follow-up: future adapters/features via ADR and new task IDs, no silent drift.
 
 ## Progress update rules

@@ -1070,3 +1070,33 @@ S8 was already complete (S8.1–S8.4 checked); moved to S9.1 per the checkpoint.
 - Gates ×2 green: 374 unit + 41 browser. No hot path crossed a bound — no
   optimization needed (the plan's rule). Roadmap S9.1 checked; checkpoint →
   S9.2.
+
+## 2026-09-14 — S9.2 complete: final deletion sweep, docs, release checkpoint
+
+The roadmap is fully complete: **S0–S9 all checked; checkpoint = released.**
+
+- **Deletion sweep** (evidence-based, per the "zero refs repo-wide" rule):
+  8 truly-dead exports deleted — contracts.ts `DOCUMENT_KEY_SCHEMA_VERSION`,
+  `OperationKind`, `BatchValidation`, `Stability`; controller.ts
+  `PLANNING_LIMITS` (an unused re-export alias); verify.ts
+  `MAX_COMBINED_CHECKS_PER_REVISION`; replay.ts `createReplayTargetRegistry`
+  (a never-called re-export); observe.ts `SLICE_MS`. Each verified to appear
+  exactly once (its declaration) across src+tests+scripts before cutting.
+  139 other flagged exports are used internally or are type-contract
+  surface — kept per I28 (no deletion for file count). No stubs, shims or
+  audit-compat code remain (the two "stub" grep hits are test-seam comments).
+- **Dependency consolidation with evidence**: `@playwright/test` was imported
+  NOWHERE (all 4 test files import bare `playwright`); dropped from
+  devDependencies. All remaining devDeps verified in use (eslint pair by
+  eslint.config, axe-core by browser suite path, wxt/typescript/css-tree by
+  build).
+- **Docs**: docs/CORE-PREVIEW.md was stale (advertised bindKey/localRule/
+  projectCollection/float/relocate/canvas as absent — all implemented in
+  S7/S8); rewritten to the release state with the honest-absent list.
+  AGENTS.md baseline facts updated (green-gate current state, the stress
+  script, the gate's zero-discovery home). Legacy doc pointers verified
+  current.
+- **Release gates on the post-deletion source**: typecheck ✓ lint ✓
+  build+import-audit ✓ 374 unit + 41 browser (0 known-red) ✓ stress 6/6 ✓.
+- Rollback/storage compatibility: unchanged from the S6.3 record
+  (plan/19 §5–§6 — quarantined legacy data, no downgrade writes).
